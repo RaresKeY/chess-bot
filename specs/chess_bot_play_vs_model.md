@@ -46,7 +46,7 @@ API payload (move):
 - Move history + snapshot navigation (`|<`, `←`, `→`, `>|`)
 - `Undo Pair` removes last user+model plies
 - `New Game` resets to starting position
-- Toggleable `Log` panel (Show/Hide) records move events, the exact raw model prediction UCI, and model fallback/error messages
+- Toggleable `Log` panel (Show/Hide) records move events, the exact raw model prediction UCI, and model fallback/error messages in a consistent per-turn order
 - Illegal model predictions are surfaced in the UI log as `ERROR` entries and include the attempted model UCI (fallback may still be applied so play continues)
 
 ## Known Limitations (current)

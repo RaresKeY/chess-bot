@@ -1,4 +1,5 @@
 import random
+import sys
 from typing import Dict, List, Tuple
 
 import torch
@@ -66,6 +67,23 @@ def evaluate_loader(model, loader, device, topks=(1, 5), criterion=None, winner_
     return out
 
 
+def _print_epoch_progress(epoch: int, epochs: int, batch_idx: int, total_batches: int, running_loss: float, seen: int) -> None:
+    if total_batches <= 0:
+        return
+    width = 28
+    frac = min(1.0, max(0.0, batch_idx / total_batches))
+    filled = int(width * frac)
+    bar = "#" * filled + "-" * (width - filled)
+    avg_loss = running_loss / max(seen, 1)
+    msg = (
+        f"\r[train] epoch {epoch}/{epochs} "
+        f"[{bar}] {batch_idx}/{total_batches} "
+        f"loss={avg_loss:.4f}"
+    )
+    sys.stdout.write(msg)
+    sys.stdout.flush()
+
+
 def train_next_move_model(
     train_rows: List[Dict],
     val_rows: List[Dict],
@@ -85,6 +103,7 @@ def train_next_move_model(
     amp: bool = False,
     restore_best: bool = True,
     verbose: bool = True,
+    show_progress: bool = True,
 ):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -173,7 +192,8 @@ def train_next_move_model(
         model.train()
         running_loss = 0.0
         seen = 0
-        for tokens, lengths, labels, winners in train_loader:
+        total_batches = len(train_loader)
+        for batch_idx, (tokens, lengths, labels, winners) in enumerate(train_loader, start=1):
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -194,6 +214,11 @@ def train_next_move_model(
             bs = labels.size(0)
             seen += bs
             running_loss += loss.item() * bs
+            if verbose and show_progress:
+                _print_epoch_progress(epoch, epochs, batch_idx, total_batches, running_loss, seen)
+        if verbose and show_progress and total_batches > 0:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
         train_loss = running_loss / max(seen, 1)
         val_metrics = evaluate_loader(

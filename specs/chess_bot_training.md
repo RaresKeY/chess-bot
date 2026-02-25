@@ -31,12 +31,14 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--num-layers` (LSTM layer count)
   - `--dropout` (embedding/head dropout and LSTM inter-layer dropout when multilayer)
   - `--restore-best/--no-restore-best` (restore best validation checkpoint before saving)
+  - `--verbose/--no-verbose` (toggle startup/epoch/checkpoint logs)
+  - `--progress/--no-progress` (toggle per-epoch batch progress bar; useful with `--verbose`)
 - Memory/loader safeguards:
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
-- CLI emits verbose startup logs including resolved input/output paths, requested hyperparameters, and loaded dataset row counts
-- Core training loop emits epoch start/end summaries plus best-checkpoint update/restore messages
+- CLI can emit verbose startup logs including resolved input/output paths, requested hyperparameters, and loaded dataset row counts
+- Core training loop can emit epoch start/end summaries, a per-epoch batch progress bar, and best-checkpoint update/restore messages
 
 ## Output Artifact Contract
 `artifacts/model.pt` stores:
@@ -50,7 +52,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - dataset row counts
 - epoch history (train_loss, val_loss, top1, top5)
 - model path
-- runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`)
+- runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)
 - best-checkpoint summary copied from artifact runtime metadata
 
 ## Current Limitation

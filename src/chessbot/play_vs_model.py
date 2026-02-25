@@ -359,6 +359,11 @@ function pushLog(level, message) {{
 
 function applyServerState(data) {{
   const prevContextLen = state.context.length;
+  const pendingLogs = [];
+  function addPendingLog(level, message) {{
+    if (!message) return;
+    pendingLogs.push([level, message]);
+  }}
   state.context = data.context || [];
   state.fen = data.fen;
   state.turn = data.turn;
@@ -370,23 +375,29 @@ function applyServerState(data) {{
   state.selected = null;
   state.legalTargets = [];
   if (data.last_user_move && state.context.length >= prevContextLen) {{
-    pushLog('INFO', `User move ${{data.last_user_move.san || data.last_user_move.uci}}`);
+    addPendingLog('INFO', `User move ${{data.last_user_move.san || data.last_user_move.uci}}`);
   }}
   if (data.last_model_move) {{
     const modelMove = data.last_model_move;
     if (modelMove.predicted_uci) {{
-      pushLog('INFO', `Model raw prediction ${{modelMove.predicted_uci}}`);
+      addPendingLog('INFO', `Model raw prediction ${{modelMove.predicted_uci}}`);
     }}
     if (modelMove.error) {{
       const level = /legal/i.test(modelMove.error) ? 'ERROR' : 'INFO';
       const suffix = modelMove.fallback ? ' (fallback applied)' : '';
       const attempted = modelMove.attempted_uci ? ` [attempted=${{modelMove.attempted_uci}}]` : '';
-      pushLog(level, `Model: ${{modelMove.error}}${{attempted}}${{suffix}}`);
+      addPendingLog(level, `Model: ${{modelMove.error}}${{attempted}}${{suffix}}`);
     }}
     if (modelMove.uci) {{
       const tag = modelMove.fallback ? ' [fallback]' : '';
-      pushLog('INFO', `Model move ${{modelMove.san || modelMove.uci}}${{tag}}`);
+      addPendingLog('INFO', `Model move ${{modelMove.san || modelMove.uci}}${{tag}}`);
     }}
+  }}
+  // Log panel renders newest-first, so append this response block in reverse
+  // to preserve causal order within the block (user -> raw prediction -> error -> applied move).
+  for (let i = pendingLogs.length - 1; i >= 0; i--) {{
+    const [level, message] = pendingLogs[i];
+    pushLog(level, message);
   }}
   renderAll();
 }}
