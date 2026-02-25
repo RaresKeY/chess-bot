@@ -11,7 +11,8 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 
 ## Model (current baseline)
 - Token embedding over UCI move vocabulary
-- LSTM sequence encoder over context moves
+- Configurable-depth LSTM sequence encoder over context moves (`--num-layers`)
+- Configurable dropout (`--dropout`) applied to embedding/head; also used as LSTM inter-layer dropout when `num_layers > 1`
 - Optional winner embedding concatenated before classifier head
 - Cross-entropy next-move objective
 
@@ -26,6 +27,10 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--num-workers` (DataLoader workers)
   - `--pin-memory/--no-pin-memory` (auto-disabled on CPU)
   - `--amp/--no-amp` (CUDA mixed precision via `torch.amp`)
+- Model/training controls:
+  - `--num-layers` (LSTM layer count)
+  - `--dropout` (embedding/head dropout and LSTM inter-layer dropout when multilayer)
+  - `--restore-best/--no-restore-best` (restore best validation checkpoint before saving)
 - Memory/loader safeguards:
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
@@ -35,15 +40,16 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 `artifacts/model.pt` stores:
 - `state_dict`
 - `vocab`
-- `config` (`embed_dim`, `hidden_dim`, `use_winner`)
-- `runtime` (`device`, `amp`) from the training run
+- `config` (`embed_dim`, `hidden_dim`, `num_layers`, `dropout`, `use_winner`)
+- `runtime` (`device`, `amp`, `best_checkpoint`) from the training run
 
 ## Metrics Output
 `artifacts/train_metrics.json` stores:
 - dataset row counts
-- epoch history (loss, top1, top5)
+- epoch history (train_loss, val_loss, top1, top5)
 - model path
-- runtime request fields (`device_requested`, `num_workers`, `pin_memory`, `amp`)
+- runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`)
+- best-checkpoint summary copied from artifact runtime metadata
 
 ## Current Limitation
 - CLI still loads `train`/`val` JSONL fully into memory before training starts (not yet streaming/iterable).

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
+from pathlib import Path
+
+# Allow direct script execution without requiring PYTHONPATH=. from repo root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import torch
 
@@ -20,6 +27,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--embed-dim", type=int, default=128)
     parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--num-layers", type=int, default=1, help="LSTM layer count")
+    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate for embedding/head (and LSTM inter-layer when num_layers>1)")
     parser.add_argument("--winner-weight", type=float, default=1.2)
     parser.add_argument("--no-winner-feature", action="store_true")
     parser.add_argument(
@@ -39,6 +48,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Enable CUDA mixed precision when training on GPU",
+    )
+    parser.add_argument(
+        "--restore-best",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restore best validation checkpoint (lowest val_loss) before saving when validation rows exist",
     )
     args = parser.parse_args()
 
@@ -66,12 +81,15 @@ def main() -> None:
         seed=args.seed,
         embed_dim=args.embed_dim,
         hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
         winner_weight=args.winner_weight,
         use_winner=not args.no_winner_feature,
         device_str=args.device,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
         amp=args.amp,
+        restore_best=args.restore_best,
     )
 
     for row in history:
@@ -85,10 +103,14 @@ def main() -> None:
         "epochs": args.epochs,
         "history": history,
         "model_path": args.output,
+        "num_layers": args.num_layers,
+        "dropout": args.dropout,
         "device_requested": args.device,
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory,
         "amp": args.amp,
+        "restore_best": args.restore_best,
+        "best_checkpoint": artifact.get("runtime", {}).get("best_checkpoint"),
     }
     write_json(args.metrics_out, summary)
     print(f"Saved model: {args.output}")

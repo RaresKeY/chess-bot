@@ -13,19 +13,31 @@ class NextMoveLSTM(nn.Module):
         vocab_size: int,
         embed_dim: int = 128,
         hidden_dim: int = 256,
+        num_layers: int = 1,
+        dropout: float = 0.0,
         winner_embed_dim: int = 8,
         use_winner: bool = True,
     ) -> None:
         super().__init__()
         self.use_winner = use_winner
+        dropout = float(max(0.0, dropout))
+        lstm_dropout = dropout if int(num_layers) > 1 else 0.0
         self.token_embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+        self.embed_dropout = nn.Dropout(dropout)
+        self.lstm = nn.LSTM(
+            embed_dim,
+            hidden_dim,
+            num_layers=int(num_layers),
+            dropout=lstm_dropout,
+            batch_first=True,
+        )
         self.winner_embed = nn.Embedding(4, winner_embed_dim)
         classifier_in = hidden_dim + (winner_embed_dim if use_winner else 0)
+        self.head_dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(classifier_in, vocab_size)
 
     def forward(self, tokens: torch.Tensor, lengths: torch.Tensor, winner_ids: torch.Tensor) -> torch.Tensor:
-        emb = self.token_embed(tokens)
+        emb = self.embed_dropout(self.token_embed(tokens))
         packed = nn.utils.rnn.pack_padded_sequence(
             emb, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
@@ -37,6 +49,7 @@ class NextMoveLSTM(nn.Module):
             x = torch.cat([last_hidden, w_emb], dim=-1)
         else:
             x = last_hidden
+        x = self.head_dropout(x)
         return self.classifier(x)
 
 

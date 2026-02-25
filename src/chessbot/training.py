@@ -36,9 +36,10 @@ def collate_train(batch: List[Tuple[List[int], int, int]]):
     return tokens, lengths, labels, winners
 
 
-def evaluate_loader(model, loader, device, topks=(1, 5)):
+def evaluate_loader(model, loader, device, topks=(1, 5), criterion=None, winner_weight: float = 1.0):
     model.eval()
     totals = {k: 0.0 for k in topks}
+    total_loss = 0.0
     n = 0
     with torch.no_grad():
         for tokens, lengths, labels, winners in loader:
@@ -47,12 +48,22 @@ def evaluate_loader(model, loader, device, topks=(1, 5)):
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
             logits = model(tokens, lengths, winners)
+            if criterion is not None:
+                losses = criterion(logits, labels)
+                winner_mask = ((winners == 0) | (winners == 1)).float()
+                weights = 1.0 + winner_mask * (winner_weight - 1.0)
+                batch_loss = (losses * weights).mean().item()
             batch_metrics = compute_topk(logits, labels, topks)
             bs = labels.size(0)
             n += bs
+            if criterion is not None:
+                total_loss += batch_loss * bs
             for k in topks:
                 totals[k] += batch_metrics[k] * bs
-    return {f"top{k}": (totals[k] / n if n else 0.0) for k in topks}
+    out = {f"top{k}": (totals[k] / n if n else 0.0) for k in topks}
+    if criterion is not None:
+        out["val_loss"] = total_loss / n if n else 0.0
+    return out
 
 
 def train_next_move_model(
@@ -64,12 +75,15 @@ def train_next_move_model(
     seed: int,
     embed_dim: int,
     hidden_dim: int,
+    num_layers: int,
+    dropout: float,
     winner_weight: float,
     use_winner: bool,
     device_str: str = "auto",
     num_workers: int = 0,
     pin_memory: bool = True,
     amp: bool = False,
+    restore_best: bool = True,
 ):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -113,6 +127,8 @@ def train_next_move_model(
         vocab_size=len(vocab),
         embed_dim=embed_dim,
         hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
         use_winner=use_winner,
     ).to(device)
 
@@ -120,6 +136,11 @@ def train_next_move_model(
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    has_val_rows = len(val_rows) > 0
+    best_state_dict = None
+    best_epoch = None
+    best_val_loss = None
+    best_top1 = None
 
     history: List[Dict] = []
     for epoch in range(1, epochs + 1):
@@ -149,8 +170,47 @@ def train_next_move_model(
             running_loss += loss.item() * bs
 
         train_loss = running_loss / max(seen, 1)
-        val_metrics = evaluate_loader(model, val_loader, device, topks=(1, 5))
-        history.append({"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics})
+        val_metrics = evaluate_loader(
+            model,
+            val_loader,
+            device,
+            topks=(1, 5),
+            criterion=criterion,
+            winner_weight=winner_weight,
+        )
+        row = {"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics}
+        history.append(row)
+
+        if restore_best and has_val_rows:
+            cur_val_loss = float(row.get("val_loss", 0.0))
+            cur_top1 = float(row.get("top1", 0.0))
+            is_better = (
+                best_val_loss is None
+                or cur_val_loss < best_val_loss
+                or (cur_val_loss == best_val_loss and (best_top1 is None or cur_top1 > best_top1))
+            )
+            if is_better:
+                best_val_loss = cur_val_loss
+                best_top1 = cur_top1
+                best_epoch = epoch
+                best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+    best_checkpoint_info = {
+        "enabled": bool(restore_best),
+        "used": False,
+        "metric": "val_loss",
+        "best_epoch": None,
+        "best_val_loss": None,
+    }
+    if restore_best and has_val_rows and best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        best_checkpoint_info.update(
+            {
+                "used": True,
+                "best_epoch": int(best_epoch),
+                "best_val_loss": float(best_val_loss),
+            }
+        )
 
     artifact = {
         "state_dict": model.state_dict(),
@@ -158,11 +218,14 @@ def train_next_move_model(
         "config": {
             "embed_dim": embed_dim,
             "hidden_dim": hidden_dim,
+            "num_layers": num_layers,
+            "dropout": dropout,
             "use_winner": use_winner,
         },
         "runtime": {
             "device": str(device),
             "amp": use_amp,
+            "best_checkpoint": best_checkpoint_info,
         },
     }
 
