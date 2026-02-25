@@ -1,0 +1,4 @@
+python-chess>=1.999
+torch>=2.2
+PyYAML>=6.0
+numpy>=2.0

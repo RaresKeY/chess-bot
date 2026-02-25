@@ -1,0 +1,58 @@
+# Source manifest placeholder aligned with implement.md phase 1.
+# Fill URLs/months/filters before large-scale data runs.
+sources:
+  - name: lichess_elite_2025_11
+    type: pgn_dump_zip
+    url: "https://database.nikonoel.fr/lichess_elite_2025-11.zip"
+    extracted_pgn: "data/raw/elite/2025-11/lichess_elite_2025-11.pgn"
+    source_site: "https://database.nikonoel.fr/"
+    discovery_note: "Linked from https://database.lichess.org/ as 'Elite database (2400+)'"
+    notes: "Full monthly elite database ZIP (not sampled)."
+filters:
+  min_elo: 2200
+  time_controls: ["rapid", "classical"]
+  require_decisive_result: true
+  exclude_termination: ["abandoned", "time forfeit without moves"]
+licensing:
+  review_required: true
+  notes: "Document redistribution limits per source before publish."
+
+validation_runs:
+  - name: elite_2025_11_full_month
+    input_pgn: "data/raw/elite/2025-11/lichess_elite_2025-11.pgn"
+    min_plies: 8
+    outputs:
+      valid_games: "data/validated/elite_2025-11/valid_games.jsonl"
+      invalid_games: "data/validated/elite_2025-11/invalid_games.csv"
+      summary: "data/validated/elite_2025-11/summary.json"
+    totals:
+      total_games: 280246
+      valid_games: 279613
+      invalid_games: 633
+      valid_ratio: 0.9977412701697794
+
+dataset_build_runs:
+  - name: elite_2025_11_cap4_splice
+    input_validated_games: "data/validated/elite_2025-11/valid_games.jsonl"
+    output_dir: "data/dataset/elite_2025-11_cap4"
+    params:
+      k: 4
+      min_context: 8
+      min_target: 1
+      max_samples_per_game: 4
+      decisive_only: true
+      train_ratio: 0.8
+      val_ratio: 0.1
+      seed: 7
+    totals:
+      input_games_total: 279613
+      input_games_after_filters: 235543
+      spliceable_games: 235488
+      split_games:
+        train: 186649
+        val: 23331
+        test: 23332
+      split_samples:
+        train: 753284
+        val: 94045
+        test: 94122

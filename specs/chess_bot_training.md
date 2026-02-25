@@ -1,0 +1,49 @@
+# Chess Bot Training Component
+
+## Responsibility
+Train a baseline winner-aware next-move predictor from splice samples and save a reusable model artifact.
+
+## Code Ownership
+- CLI: `scripts/train_baseline.py`
+- Core logic: `src/chessbot/training.py`
+- Model definition: `src/chessbot/model.py`
+- Shared IO: `src/chessbot/io_utils.py`
+
+## Model (current baseline)
+- Token embedding over UCI move vocabulary
+- LSTM sequence encoder over context moves
+- Optional winner embedding concatenated before classifier head
+- Cross-entropy next-move objective
+
+## Winner-Aware Behavior
+- Winner side encoded (`W`, `B`, `D`, `?`)
+- Winner examples (`W`/`B`) receive configurable loss upweighting (`--winner-weight`)
+
+## Runtime / Device Controls
+- `scripts/train_baseline.py` supports explicit `--device` (`auto`, `cpu`, `cuda`, `cuda:N`)
+- CUDA request fails fast if `torch.cuda.is_available()` is false
+- CUDA-oriented controls:
+  - `--num-workers` (DataLoader workers)
+  - `--pin-memory/--no-pin-memory` (auto-disabled on CPU)
+  - `--amp/--no-amp` (CUDA mixed precision via `torch.amp`)
+- Memory/loader safeguards:
+  - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
+  - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
+- CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
+
+## Output Artifact Contract
+`artifacts/model.pt` stores:
+- `state_dict`
+- `vocab`
+- `config` (`embed_dim`, `hidden_dim`, `use_winner`)
+- `runtime` (`device`, `amp`) from the training run
+
+## Metrics Output
+`artifacts/train_metrics.json` stores:
+- dataset row counts
+- epoch history (loss, top1, top5)
+- model path
+- runtime request fields (`device_requested`, `num_workers`, `pin_memory`, `amp`)
+
+## Current Limitation
+- CLI still loads `train`/`val` JSONL fully into memory before training starts (not yet streaming/iterable).
