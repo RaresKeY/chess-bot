@@ -1,5 +1,7 @@
 # Chess Bot MVP
 
+Python chess-move prediction project that builds datasets from PGNs, trains an LSTM next-move model, evaluates it, and provides browser UIs to inspect games and play against the model locally.
+
 Implementation scaffold for the plan in `implement.md`.
 
 ## Quick Start (Fresh Clone / Outside Container)
