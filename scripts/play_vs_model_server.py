@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import signal
 import json
 import os
 from http import HTTPStatus
@@ -14,6 +15,11 @@ from src.chessbot.play_vs_model import (
     render_play_page_html,
     state_response,
 )
+
+
+class GracefulThreadingTCPServer(ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 def handler_factory(model_runtime: LoadedMoveModel, play_cfg: PlayConfig, page_path: str, page_html: str):
@@ -104,14 +110,47 @@ def main() -> None:
     )
     handler = handler_factory(model_runtime=model_runtime, play_cfg=play_cfg, page_path=args.page_path, page_html=page_html)
 
-    with ThreadingTCPServer((args.bind, args.port), handler) as httpd:
+    with GracefulThreadingTCPServer((args.bind, args.port), handler) as httpd:
         print(f"Serving {serve_dir} at http://{args.bind}:{args.port}/")
         print(f"Play URL: http://{args.bind}:{args.port}/{'/'.join([args.page_path.strip('/')])}")
         print(f"Model: {model_path}")
+
+        stopping = {"done": False}
+
+        def _stop_server(reason: str) -> None:
+            if stopping["done"]:
+                return
+            stopping["done"] = True
+            print(reason)
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+
+        def _handle_signal(signum, _frame):
+            sig_name = signal.Signals(signum).name if signum in set(s.value for s in signal.Signals) else f"SIG{signum}"
+            _stop_server(f"\nServer stopping ({sig_name})")
+
+        prev_sigint = signal.getsignal(signal.SIGINT)
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\nServer stopped")
+            _stop_server("\nServer stopping (KeyboardInterrupt)")
+        except Exception:
+            _stop_server("\nServer stopping (unexpected error)")
+            raise
+        finally:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            httpd.server_close()
+            print("Server stopped")
 
 
 if __name__ == "__main__":

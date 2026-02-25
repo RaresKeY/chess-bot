@@ -17,6 +17,7 @@ Provide an interactive browser UI to play chess against the trained move model, 
 - Python backend validates user moves using `python-chess`
 - Backend requests model move from loaded artifact and applies it if legal
 - If model has no legal prediction, backend falls back to a legal move so play can continue
+- HTTP server uses threaded handling with graceful shutdown on `SIGINT`/`SIGTERM`, explicit socket close, and address reuse enabled for quick restarts
 
 ## Endpoints (current)
 - `GET /play-vs-model` -> interactive HTML page
@@ -45,7 +46,7 @@ API payload (move):
 - Move history + snapshot navigation (`|<`, `←`, `→`, `>|`)
 - `Undo Pair` removes last user+model plies
 - `New Game` resets to starting position
-- Toggleable `Log` panel (Show/Hide) records move events and model fallback/error messages
+- Toggleable `Log` panel (Show/Hide) records move events, the exact raw model prediction UCI, and model fallback/error messages
 - Illegal model predictions are surfaced in the UI log as `ERROR` entries and include the attempted model UCI (fallback may still be applied so play continues)
 
 ## Known Limitations (current)

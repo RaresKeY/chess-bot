@@ -125,6 +125,7 @@ def apply_user_and_model_move(
         infer = model_runtime.infer(next_context, winner_side=cfg.winner_side, topk=cfg.topk)
         reply_uci = infer.get("best_legal", "")
         topk_tokens = infer.get("topk", [])
+        predicted_uci = topk_tokens[0] if topk_tokens else ""
         if reply_uci:
             reply_move = chess.Move.from_uci(reply_uci)
             if reply_move in board.legal_moves:
@@ -135,12 +136,14 @@ def apply_user_and_model_move(
                     "uci": reply_uci,
                     "san": reply_san,
                     "topk": topk_tokens,
+                    "predicted_uci": predicted_uci,
                 }
             else:
                 model_reply = {
                     "uci": "",
                     "san": "",
                     "topk": topk_tokens,
+                    "predicted_uci": predicted_uci,
                     "attempted_uci": reply_uci,
                     "error": "predicted move not legal",
                 }
@@ -149,6 +152,7 @@ def apply_user_and_model_move(
                 "uci": "",
                 "san": "",
                 "topk": topk_tokens,
+                "predicted_uci": predicted_uci,
                 "attempted_uci": (topk_tokens[0] if topk_tokens else ""),
                 "error": "no legal model move",
             }
@@ -163,6 +167,7 @@ def apply_user_and_model_move(
                     "uci": fallback_move.uci(),
                     "san": fallback_san,
                     "topk": (model_reply or {}).get("topk", []),
+                    "predicted_uci": (model_reply or {}).get("predicted_uci", ""),
                     "fallback": True,
                     "error": (model_reply or {}).get("error", "") or "model fallback used",
                 }
@@ -369,6 +374,9 @@ function applyServerState(data) {{
   }}
   if (data.last_model_move) {{
     const modelMove = data.last_model_move;
+    if (modelMove.predicted_uci) {{
+      pushLog('INFO', `Model raw prediction ${{modelMove.predicted_uci}}`);
+    }}
     if (modelMove.error) {{
       const level = /legal/i.test(modelMove.error) ? 'ERROR' : 'INFO';
       const suffix = modelMove.fallback ? ' (fallback applied)' : '';
