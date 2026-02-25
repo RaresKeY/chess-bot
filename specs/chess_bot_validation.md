@@ -6,6 +6,7 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 ## Code Ownership
 - CLI: `scripts/validate_games.py`
 - Companion data download utility: `scripts/download_lichess_elite_month.py`
+- End-to-end monthly prep orchestrator (invokes validation): `scripts/acquire_and_prepare_elite_month.py`
 - Core logic: `src/chessbot/validation.py`
 - Shared IO: `src/chessbot/io_utils.py`
 
@@ -20,12 +21,17 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 ## Execution / Performance Notes
 - `scripts/validate_games.py` writes `valid_games.jsonl` and `invalid_games.csv` in a streaming fashion (incremental writes), rather than accumulating all rows in memory.
 - `src/chessbot/validation.py` exposes an iterator-style validation event stream (`iter_validation_events`) to support large monthly corpora.
+- `src/chessbot/validation.py` now parses PGN with a custom `python-chess` visitor that captures headers + mainline UCI moves directly during parse, skipping variation parsing and avoiding full `Game` tree construction plus a second replay pass.
 - This change is required for full-month elite datasets where in-memory accumulation can exceed practical memory limits.
 - Optional concurrency: `scripts/validate_games.py --workers N`
-  - Uses file-level threading (each PGN file validated in its own thread to shard outputs, then merged)
+  - Uses file-level multiprocessing (each PGN file validated in its own worker process to shard outputs, then merged)
+  - `--workers 0` (default) uses all available CPU cores
+  - `--all-cores` is a convenience alias for `--workers 0`
   - Effective when validating a directory/glob with multiple PGN files
-  - A single large PGN file remains effectively sequential (PGN parsing/replay is stream-based)
+  - For a single PGN file, the CLI now auto-shards the file into temporary chunk PGNs by game header (`[Event ...]`) when `workers>1` (disable with `--no-auto-shard-single-file`) so file-level multiprocessing still uses all cores
+  - Summary JSON includes `input_source`, `auto_sharded_single_file`, and `auto_shard_game_count` metadata
 - Progress visibility:
+  - `scripts/validate_games.py` shows a live TTY progress bar/status line by default (`--progress-bar`, disable with `--no-progress-bar`)
   - `scripts/validate_games.py --progress-every N` prints periodic counters during streaming validation
   - threaded mode prints per-file completion summaries as shards finish
 
@@ -43,7 +49,7 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
   - `valid_ratio=0.9977412701697794`
 
 ## Validation Rules
-- Replay every move legally from initial board state
+- Parse and legally apply mainline PGN SAN moves using `python-chess` during PGN parsing (custom visitor path)
 - Reject parse errors and PGN parser errors
 - Reject empty games
 - Reject result mismatches when terminal board result is available and disagrees with PGN result
@@ -57,3 +63,7 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 - `winner_side`
 - `plies`
 - `moves_uci`
+
+## Schema Reuse (current)
+- The Lichess live bot archive (`scripts/lichess_bot.py`, `src/chessbot/lichess_bot.py`) appends live-played games to `data/live_play/lichess_bot_archive/valid_games.jsonl` using the same valid-record JSONL schema for downstream compatibility.
+- Despite schema compatibility, live-played bot games are intentionally stored outside the elite validation tree and are excluded from splice dataset builds by default unless explicitly allowed.

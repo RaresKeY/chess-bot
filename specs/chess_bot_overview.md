@@ -20,6 +20,7 @@ Reproducible supervised chess move-prediction pipeline:
 - `artifacts/*`: model and metrics artifacts
 - `assets/pieces/cburnett/*`: local SVG chess piece images used by viewer
 - `scripts/play_vs_model_server.py` + `src/chessbot/play_vs_model.py`: interactive gameplay UI/API server
+- `scripts/play_model_vs_engine.py`: match benchmark helper for model vs UCI engine (e.g. Stockfish)
 - `deploy/runpod_cloud_training/*`: cloud deployment module (Docker, startup orchestration, Jupyter/SSH/inference API, HF sync, idle watchdog)
 
 ## Core Decisions

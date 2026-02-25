@@ -11,8 +11,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 
-from src.chessbot.io_utils import ensure_parent, read_jsonl, write_json
-from src.chessbot.training import train_next_move_model
+from src.chessbot.io_utils import ensure_parent, write_json
+from src.chessbot.training import train_next_move_model_from_jsonl_paths
 
 
 def main() -> None:
@@ -40,6 +40,10 @@ def main() -> None:
     parser.add_argument("--num-layers", type=int, default=1, help="LSTM layer count")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate for embedding/head (and LSTM inter-layer when num_layers>1)")
     parser.add_argument("--winner-weight", type=float, default=1.2)
+    parser.add_argument("--phase-weight-opening", type=float, default=1.0)
+    parser.add_argument("--phase-weight-middlegame", type=float, default=1.0)
+    parser.add_argument("--phase-weight-endgame", type=float, default=1.0)
+    parser.add_argument("--phase-weight-unknown", type=float, default=1.0)
     parser.add_argument("--no-winner-feature", action="store_true")
     parser.add_argument(
         "--device",
@@ -111,6 +115,12 @@ def main() -> None:
                     "num_layers": args.num_layers,
                     "dropout": args.dropout,
                     "winner_weight": args.winner_weight,
+                    "phase_weights": {
+                        "unknown": args.phase_weight_unknown,
+                        "opening": args.phase_weight_opening,
+                        "middlegame": args.phase_weight_middlegame,
+                        "endgame": args.phase_weight_endgame,
+                    },
                     "use_winner": not args.no_winner_feature,
                     "device_requested": args.device,
                     "num_workers": args.num_workers,
@@ -134,37 +144,9 @@ def main() -> None:
             }
         )
 
-    train_rows = []
-    train_rows_by_file: dict[str, int] = {}
-    for path in train_paths:
-        rows = list(read_jsonl(str(path)))
-        train_rows.extend(rows)
-        train_rows_by_file[str(path)] = len(rows)
-    val_rows = []
-    val_rows_by_file: dict[str, int] = {}
-    for path in val_paths:
-        rows = list(read_jsonl(str(path)))
-        val_rows.extend(rows)
-        val_rows_by_file[str(path)] = len(rows)
-    if not train_rows:
-        raise SystemExit("No training rows found")
-    if args.verbose:
-        print(
-            {
-                "dataset_loaded": {
-                    "train_rows": len(train_rows),
-                    "val_rows": len(val_rows),
-                    "train_has_rows": bool(train_rows),
-                    "val_has_rows": bool(val_rows),
-                    "train_rows_by_file": train_rows_by_file,
-                    "val_rows_by_file": val_rows_by_file,
-                }
-            }
-        )
-
-    artifact, history = train_next_move_model(
-        train_rows=train_rows,
-        val_rows=val_rows,
+    artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+        train_paths=[str(p) for p in train_paths],
+        val_paths=[str(p) for p in val_paths],
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
@@ -174,6 +156,12 @@ def main() -> None:
         num_layers=args.num_layers,
         dropout=args.dropout,
         winner_weight=args.winner_weight,
+        phase_weights={
+            "unknown": args.phase_weight_unknown,
+            "opening": args.phase_weight_opening,
+            "middlegame": args.phase_weight_middlegame,
+            "endgame": args.phase_weight_endgame,
+        },
         use_winner=not args.no_winner_feature,
         device_str=args.device,
         num_workers=args.num_workers,
@@ -184,24 +172,48 @@ def main() -> None:
         show_progress=args.progress,
     )
 
+    train_rows_by_file = dataset_info["train_rows_by_file"]
+    val_rows_by_file = dataset_info["val_rows_by_file"]
+    if args.verbose:
+        print(
+            {
+                "dataset_loaded": {
+                    "train_rows": dataset_info["train_rows"],
+                    "val_rows": dataset_info["val_rows"],
+                    "train_has_rows": bool(dataset_info["train_rows"]),
+                    "val_has_rows": bool(dataset_info["val_rows"]),
+                    "train_rows_by_file": train_rows_by_file,
+                    "val_rows_by_file": val_rows_by_file,
+                    "data_loading": dataset_info.get("data_loading"),
+                }
+            }
+        )
+
     if args.verbose:
         print({"training_complete": {"epochs_ran": len(history), "last_epoch": (history[-1]["epoch"] if history else None)}})
 
     ensure_parent(args.output)
     torch.save(artifact, args.output)
     summary = {
-        "train_rows": len(train_rows),
-        "val_rows": len(val_rows),
+        "train_rows": dataset_info["train_rows"],
+        "val_rows": dataset_info["val_rows"],
         "train_inputs": [str(p) for p in train_paths],
         "val_inputs": [str(p) for p in val_paths],
         "train_rows_by_file": train_rows_by_file,
         "val_rows_by_file": val_rows_by_file,
+        "data_loading": dataset_info.get("data_loading"),
         "epochs": args.epochs,
         "history": history,
         "model_path": args.output,
         "num_layers": args.num_layers,
         "dropout": args.dropout,
         "device_requested": args.device,
+        "phase_weights": {
+            "unknown": args.phase_weight_unknown,
+            "opening": args.phase_weight_opening,
+            "middlegame": args.phase_weight_middlegame,
+            "endgame": args.phase_weight_endgame,
+        },
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory,
         "amp": args.amp,

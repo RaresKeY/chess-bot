@@ -6,6 +6,52 @@ from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 import chess.pgn
 
 
+class _ValidationVisitor(chess.pgn.BaseVisitor[Dict]):
+    """PGN visitor that captures only the data needed for dataset validation."""
+
+    def begin_game(self) -> None:
+        self.headers = chess.pgn.Headers({})
+        self.moves_uci: List[str] = []
+        self.errors: List[str] = []
+        self.board = None
+
+    def begin_headers(self) -> chess.pgn.Headers:
+        return self.headers
+
+    def visit_header(self, tagname: str, tagvalue: str) -> None:
+        self.headers[tagname] = tagvalue
+
+    def begin_variation(self):
+        # Dataset validation only uses the mainline; skipping variations avoids
+        # unnecessary parsing work and object churn.
+        return chess.pgn.SKIP
+
+    def visit_move(self, board: chess.Board, move: chess.Move) -> None:
+        self.moves_uci.append(move.uci())
+
+    def visit_board(self, board: chess.Board) -> None:
+        self.board = board
+
+    def visit_result(self, result: str) -> None:
+        if self.headers.get("Result", "*") == "*":
+            self.headers["Result"] = result
+
+    def handle_error(self, error: Exception) -> None:
+        # Collect parse/parser errors without logging to keep validation fast.
+        self.errors.append(str(error))
+
+    def result(self) -> Dict:
+        board_result = "*"
+        if self.board is not None and self.board.is_game_over(claim_draw=True):
+            board_result = self.board.result(claim_draw=True)
+        return {
+            "headers": dict(self.headers),
+            "moves_uci": self.moves_uci,
+            "errors": self.errors,
+            "board_result": board_result,
+        }
+
+
 def winner_from_result(result: str) -> str:
     if result == "1-0":
         return "W"
@@ -108,6 +154,16 @@ def iter_pgn_games(paths: Iterable[str]):
                 yield path, game
 
 
+def _iter_parsed_games_fast(paths: Iterable[str]) -> Iterator[Tuple[str, Dict]]:
+    for path in paths:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            while True:
+                parsed = chess.pgn.read_game(f, Visitor=_ValidationVisitor)
+                if parsed is None:
+                    break
+                yield path, parsed
+
+
 def resolve_inputs(input_arg: str) -> List[str]:
     if os.path.isdir(input_arg):
         return sorted(glob.glob(os.path.join(input_arg, "*.pgn")))
@@ -136,10 +192,56 @@ def _invalid_row_from_invalid(invalid: Dict, source_file: str) -> Dict:
     }
 
 
+def _validate_parsed_game(parsed: Dict, source_file: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+    headers = parsed.get("headers", {})
+    moves_uci = parsed.get("moves_uci", [])
+    errors = parsed.get("errors", [])
+    result = headers.get("Result", "*")
+
+    if errors:
+        return None, {
+            "source_file": source_file,
+            "reason": "pgn_errors",
+            "offending_ply": len(moves_uci),
+            "result": result,
+            "error": "; ".join(errors[:3]),
+        }
+
+    if not moves_uci:
+        return None, {
+            "source_file": source_file,
+            "reason": "empty_game",
+            "offending_ply": 0,
+            "result": result,
+        }
+
+    board_result = parsed.get("board_result", "*")
+    if board_result != "*" and result != "*" and board_result != result:
+        return None, {
+            "source_file": source_file,
+            "reason": "result_mismatch",
+            "offending_ply": len(moves_uci),
+            "result": result,
+            "board_result": board_result,
+        }
+
+    gid = game_id_for(headers, source_file, moves_uci)
+    valid = {
+        "game_id": gid,
+        "source_file": source_file,
+        "headers": headers,
+        "result": result,
+        "winner_side": winner_from_result(result),
+        "plies": len(moves_uci),
+        "moves_uci": moves_uci,
+    }
+    return valid, None
+
+
 def iter_validation_events(paths: List[str], min_plies: int) -> Iterator[Tuple[str, Dict]]:
     """Yield ('valid'|'invalid', row) events for streaming validation writes."""
-    for source_file, game in iter_pgn_games(paths):
-        valid, invalid = validate_game(game, source_file)
+    for source_file, parsed in _iter_parsed_games_fast(paths):
+        valid, invalid = _validate_parsed_game(parsed, source_file)
         if valid is not None:
             if valid["plies"] < min_plies:
                 yield "invalid", _invalid_row_from_valid_too_short(valid, source_file)

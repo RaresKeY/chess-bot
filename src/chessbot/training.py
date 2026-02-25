@@ -1,12 +1,15 @@
+import json
+import os
 import random
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.chessbot.model import NextMoveLSTM, build_vocab, compute_topk, encode_tokens, winner_to_id
+from src.chessbot.phase import PHASE_MIDDLEGAME, PHASE_OPENING, PHASE_ENDGAME, PHASE_UNKNOWN, phase_to_id
 
 
 class MoveDataset(Dataset):
@@ -22,37 +25,191 @@ class MoveDataset(Dataset):
         context_ids = encode_tokens(row["context"], self.vocab)
         label = self.vocab.get(row["next_move"], self.vocab["<UNK>"])
         winner = winner_to_id(row.get("winner_side", "?"))
-        return context_ids, label, winner
+        phase = phase_to_id(row.get("phase", PHASE_UNKNOWN))
+        return context_ids, label, winner, phase
 
 
-def collate_train(batch: List[Tuple[List[int], int, int]]):
+class IndexedJsonlDataset(Dataset):
+    """Map-style dataset backed by JSONL files via precomputed line offsets."""
+
+    def __init__(self, paths: List[str], path_ids: List[int], offsets: List[int], vocab: Dict[str, int]) -> None:
+        self.paths = paths
+        self.path_ids = path_ids
+        self.offsets = offsets
+        self.vocab = vocab
+        self._handle_cache: Dict[int, object] = {}
+
+    def __len__(self) -> int:
+        return len(self.offsets)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # File handles cannot be pickled for DataLoader workers.
+        state["_handle_cache"] = {}
+        return state
+
+    def _handle_for(self, path_id: int):
+        h = self._handle_cache.get(path_id)
+        if h is None:
+            h = open(self.paths[path_id], "rb")
+            self._handle_cache[path_id] = h
+        return h
+
+    def __getitem__(self, idx: int):
+        path_id = self.path_ids[idx]
+        offset = self.offsets[idx]
+        h = self._handle_for(path_id)
+        h.seek(offset)
+        line = h.readline()
+        row = json.loads(line.decode("utf-8"))
+        context_ids = encode_tokens(row["context"], self.vocab)
+        label = self.vocab.get(row["next_move"], self.vocab["<UNK>"])
+        winner = winner_to_id(row.get("winner_side", "?"))
+        phase = phase_to_id(row.get("phase", PHASE_UNKNOWN))
+        return context_ids, label, winner, phase
+
+
+def _build_vocab_and_count_rows_from_train_paths(train_paths: List[str]) -> Tuple[Dict[str, int], Dict[str, int], int]:
+    vocab = {"<PAD>": 0, "<UNK>": 1}
+    rows_by_file: Dict[str, int] = {}
+    total_rows = 0
+    for path in train_paths:
+        count = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                count += 1
+                total_rows += 1
+                for tok in row.get("context", []):
+                    if tok not in vocab:
+                        vocab[tok] = len(vocab)
+                for tok in row.get("target", []):
+                    if tok not in vocab:
+                        vocab[tok] = len(vocab)
+        rows_by_file[path] = count
+    return vocab, rows_by_file, total_rows
+
+
+def _count_rows_in_jsonl_paths(paths: List[str]) -> Tuple[Dict[str, int], int]:
+    rows_by_file: Dict[str, int] = {}
+    total_rows = 0
+    for path in paths:
+        count = 0
+        with open(path, "rb") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                count += 1
+        rows_by_file[path] = count
+        total_rows += count
+    return rows_by_file, total_rows
+
+
+def _index_jsonl_paths(paths: List[str]) -> Tuple[List[str], List[int], List[int]]:
+    path_strs = [os.fspath(p) for p in paths]
+    path_ids: List[int] = []
+    offsets: List[int] = []
+    for path_id, path in enumerate(path_strs):
+        with open(path, "rb") as f:
+            while True:
+                offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                path_ids.append(path_id)
+                offsets.append(offset)
+    return path_strs, path_ids, offsets
+
+
+def collate_train(batch: List[Tuple[List[int], int, int, int]]):
     lengths = torch.tensor([len(x[0]) for x in batch], dtype=torch.long)
     max_len = int(lengths.max().item())
     tokens = torch.zeros((len(batch), max_len), dtype=torch.long)
     labels = torch.tensor([x[1] for x in batch], dtype=torch.long)
     winners = torch.tensor([x[2] for x in batch], dtype=torch.long)
+    phases = torch.tensor([x[3] for x in batch], dtype=torch.long)
 
-    for i, (ctx, _, _) in enumerate(batch):
+    for i, (ctx, _, _, _) in enumerate(batch):
         tokens[i, : len(ctx)] = torch.tensor(ctx, dtype=torch.long)
-    return tokens, lengths, labels, winners
+    return tokens, lengths, labels, winners, phases
 
 
-def evaluate_loader(model, loader, device, topks=(1, 5), criterion=None, winner_weight: float = 1.0):
+def _build_phase_weight_vector(
+    device: torch.device, phase_weights: Optional[Dict[str, float]] = None
+) -> torch.Tensor:
+    weights = {
+        PHASE_UNKNOWN: 1.0,
+        PHASE_OPENING: 1.0,
+        PHASE_MIDDLEGAME: 1.0,
+        PHASE_ENDGAME: 1.0,
+    }
+    if phase_weights:
+        for key, value in phase_weights.items():
+            try:
+                weights[str(key).strip().lower()] = float(value)
+            except Exception:
+                continue
+    return torch.tensor(
+        [
+            weights[PHASE_UNKNOWN],
+            weights[PHASE_OPENING],
+            weights[PHASE_MIDDLEGAME],
+            weights[PHASE_ENDGAME],
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _example_loss_weights(
+    winners: torch.Tensor,
+    phases: torch.Tensor,
+    winner_weight: float,
+    phase_weight_vector: torch.Tensor,
+) -> torch.Tensor:
+    winner_mask = ((winners == 0) | (winners == 1)).float()
+    winner_weights = 1.0 + winner_mask * (winner_weight - 1.0)
+    phase_ids = phases.clamp(min=0, max=int(phase_weight_vector.numel() - 1))
+    phase_weights = phase_weight_vector[phase_ids]
+    return winner_weights * phase_weights
+
+
+def evaluate_loader(
+    model,
+    loader,
+    device,
+    topks=(1, 5),
+    criterion=None,
+    winner_weight: float = 1.0,
+    phase_weight_vector: Optional[torch.Tensor] = None,
+):
     model.eval()
     totals = {k: 0.0 for k in topks}
     total_loss = 0.0
     n = 0
+    if phase_weight_vector is None:
+        phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=None)
     with torch.no_grad():
-        for tokens, lengths, labels, winners in loader:
+        for tokens, lengths, labels, winners, phases in loader:
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
+            phases = phases.to(device, non_blocking=True)
             logits = model(tokens, lengths, winners)
             if criterion is not None:
                 losses = criterion(logits, labels)
-                winner_mask = ((winners == 0) | (winners == 1)).float()
-                weights = 1.0 + winner_mask * (winner_weight - 1.0)
+                weights = _example_loss_weights(
+                    winners=winners,
+                    phases=phases,
+                    winner_weight=winner_weight,
+                    phase_weight_vector=phase_weight_vector,
+                )
                 batch_loss = (losses * weights).mean().item()
             batch_metrics = compute_topk(logits, labels, topks)
             bs = labels.size(0)
@@ -97,6 +254,7 @@ def train_next_move_model(
     dropout: float,
     winner_weight: float,
     use_winner: bool,
+    phase_weights: Optional[Dict[str, float]] = None,
     device_str: str = "auto",
     num_workers: int = 0,
     pin_memory: bool = True,
@@ -156,6 +314,7 @@ def train_next_move_model(
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
     has_val_rows = len(val_rows) > 0
     best_state_dict = None
     best_epoch = None
@@ -176,6 +335,12 @@ def train_next_move_model(
                     "num_workers": num_workers,
                     "pin_memory_effective": pin_memory,
                     "winner_weight": winner_weight,
+                    "phase_weights": {
+                        "unknown": float(phase_weight_vector[0].item()),
+                        "opening": float(phase_weight_vector[1].item()),
+                        "middlegame": float(phase_weight_vector[2].item()),
+                        "endgame": float(phase_weight_vector[3].item()),
+                    },
                     "use_winner": use_winner,
                     "num_layers": num_layers,
                     "dropout": dropout,
@@ -193,17 +358,22 @@ def train_next_move_model(
         running_loss = 0.0
         seen = 0
         total_batches = len(train_loader)
-        for batch_idx, (tokens, lengths, labels, winners) in enumerate(train_loader, start=1):
+        for batch_idx, (tokens, lengths, labels, winners, phases) in enumerate(train_loader, start=1):
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
+            phases = phases.to(device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 logits = model(tokens, lengths, winners)
                 losses = criterion(logits, labels)
-                winner_mask = ((winners == 0) | (winners == 1)).float()
-                weights = 1.0 + winner_mask * (winner_weight - 1.0)
+                weights = _example_loss_weights(
+                    winners=winners,
+                    phases=phases,
+                    winner_weight=winner_weight,
+                    phase_weight_vector=phase_weight_vector,
+                )
                 loss = (losses * weights).mean()
 
             optimizer.zero_grad(set_to_none=True)
@@ -228,6 +398,7 @@ def train_next_move_model(
             topks=(1, 5),
             criterion=criterion,
             winner_weight=winner_weight,
+            phase_weight_vector=phase_weight_vector,
         )
         row = {"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics}
         history.append(row)
@@ -301,7 +472,275 @@ def train_next_move_model(
             "device": str(device),
             "amp": use_amp,
             "best_checkpoint": best_checkpoint_info,
+            "phase_weights": {
+                "unknown": float(phase_weight_vector[0].item()),
+                "opening": float(phase_weight_vector[1].item()),
+                "middlegame": float(phase_weight_vector[2].item()),
+                "endgame": float(phase_weight_vector[3].item()),
+            },
         },
     }
 
     return artifact, history
+
+
+def train_next_move_model_from_jsonl_paths(
+    train_paths: List[str],
+    val_paths: List[str],
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    seed: int,
+    embed_dim: int,
+    hidden_dim: int,
+    num_layers: int,
+    dropout: float,
+    winner_weight: float,
+    use_winner: bool,
+    phase_weights: Optional[Dict[str, float]] = None,
+    device_str: str = "auto",
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    amp: bool = False,
+    restore_best: bool = True,
+    verbose: bool = True,
+    show_progress: bool = True,
+):
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+    train_paths = [os.fspath(p) for p in train_paths]
+    val_paths = [os.fspath(p) for p in val_paths]
+
+    # Stream train files once to build vocabulary and exact row counts.
+    vocab, train_rows_by_file, train_rows_total = _build_vocab_and_count_rows_from_train_paths(train_paths)
+    # Count validation rows without loading them.
+    val_rows_by_file, val_rows_total = _count_rows_in_jsonl_paths(val_paths)
+
+    if train_rows_total <= 0:
+        raise RuntimeError("No training rows found")
+
+    # Build line-offset indexes for on-demand row loading.
+    train_ds = IndexedJsonlDataset(*_index_jsonl_paths(train_paths), vocab=vocab)
+    val_ds = IndexedJsonlDataset(*_index_jsonl_paths(val_paths), vocab=vocab)
+
+    use_cuda = torch.cuda.is_available()
+    if device_str == "auto":
+        device = torch.device("cuda" if use_cuda else "cpu")
+    else:
+        device = torch.device(device_str)
+    if device.type == "cuda" and not use_cuda:
+        raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
+
+    pin_memory = bool(pin_memory and device.type == "cuda")
+    train_loader_kwargs = {
+        "batch_size": batch_size,
+        "collate_fn": collate_train,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = 1
+        train_loader_kwargs["persistent_workers"] = False
+    train_loader = DataLoader(train_ds, shuffle=True, **train_loader_kwargs)
+
+    val_loader = DataLoader(
+        val_ds,
+        shuffle=False,
+        batch_size=batch_size,
+        collate_fn=collate_train,
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
+    model = NextMoveLSTM(
+        vocab_size=len(vocab),
+        embed_dim=embed_dim,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
+        use_winner=use_winner,
+    ).to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss(reduction="none")
+    use_amp = bool(amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
+    has_val_rows = len(val_ds) > 0
+    best_state_dict = None
+    best_epoch = None
+    best_val_loss = None
+    best_top1 = None
+    if verbose:
+        print(
+            {
+                "train_setup": {
+                    "train_rows": len(train_ds),
+                    "val_rows": len(val_ds),
+                    "vocab_size": len(vocab),
+                    "device_selected": str(device),
+                    "amp_enabled": use_amp,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "lr": lr,
+                    "num_workers": num_workers,
+                    "pin_memory_effective": pin_memory,
+                    "winner_weight": winner_weight,
+                    "phase_weights": {
+                        "unknown": float(phase_weight_vector[0].item()),
+                        "opening": float(phase_weight_vector[1].item()),
+                        "middlegame": float(phase_weight_vector[2].item()),
+                        "endgame": float(phase_weight_vector[3].item()),
+                    },
+                    "use_winner": use_winner,
+                    "num_layers": num_layers,
+                    "dropout": dropout,
+                    "restore_best": bool(restore_best),
+                    "restore_best_has_val": bool(has_val_rows),
+                    "data_loading": "indexed_jsonl_on_demand",
+                }
+            }
+        )
+
+    history: List[Dict] = []
+    for epoch in range(1, epochs + 1):
+        if verbose:
+            print(f"[train] epoch {epoch}/{epochs} start")
+        model.train()
+        running_loss = 0.0
+        seen = 0
+        total_batches = len(train_loader)
+        for batch_idx, (tokens, lengths, labels, winners, phases) in enumerate(train_loader, start=1):
+            tokens = tokens.to(device, non_blocking=True)
+            lengths = lengths.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            winners = winners.to(device, non_blocking=True)
+            phases = phases.to(device, non_blocking=True)
+
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                logits = model(tokens, lengths, winners)
+                losses = criterion(logits, labels)
+                weights = _example_loss_weights(
+                    winners=winners,
+                    phases=phases,
+                    winner_weight=winner_weight,
+                    phase_weight_vector=phase_weight_vector,
+                )
+                loss = (losses * weights).mean()
+
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            bs = labels.size(0)
+            seen += bs
+            running_loss += loss.item() * bs
+            if verbose and show_progress:
+                _print_epoch_progress(epoch, epochs, batch_idx, total_batches, running_loss, seen)
+        if verbose and show_progress and total_batches > 0:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        train_loss = running_loss / max(seen, 1)
+        val_metrics = evaluate_loader(
+            model,
+            val_loader,
+            device,
+            topks=(1, 5),
+            criterion=criterion,
+            winner_weight=winner_weight,
+            phase_weight_vector=phase_weight_vector,
+        )
+        row = {"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics}
+        history.append(row)
+        if verbose:
+            print(
+                {
+                    "epoch": epoch,
+                    "train_loss": round(float(train_loss), 6),
+                    "val_loss": round(float(row.get("val_loss", 0.0)), 6),
+                    "top1": round(float(row.get("top1", 0.0)), 6),
+                    "top5": round(float(row.get("top5", 0.0)), 6),
+                }
+            )
+
+        if restore_best and has_val_rows:
+            cur_val_loss = float(row.get("val_loss", 0.0))
+            cur_top1 = float(row.get("top1", 0.0))
+            is_better = (
+                best_val_loss is None
+                or cur_val_loss < best_val_loss
+                or (cur_val_loss == best_val_loss and (best_top1 is None or cur_top1 > best_top1))
+            )
+            if is_better:
+                best_val_loss = cur_val_loss
+                best_top1 = cur_top1
+                best_epoch = epoch
+                best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                if verbose:
+                    print(
+                        {
+                            "best_checkpoint_update": {
+                                "epoch": epoch,
+                                "val_loss": round(cur_val_loss, 6),
+                                "top1": round(cur_top1, 6),
+                            }
+                        }
+                    )
+
+    best_checkpoint_info = {
+        "enabled": bool(restore_best),
+        "used": False,
+        "metric": "val_loss",
+        "best_epoch": None,
+        "best_val_loss": None,
+    }
+    if restore_best and has_val_rows and best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        best_checkpoint_info.update(
+            {
+                "used": True,
+                "best_epoch": int(best_epoch),
+                "best_val_loss": float(best_val_loss),
+            }
+        )
+        if verbose:
+            print({"best_checkpoint_restored": best_checkpoint_info})
+    elif verbose:
+        print({"best_checkpoint_restored": best_checkpoint_info})
+
+    artifact = {
+        "state_dict": model.state_dict(),
+        "vocab": vocab,
+        "config": {
+            "embed_dim": embed_dim,
+            "hidden_dim": hidden_dim,
+            "num_layers": num_layers,
+            "dropout": dropout,
+            "use_winner": use_winner,
+        },
+        "runtime": {
+            "device": str(device),
+            "amp": use_amp,
+            "best_checkpoint": best_checkpoint_info,
+            "phase_weights": {
+                "unknown": float(phase_weight_vector[0].item()),
+                "opening": float(phase_weight_vector[1].item()),
+                "middlegame": float(phase_weight_vector[2].item()),
+                "endgame": float(phase_weight_vector[3].item()),
+            },
+        },
+    }
+
+    dataset_info = {
+        "train_rows": train_rows_total,
+        "val_rows": val_rows_total,
+        "train_rows_by_file": train_rows_by_file,
+        "val_rows_by_file": val_rows_by_file,
+        "train_index_rows": len(train_ds),
+        "val_index_rows": len(val_ds),
+        "vocab_size": len(vocab),
+        "data_loading": "indexed_jsonl_on_demand",
+    }
+    return artifact, history, dataset_info

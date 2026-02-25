@@ -5,7 +5,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 
 ## Dataset Inputs
 - CLI accepts one or more `--train` JSONL paths and one or more `--val` JSONL paths (repeatable flags)
-- Repeated `--train` / `--val` inputs are concatenated in-memory before training/evaluation
+- Repeated `--train` / `--val` inputs are combined via file-backed JSONL indexing (line offsets) instead of concatenating row dicts in memory
 - Existing single-path usage remains supported (one `--train`, one `--val`)
 
 ## Code Ownership
@@ -25,6 +25,16 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - Winner side encoded (`W`, `B`, `D`, `?`)
 - Winner examples (`W`/`B`) receive configurable loss upweighting (`--winner-weight`)
 
+## Phase-Aware Behavior (optional)
+- Training reads splice-row `phase` labels when present (`opening`, `middlegame`, `endgame`; fallback `unknown`)
+- CLI exposes per-phase loss multipliers:
+  - `--phase-weight-opening`
+  - `--phase-weight-middlegame`
+  - `--phase-weight-endgame`
+  - `--phase-weight-unknown`
+- Effective per-example loss weight is multiplicative: `winner_weight_component * phase_weight_component`
+- Default phase weights are `1.0`, preserving prior training behavior unless explicitly changed
+
 ## Runtime / Device Controls
 - `scripts/train_baseline.py` supports explicit `--device` (`auto`, `cpu`, `cuda`, `cuda:N`)
 - CUDA request fails fast if `torch.cuda.is_available()` is false
@@ -39,6 +49,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--verbose/--no-verbose` (toggle startup/epoch/checkpoint logs)
   - `--progress/--no-progress` (toggle per-epoch batch progress bar; useful with `--verbose`)
 - Memory/loader safeguards:
+  - CLI streams train JSONL files to build vocabulary/counts, indexes train/val JSONL line offsets, and loads rows on-demand in `Dataset.__getitem__` (reduces host RAM vs eager row loading)
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
@@ -52,15 +63,18 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - `vocab`
 - `config` (`embed_dim`, `hidden_dim`, `num_layers`, `dropout`, `use_winner`)
 - `runtime` (`device`, `amp`, `best_checkpoint`) from the training run
+- `runtime.phase_weights` (resolved per-phase multipliers used during training)
 
 ## Metrics Output
 `artifacts/train_metrics.json` stores:
 - dataset row counts
 - train/val input file lists and row counts per input file (when provided)
+- `data_loading` mode metadata (currently `indexed_jsonl_on_demand`)
 - epoch history (train_loss, val_loss, top1, top5)
 - model path
 - runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)
+- requested `phase_weights`
 - best-checkpoint summary copied from artifact runtime metadata
 
 ## Current Limitation
-- CLI still loads `train`/`val` JSONL fully into memory before training starts (not yet streaming/iterable).
+- Training still stores per-row JSONL line offsets in RAM (much smaller than full row dicts/strings, but not fully streaming/iterable training).

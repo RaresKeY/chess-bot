@@ -4,6 +4,14 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Set, Tuple
 
+import chess
+
+from src.chessbot.phase import (
+    PHASE_RULE_VERSION,
+    classify_board_phase,
+    remaining_plies_bucket,
+    relative_progress_bucket,
+)
 
 @dataclass
 class SpliceConfig:
@@ -55,15 +63,47 @@ def iter_game_splice_samples(game: Dict, cfg: SpliceConfig) -> Iterator[Dict]:
         return
 
     local_samples: List[Dict] = []
-    for i in range(start_i, end_i + 1):
+    board = chess.Board()
+    board_ok = True
+    for i, uci in enumerate(moves):
+        if board_ok:
+            try:
+                mv = chess.Move.from_uci(uci)
+            except Exception:
+                board_ok = False
+            else:
+                if mv in board.legal_moves:
+                    board.push(mv)
+                else:
+                    board_ok = False
+        if i < start_i or i > end_i:
+            continue
         target = moves[i + 1 : i + 1 + cfg.k]
         if len(target) < cfg.min_target:
             continue
+        ply = i + 1
+        plies_remaining = max(0, n - ply)
+        phase_info = (
+            classify_board_phase(board, ply=ply)
+            if board_ok
+            else {
+                "phase": "unknown",
+                "phase_reason": "invalid_moves_uci",
+                "phase_rule_version": PHASE_RULE_VERSION,
+            }
+        )
         local_samples.append(
             {
                 "game_id": game_id,
                 "winner_side": winner_side,
                 "splice_index": i,
+                "ply": ply,
+                "plies_remaining": plies_remaining,
+                "plies_remaining_bucket": remaining_plies_bucket(plies_remaining),
+                "relative_progress_bucket": relative_progress_bucket(ply, n),
+                "phase": phase_info.get("phase", "unknown"),
+                "phase_reason": phase_info.get("phase_reason", "unknown"),
+                "phase_rule_version": phase_info.get("phase_rule_version", PHASE_RULE_VERSION),
                 "context": moves[: i + 1],
                 "target": target,
                 "next_move": target[0],

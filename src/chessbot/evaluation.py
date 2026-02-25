@@ -5,6 +5,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.chessbot.model import NextMoveLSTM, compute_topk, encode_tokens, winner_to_id
+from src.chessbot.phase import (
+    PHASE_RULE_VERSION,
+    board_from_context,
+    classify_board_phase,
+    remaining_plies_bucket,
+)
 
 
 def collate_eval(batch):
@@ -19,36 +25,79 @@ def collate_eval(batch):
     return tokens, lengths, labels, winners, batch
 
 
-def legal_rate_from_predictions(pred_ids: List[int], inv_vocab: Dict[int, str], batch_rows: List[Dict]) -> float:
-    legal = 0
-    total = 0
-    for pred_id, row in zip(pred_ids, batch_rows):
-        board = chess.Board()
-        ok = True
-        for uci in row["context"]:
-            try:
-                mv = chess.Move.from_uci(uci)
-            except Exception:
-                ok = False
-                break
-            if mv not in board.legal_moves:
-                ok = False
-                break
-            board.push(mv)
-        if not ok:
-            continue
+def _empty_bucket() -> Dict[str, float]:
+    return {
+        "rows": 0,
+        "top1_hits": 0,
+        "top5_hits": 0,
+        "legal_top1_numerator": 0,
+        "legal_top1_denominator": 0,
+    }
 
-        token = inv_vocab.get(pred_id, "")
-        try:
-            pred_mv = chess.Move.from_uci(token)
-        except Exception:
-            total += 1
-            continue
 
-        total += 1
-        if pred_mv in board.legal_moves:
-            legal += 1
-    return legal / total if total else 0.0
+def _update_bucket(
+    buckets: Dict[str, Dict[str, float]],
+    key: str,
+    *,
+    top1_hit: bool,
+    top5_hit: bool,
+    legal_num: int,
+    legal_den: int,
+) -> None:
+    rec = buckets.setdefault(key, _empty_bucket())
+    rec["rows"] += 1
+    rec["top1_hits"] += int(top1_hit)
+    rec["top5_hits"] += int(top5_hit)
+    rec["legal_top1_numerator"] += int(legal_num)
+    rec["legal_top1_denominator"] += int(legal_den)
+
+
+def _finalize_buckets(buckets: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    out: Dict[str, Dict[str, float]] = {}
+    for key, rec in buckets.items():
+        rows = int(rec["rows"])
+        legal_den = int(rec["legal_top1_denominator"])
+        out[key] = {
+            "rows": rows,
+            "top1": (float(rec["top1_hits"]) / rows) if rows else 0.0,
+            "top5": (float(rec["top5_hits"]) / rows) if rows else 0.0,
+            "legal_rate_top1": (float(rec["legal_top1_numerator"]) / legal_den) if legal_den else 0.0,
+            "legal_rate_top1_denominator": legal_den,
+        }
+    return out
+
+
+def _phase_from_row_or_board(row: Dict, board: chess.Board, board_ok: bool) -> str:
+    phase = str(row.get("phase", "")).strip().lower()
+    if phase:
+        return phase
+    if not board_ok:
+        return "unknown"
+    return str(classify_board_phase(board, ply=len(row.get("context", []))).get("phase", "unknown"))
+
+
+def _remaining_bucket_from_row(row: Dict) -> str:
+    bucket = str(row.get("plies_remaining_bucket", "")).strip()
+    if bucket:
+        return bucket
+    plies_remaining = row.get("plies_remaining")
+    if plies_remaining is None and row.get("plies_total") is not None:
+        if row.get("ply") is not None:
+            plies_remaining = int(row["plies_total"]) - int(row["ply"])
+        elif row.get("splice_index") is not None:
+            plies_remaining = int(row["plies_total"]) - (int(row["splice_index"]) + 1)
+    return remaining_plies_bucket(plies_remaining if plies_remaining is not None else -1)
+
+
+def _legal_top1_outcome(pred_id: int, inv_vocab: Dict[int, str], board: chess.Board, board_ok: bool) -> tuple[int, int]:
+    if not board_ok:
+        return 0, 0
+    token = inv_vocab.get(pred_id, "")
+    try:
+        pred_mv = chess.Move.from_uci(token)
+    except Exception:
+        return 0, 1
+    return (1, 1) if pred_mv in board.legal_moves else (0, 1)
 
 
 def evaluate_artifact(artifact: Dict, rows: List[Dict], batch_size: int = 128, device_str: str = "cpu") -> Dict:
@@ -86,8 +135,10 @@ def evaluate_artifact(artifact: Dict, rows: List[Dict], batch_size: int = 128, d
 
     totals = {1: 0.0, 5: 0.0}
     n = 0
-    legal_total = 0.0
-    batches = 0
+    legal_num_total = 0
+    legal_den_total = 0
+    by_phase: Dict[str, Dict[str, float]] = {}
+    by_remaining: Dict[str, Dict[str, float]] = {}
 
     with torch.no_grad():
         for tokens, lengths, labels, winners, batch_rows in loader:
@@ -102,14 +153,43 @@ def evaluate_artifact(artifact: Dict, rows: List[Dict], batch_size: int = 128, d
             totals[1] += metrics[1] * bs
             totals[5] += metrics[5] * bs
 
-            pred_ids = logits.argmax(dim=1).tolist()
-            legal_total += legal_rate_from_predictions(pred_ids, inv_vocab, batch_rows)
-            batches += 1
+            top5_ids = logits.topk(5, dim=1).indices.detach().cpu().tolist()
+            label_ids = labels.detach().cpu().tolist()
+            for row, row_top5, label_id in zip(batch_rows, top5_ids, label_ids):
+                top1_pred_id = int(row_top5[0]) if row_top5 else -1
+                top1_hit = bool(row_top5 and top1_pred_id == int(label_id))
+                top5_hit = bool(int(label_id) in row_top5)
+                board, board_ok = board_from_context(row.get("context", []))
+                legal_num, legal_den = _legal_top1_outcome(top1_pred_id, inv_vocab, board, board_ok)
+                legal_num_total += legal_num
+                legal_den_total += legal_den
+                phase_key = _phase_from_row_or_board(row, board, board_ok)
+                remaining_key = _remaining_bucket_from_row(row)
+                _update_bucket(
+                    by_phase,
+                    phase_key,
+                    top1_hit=top1_hit,
+                    top5_hit=top5_hit,
+                    legal_num=legal_num,
+                    legal_den=legal_den,
+                )
+                _update_bucket(
+                    by_remaining,
+                    remaining_key,
+                    top1_hit=top1_hit,
+                    top5_hit=top5_hit,
+                    legal_num=legal_num,
+                    legal_den=legal_den,
+                )
 
     return {
         "rows": len(rows),
         "top1": totals[1] / n if n else 0.0,
         "top5": totals[5] / n if n else 0.0,
-        "legal_rate_top1": legal_total / batches if batches else 0.0,
+        "legal_rate_top1": (legal_num_total / legal_den_total) if legal_den_total else 0.0,
+        "legal_rate_top1_denominator": legal_den_total,
+        "phase_rule_version": PHASE_RULE_VERSION,
+        "by_phase": _finalize_buckets(by_phase),
+        "by_remaining_plies": _finalize_buckets(by_remaining),
         "device": str(device),
     }

@@ -2,6 +2,7 @@
 
 ## Scope
 Build a reproducible supervised chess move-prediction pipeline that runs:
+0. Optional monthly orchestration wrapper (`scripts/acquire_and_prepare_elite_month.py`) for download + validation + splicing
 1. PGN validation (`scripts/validate_games.py`)
 2. Splice dataset generation (`scripts/build_splice_dataset.py`)
 3. Baseline training (`scripts/train_baseline.py`)
