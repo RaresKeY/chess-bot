@@ -9,6 +9,7 @@ Reproducible supervised chess move-prediction pipeline:
 5. Infer best legal move from context
 6. Render a navigable HTML viewer for PGN games
 7. Provide an interactive play-vs-model web app
+8. Support modular cloud deployment workflows (RunPod-oriented) for training/inference operations
 
 ## Architecture Pattern
 - `scripts/*.py`: thin orchestration CLIs
@@ -18,6 +19,7 @@ Reproducible supervised chess move-prediction pipeline:
 - `artifacts/*`: model and metrics artifacts
 - `assets/pieces/cburnett/*`: local SVG chess piece images used by viewer
 - `scripts/play_vs_model_server.py` + `src/chessbot/play_vs_model.py`: interactive gameplay UI/API server
+- `deploy/runpod_cloud_training/*`: cloud deployment module (Docker, startup orchestration, Jupyter/SSH/inference API, HF sync, idle watchdog)
 
 ## Core Decisions
 - Move encoding: UCI tokens.
