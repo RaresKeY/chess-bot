@@ -210,6 +210,12 @@ button {{ cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed;
 .move-row {{ display:grid; grid-template-columns:42px 1fr 1fr; gap:8px; padding:4px 6px; border-radius:8px; }}
 .move-row.active {{ background:#efe7d7; outline:1px solid #d8ccb8; }}
 .meta-grid {{ display:grid; grid-template-columns: 90px 1fr; gap:6px 8px; font-size:14px; }}
+.log-toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }}
+.log-panel {{ max-height:180px; overflow:auto; display:grid; gap:6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }}
+.log-panel.hidden {{ display:none; }}
+.log-entry {{ padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:#fffaf0; }}
+.log-entry.error {{ color:#7f1d1d; background:#fff1ee; border-color:#e6b8b1; font-weight:600; }}
+.log-entry.info {{ color:#3f3124; }}
 </style>
 </head>
 <body>
@@ -255,6 +261,13 @@ button {{ cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed;
       <h2 class=\"hdr\">Moves</h2>
       <div id=\"moves\" class=\"moves\"></div>
     </section>
+    <section class=\"card\">
+      <div class=\"log-toolbar\">
+        <h2 class=\"hdr\" style=\"margin:0;\">Log</h2>
+        <button id=\"toggleLogBtn\" type=\"button\">Hide Log</button>
+      </div>
+      <div id=\"logPanel\" class=\"log-panel\"></div>
+    </section>
   </aside>
 </div>
 <script>
@@ -265,6 +278,8 @@ const boardEl = document.getElementById('board');
 const statusEl = document.getElementById('status');
 const movesEl = document.getElementById('moves');
 const errEl = document.getElementById('error');
+const logPanelEl = document.getElementById('logPanel');
+const toggleLogBtn = document.getElementById('toggleLogBtn');
 const turnTxt = document.getElementById('turnTxt');
 const resultTxt = document.getElementById('resultTxt');
 const selectedTxt = document.getElementById('selectedTxt');
@@ -281,7 +296,9 @@ const state = {{
   turn: 'white',
   result: '*',
   game_over: false,
-  legalTargets: []
+  legalTargets: [],
+  logs: [],
+  logVisible: true
 }};
 
 function pieceToAsset(ch) {{
@@ -312,7 +329,18 @@ async function api(path, body) {{
 
 function setError(msg) {{ errEl.textContent = msg || ''; }}
 
+function pushLog(level, message) {{
+  if (!message) return;
+  state.logs.push({{
+    ts: new Date().toLocaleTimeString(),
+    level: String(level || 'INFO').toUpperCase(),
+    message: String(message)
+  }});
+  if (state.logs.length > 200) state.logs = state.logs.slice(-200);
+}}
+
 function applyServerState(data) {{
+  const prevContextLen = state.context.length;
   state.context = data.context || [];
   state.fen = data.fen;
   state.turn = data.turn;
@@ -323,6 +351,21 @@ function applyServerState(data) {{
   state.snapshotIndex = state.snapshots.length ? state.snapshots.length - 1 : 0;
   state.selected = null;
   state.legalTargets = [];
+  if (data.last_user_move && state.context.length >= prevContextLen) {{
+    pushLog('INFO', `User move ${{data.last_user_move.san || data.last_user_move.uci}}`);
+  }}
+  if (data.last_model_move) {{
+    const modelMove = data.last_model_move;
+    if (modelMove.error) {{
+      const level = /legal/i.test(modelMove.error) ? 'ERROR' : 'INFO';
+      const suffix = modelMove.fallback ? ' (fallback applied)' : '';
+      pushLog(level, `Model: ${{modelMove.error}}${{suffix}}`);
+    }}
+    if (modelMove.uci) {{
+      const tag = modelMove.fallback ? ' [fallback]' : '';
+      pushLog('INFO', `Model move ${{modelMove.san || modelMove.uci}}${{tag}}`);
+    }}
+  }}
   renderAll();
 }}
 
@@ -392,7 +435,19 @@ function renderStatus() {{
   document.getElementById('undoBtn').disabled = state.context.length < 2;
 }}
 
-function renderAll() {{ renderBoard(); renderMoves(); renderStatus(); }}
+function renderLog() {{
+  logPanelEl.classList.toggle('hidden', !state.logVisible);
+  toggleLogBtn.textContent = state.logVisible ? 'Hide Log' : 'Show Log';
+  if (!state.logs.length) {{
+    logPanelEl.innerHTML = '<div class=\"small\">No log entries yet.</div>';
+    return;
+  }}
+  logPanelEl.innerHTML = state.logs.slice().reverse().map((entry) =>
+    `<div class=\"log-entry ${{entry.level === 'ERROR' ? 'error' : 'info'}}\">[${{entry.ts}}] ${{entry.level}} ${{entry.message}}</div>`
+  ).join('');
+}}
+
+function renderAll() {{ renderBoard(); renderMoves(); renderStatus(); renderLog(); }}
 
 function currentBoardPieceMap() {{
   const snap = buildSnapshots()[state.snapshots.length - 1];
@@ -464,6 +519,7 @@ document.getElementById('firstBtn').addEventListener('click', () => {{ state.sna
 document.getElementById('prevBtn').addEventListener('click', () => {{ state.snapshotIndex = Math.max(0, state.snapshotIndex - 1); renderAll(); }});
 document.getElementById('nextBtn').addEventListener('click', () => {{ state.snapshotIndex = Math.min(state.snapshots.length - 1, state.snapshotIndex + 1); renderAll(); }});
 document.getElementById('lastBtn').addEventListener('click', () => {{ state.snapshotIndex = state.snapshots.length - 1; renderAll(); }});
+toggleLogBtn.addEventListener('click', () => {{ state.logVisible = !state.logVisible; renderLog(); }});
 window.addEventListener('keydown', (e) => {{
   if (e.key === 'ArrowLeft') {{ state.snapshotIndex = Math.max(0, state.snapshotIndex - 1); renderAll(); }}
   if (e.key === 'ArrowRight') {{ state.snapshotIndex = Math.min(state.snapshots.length - 1, state.snapshotIndex + 1); renderAll(); }}

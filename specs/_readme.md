@@ -23,5 +23,5 @@ Populate this table following template style.
 | [Chess Bot Evaluation](./chess_bot_evaluation.md) | `scripts/eval_model.py`, `src/chessbot/evaluation.py` | Offline metrics and legality-rate evaluation behavior. |
 | [Chess Bot Inference](./chess_bot_inference.md) | `scripts/infer_move.py`, `src/chessbot/inference.py` | Top-k decoding and best-legal move selection behavior. |
 | [Chess Bot Game Viewer](./chess_bot_game_viewer.md) | `scripts/render_game_viewer.py`, `src/chessbot/viewer.py`, `assets/pieces/cburnett/*` | HTML board viewer with left/right navigation and local piece assets. |
-| [Chess Bot Play-vs-Model](./chess_bot_play_vs_model.md) | `scripts/play_vs_model_server.py`, `src/chessbot/play_vs_model.py` | Interactive browser UI + API server for playing against the model. |
+| [Chess Bot Play-vs-Model](./chess_bot_play_vs_model.md) | `main.py`, `scripts/play_vs_model_server.py`, `src/chessbot/play_vs_model.py` | Interactive browser UI + API server for playing against the model. |
 | [Chess Bot Viewer Server Utility](./chess_bot_viewer_server.md) | `scripts/serve_viewer.py` | Local HTTP server utility for viewing generated HTML and piece assets in-browser. |
