@@ -46,7 +46,7 @@ API payload (move):
 - `Undo Pair` removes last user+model plies
 - `New Game` resets to starting position
 - Toggleable `Log` panel (Show/Hide) records move events and model fallback/error messages
-- Illegal model predictions are surfaced in the UI log as `ERROR` entries (fallback may still be applied so play continues)
+- Illegal model predictions are surfaced in the UI log as `ERROR` entries and include the attempted model UCI (fallback may still be applied so play continues)
 
 ## Known Limitations (current)
 - Model quality may be weak; fallback legal move is used when no legal prediction exists

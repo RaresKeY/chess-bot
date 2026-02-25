@@ -124,6 +124,7 @@ def apply_user_and_model_move(
     if not board.is_game_over(claim_draw=True):
         infer = model_runtime.infer(next_context, winner_side=cfg.winner_side, topk=cfg.topk)
         reply_uci = infer.get("best_legal", "")
+        topk_tokens = infer.get("topk", [])
         if reply_uci:
             reply_move = chess.Move.from_uci(reply_uci)
             if reply_move in board.legal_moves:
@@ -133,12 +134,24 @@ def apply_user_and_model_move(
                 model_reply = {
                     "uci": reply_uci,
                     "san": reply_san,
-                    "topk": infer.get("topk", []),
+                    "topk": topk_tokens,
                 }
             else:
-                model_reply = {"uci": "", "san": "", "topk": infer.get("topk", []), "error": "predicted move not legal"}
+                model_reply = {
+                    "uci": "",
+                    "san": "",
+                    "topk": topk_tokens,
+                    "attempted_uci": reply_uci,
+                    "error": "predicted move not legal",
+                }
         else:
-            model_reply = {"uci": "", "san": "", "topk": infer.get("topk", []), "error": "no legal model move"}
+            model_reply = {
+                "uci": "",
+                "san": "",
+                "topk": topk_tokens,
+                "attempted_uci": (topk_tokens[0] if topk_tokens else ""),
+                "error": "no legal model move",
+            }
 
         if (not model_reply or not model_reply.get("uci")) and not board.is_game_over(claim_draw=True):
             fallback_move = next(iter(board.legal_moves), None)
@@ -359,7 +372,8 @@ function applyServerState(data) {{
     if (modelMove.error) {{
       const level = /legal/i.test(modelMove.error) ? 'ERROR' : 'INFO';
       const suffix = modelMove.fallback ? ' (fallback applied)' : '';
-      pushLog(level, `Model: ${{modelMove.error}}${{suffix}}`);
+      const attempted = modelMove.attempted_uci ? ` [attempted=${{modelMove.attempted_uci}}]` : '';
+      pushLog(level, `Model: ${{modelMove.error}}${{attempted}}${{suffix}}`);
     }}
     if (modelMove.uci) {{
       const tag = modelMove.fallback ? ' [fallback]' : '';
