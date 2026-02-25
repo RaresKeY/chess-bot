@@ -59,6 +59,12 @@ def main() -> None:
     parser.add_argument("--allow-draws", action="store_true", help="Include draw games")
     parser.add_argument("--workers", type=int, default=1, help="Threads for batch sample generation in pass 2")
     parser.add_argument("--batch-size", type=int, default=256, help="Games per pass-2 processing batch")
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10000,
+        help="Print pass progress every N input games per pass (0 disables periodic progress logs).",
+    )
     args = parser.parse_args()
 
     decisive_only = args.decisive_only and not args.allow_draws
@@ -84,6 +90,11 @@ def main() -> None:
         filtered_games_total += 1
         if game_has_splice_samples(game, cfg):
             spliceable_game_ids.append(game["game_id"])
+        if args.progress_every > 0 and input_games_total % args.progress_every == 0:
+            print(
+                f"[splice pass1] processed={input_games_total} "
+                f"eligible={filtered_games_total} spliceable={len(spliceable_game_ids)}"
+            )
 
     split = split_game_ids(spliceable_game_ids, cfg)
 
@@ -102,10 +113,18 @@ def main() -> None:
     with open(train_path, "w", encoding="utf-8") as train_f, open(
         val_path, "w", encoding="utf-8"
     ) as val_f, open(test_path, "w", encoding="utf-8") as test_f:
+        pass2_games = 0
         if args.workers <= 1:
             for game in read_jsonl(args.input):
+                pass2_games += 1
                 split_name, gid, lines, wrote_any = _process_game_to_lines(game, cfg, split)
                 if not split_name:
+                    if args.progress_every > 0 and pass2_games % args.progress_every == 0:
+                        print(
+                            f"[splice pass2] processed={pass2_games} "
+                            f"samples(train/val/test)="
+                            f"{split_sample_counts['train']}/{split_sample_counts['val']}/{split_sample_counts['test']}"
+                        )
                     continue
                 out_f = train_f if split_name == "train" else val_f if split_name == "val" else test_f
                 for line in lines:
@@ -113,9 +132,16 @@ def main() -> None:
                 split_sample_counts[split_name] += len(lines)
                 if wrote_any:
                     routed_games_seen[split_name].add(gid)
+                if args.progress_every > 0 and pass2_games % args.progress_every == 0:
+                    print(
+                        f"[splice pass2] processed={pass2_games} "
+                        f"samples(train/val/test)="
+                        f"{split_sample_counts['train']}/{split_sample_counts['val']}/{split_sample_counts['test']}"
+                    )
         else:
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 for batch in _iter_batches(read_jsonl(args.input), args.batch_size):
+                    pass2_games += len(batch)
                     for split_name, gid, lines, wrote_any in ex.map(
                         lambda g: _process_game_to_lines(g, cfg, split), batch
                     ):
@@ -127,6 +153,12 @@ def main() -> None:
                         split_sample_counts[split_name] += len(lines)
                         if wrote_any:
                             routed_games_seen[split_name].add(gid)
+                    if args.progress_every > 0 and pass2_games % args.progress_every < len(batch):
+                        print(
+                            f"[splice pass2 threaded] processed={pass2_games} "
+                            f"samples(train/val/test)="
+                            f"{split_sample_counts['train']}/{split_sample_counts['val']}/{split_sample_counts['test']}"
+                        )
 
     stats = {
         "input_games_total": input_games_total,

@@ -3,6 +3,11 @@
 ## Responsibility
 Train a baseline winner-aware next-move predictor from splice samples and save a reusable model artifact.
 
+## Dataset Inputs
+- CLI accepts one or more `--train` JSONL paths and one or more `--val` JSONL paths (repeatable flags)
+- Repeated `--train` / `--val` inputs are concatenated in-memory before training/evaluation
+- Existing single-path usage remains supported (one `--train`, one `--val`)
+
 ## Code Ownership
 - CLI: `scripts/train_baseline.py`
 - Core logic: `src/chessbot/training.py`
@@ -38,6 +43,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
 - CLI can emit verbose startup logs including resolved input/output paths, requested hyperparameters, and loaded dataset row counts
+- Verbose logs include per-file train/val input lists and loaded row counts per input file when multiple datasets are provided
 - Core training loop can emit epoch start/end summaries, a per-epoch batch progress bar, and best-checkpoint update/restore messages
 
 ## Output Artifact Contract
@@ -50,6 +56,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 ## Metrics Output
 `artifacts/train_metrics.json` stores:
 - dataset row counts
+- train/val input file lists and row counts per input file (when provided)
 - epoch history (train_loss, val_loss, top1, top5)
 - model path
 - runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)

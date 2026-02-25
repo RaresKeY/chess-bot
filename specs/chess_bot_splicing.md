@@ -38,6 +38,9 @@ For each valid game and splice index `i`:
 - Optional concurrency for pass 2: `--workers N --batch-size M`
   - Uses threaded batch processing for per-game sample generation while preserving single-writer output files
   - Split assignment remains deterministic and leakage-safe (computed before threaded pass 2)
+- Progress visibility:
+  - `--progress-every N` prints pass-1 and pass-2 counters while the dataset build streams through input games
+  - available in both single-threaded and threaded pass-2 modes
 
 ## Verified Real Dataset Build (elite_2025-11_cap4)
 - Input validated corpus: `data/validated/elite_2025-11/valid_games.jsonl`

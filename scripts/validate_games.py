@@ -93,6 +93,12 @@ def main() -> None:
         default=1,
         help="Thread count for validating multiple input PGN files concurrently (single-file inputs remain sequential).",
     )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=5000,
+        help="Print progress every N processed games (0 disables periodic progress logs).",
+    )
     args = parser.parse_args()
 
     paths = resolve_inputs(args.input)
@@ -109,7 +115,14 @@ def main() -> None:
                     for i, path in enumerate(paths)
                 ]
                 for fut in as_completed(futures):
-                    results.append(fut.result())
+                    res = fut.result()
+                    results.append(res)
+                    if args.progress_every >= 0:
+                        print(
+                            f"[validate] finished file: {res['path']} "
+                            f"(valid={res['valid_count']}, invalid={res['invalid_count']}) "
+                            f"[{len(results)}/{len(paths)} files]"
+                        )
             valid_count, invalid_count, reason_counts = _merge_shards(
                 results=results, valid_out=args.valid_out, invalid_out=args.invalid_out
             )
@@ -129,7 +142,9 @@ def main() -> None:
             )
             invalid_writer.writeheader()
 
+            processed = 0
             for kind, row in iter_validation_events(paths=paths, min_plies=args.min_plies):
+                processed += 1
                 if kind == "valid":
                     valid_f.write(json.dumps(row, ensure_ascii=True) + "\n")
                     valid_count += 1
@@ -138,6 +153,11 @@ def main() -> None:
                     invalid_count += 1
                     reason = row.get("reason", "unknown")
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                if args.progress_every > 0 and processed % args.progress_every == 0:
+                    print(
+                        f"[validate] processed={processed} valid={valid_count} invalid={invalid_count} "
+                        f"valid_ratio={(valid_count / processed):.4f}"
+                    )
 
     total = valid_count + invalid_count
     summary = {

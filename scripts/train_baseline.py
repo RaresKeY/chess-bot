@@ -17,8 +17,18 @@ from src.chessbot.training import train_next_move_model
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train baseline next-move predictor")
-    parser.add_argument("--train", required=True)
-    parser.add_argument("--val", required=True)
+    parser.add_argument(
+        "--train",
+        action="append",
+        required=True,
+        help="Training JSONL path. Repeat flag to combine multiple train datasets.",
+    )
+    parser.add_argument(
+        "--val",
+        action="append",
+        required=True,
+        help="Validation JSONL path. Repeat flag to combine multiple val datasets.",
+    )
     parser.add_argument("--output", default="artifacts/model.pt")
     parser.add_argument("--metrics-out", default="artifacts/train_metrics.json")
     parser.add_argument("--epochs", type=int, default=5)
@@ -68,8 +78,10 @@ def main() -> None:
         help="Show per-epoch batch progress bar (requires --verbose)",
     )
     args = parser.parse_args()
-    train_path = Path(args.train).resolve()
-    val_path = Path(args.val).resolve()
+    train_paths = [Path(p).resolve() for p in args.train]
+    val_paths = [Path(p).resolve() for p in args.val]
+    train_path = train_paths[0]
+    val_path = val_paths[0]
     output_path = Path(args.output).resolve()
     metrics_path = Path(args.metrics_out).resolve()
 
@@ -86,10 +98,10 @@ def main() -> None:
         print(
             {
                 "train_start": {
-                    "train_path": str(train_path),
-                    "val_path": str(val_path),
-                    "output_path": str(output_path),
-                    "metrics_out": str(metrics_path),
+                "train_path": str(train_path),
+                "val_path": str(val_path),
+                "output_path": str(output_path),
+                "metrics_out": str(metrics_path),
                     "epochs": args.epochs,
                     "batch_size": args.batch_size,
                     "lr": args.lr,
@@ -110,9 +122,30 @@ def main() -> None:
                 }
             }
         )
+        # Preserve prior single-path keys for compatibility while exposing full path lists.
+        print(
+            {
+                "train_inputs": {
+                    "train_paths": [str(p) for p in train_paths],
+                    "val_paths": [str(p) for p in val_paths],
+                    "train_file_count": len(train_paths),
+                    "val_file_count": len(val_paths),
+                }
+            }
+        )
 
-    train_rows = list(read_jsonl(args.train))
-    val_rows = list(read_jsonl(args.val))
+    train_rows = []
+    train_rows_by_file: dict[str, int] = {}
+    for path in train_paths:
+        rows = list(read_jsonl(str(path)))
+        train_rows.extend(rows)
+        train_rows_by_file[str(path)] = len(rows)
+    val_rows = []
+    val_rows_by_file: dict[str, int] = {}
+    for path in val_paths:
+        rows = list(read_jsonl(str(path)))
+        val_rows.extend(rows)
+        val_rows_by_file[str(path)] = len(rows)
     if not train_rows:
         raise SystemExit("No training rows found")
     if args.verbose:
@@ -123,6 +156,8 @@ def main() -> None:
                     "val_rows": len(val_rows),
                     "train_has_rows": bool(train_rows),
                     "val_has_rows": bool(val_rows),
+                    "train_rows_by_file": train_rows_by_file,
+                    "val_rows_by_file": val_rows_by_file,
                 }
             }
         )
@@ -157,6 +192,10 @@ def main() -> None:
     summary = {
         "train_rows": len(train_rows),
         "val_rows": len(val_rows),
+        "train_inputs": [str(p) for p in train_paths],
+        "val_inputs": [str(p) for p in val_paths],
+        "train_rows_by_file": train_rows_by_file,
+        "val_rows_by_file": val_rows_by_file,
         "epochs": args.epochs,
         "history": history,
         "model_path": args.output,

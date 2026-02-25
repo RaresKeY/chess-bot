@@ -5,6 +5,7 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 
 ## Code Ownership
 - CLI: `scripts/validate_games.py`
+- Companion data download utility: `scripts/download_lichess_elite_month.py`
 - Core logic: `src/chessbot/validation.py`
 - Shared IO: `src/chessbot/io_utils.py`
 
@@ -24,6 +25,9 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
   - Uses file-level threading (each PGN file validated in its own thread to shard outputs, then merged)
   - Effective when validating a directory/glob with multiple PGN files
   - A single large PGN file remains effectively sequential (PGN parsing/replay is stream-based)
+- Progress visibility:
+  - `scripts/validate_games.py --progress-every N` prints periodic counters during streaming validation
+  - threaded mode prints per-file completion summaries as shards finish
 
 ## Verified Real Dataset Build (2025-11 Elite Month)
 - Source archive: `https://database.nikonoel.fr/lichess_elite_2025-11.zip` (Lichess-linked elite database)

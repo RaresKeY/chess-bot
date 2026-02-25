@@ -13,6 +13,7 @@ Reproducible supervised chess move-prediction pipeline:
 
 ## Architecture Pattern
 - `scripts/*.py`: thin orchestration CLIs
+- `scripts/download_lichess_elite_month.py`: streaming utility for downloading/extracting monthly Lichess elite ZIP dumps with progress
 - `src/chessbot/*`: reusable logic modules
 - `scripts/__init__.py`: allows importing CLI modules in tests/tooling (`import scripts.<name>`)
 - `data/*`: generated datasets and reports
