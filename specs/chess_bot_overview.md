@@ -18,7 +18,6 @@ Reproducible supervised chess move-prediction pipeline:
 - `artifacts/*`: model and metrics artifacts
 - `assets/pieces/cburnett/*`: local SVG chess piece images used by viewer
 - `scripts/play_vs_model_server.py` + `src/chessbot/play_vs_model.py`: interactive gameplay UI/API server
-- `streamlit_chess_ai_demo/*`: standalone Streamlit deployment/demo package for local or Streamlit Cloud hosting
 
 ## Core Decisions
 - Move encoding: UCI tokens.
