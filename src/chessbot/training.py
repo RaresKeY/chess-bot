@@ -84,6 +84,7 @@ def train_next_move_model(
     pin_memory: bool = True,
     amp: bool = False,
     restore_best: bool = True,
+    verbose: bool = True,
 ):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -141,9 +142,34 @@ def train_next_move_model(
     best_epoch = None
     best_val_loss = None
     best_top1 = None
+    if verbose:
+        print(
+            {
+                "train_setup": {
+                    "train_rows": len(train_rows),
+                    "val_rows": len(val_rows),
+                    "vocab_size": len(vocab),
+                    "device_selected": str(device),
+                    "amp_enabled": use_amp,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "lr": lr,
+                    "num_workers": num_workers,
+                    "pin_memory_effective": pin_memory,
+                    "winner_weight": winner_weight,
+                    "use_winner": use_winner,
+                    "num_layers": num_layers,
+                    "dropout": dropout,
+                    "restore_best": bool(restore_best),
+                    "restore_best_has_val": bool(has_val_rows),
+                }
+            }
+        )
 
     history: List[Dict] = []
     for epoch in range(1, epochs + 1):
+        if verbose:
+            print(f"[train] epoch {epoch}/{epochs} start")
         model.train()
         running_loss = 0.0
         seen = 0
@@ -180,6 +206,16 @@ def train_next_move_model(
         )
         row = {"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics}
         history.append(row)
+        if verbose:
+            print(
+                {
+                    "epoch": epoch,
+                    "train_loss": round(float(train_loss), 6),
+                    "val_loss": round(float(row.get("val_loss", 0.0)), 6),
+                    "top1": round(float(row.get("top1", 0.0)), 6),
+                    "top5": round(float(row.get("top5", 0.0)), 6),
+                }
+            )
 
         if restore_best and has_val_rows:
             cur_val_loss = float(row.get("val_loss", 0.0))
@@ -194,6 +230,16 @@ def train_next_move_model(
                 best_top1 = cur_top1
                 best_epoch = epoch
                 best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                if verbose:
+                    print(
+                        {
+                            "best_checkpoint_update": {
+                                "epoch": epoch,
+                                "val_loss": round(cur_val_loss, 6),
+                                "top1": round(cur_top1, 6),
+                            }
+                        }
+                    )
 
     best_checkpoint_info = {
         "enabled": bool(restore_best),
@@ -211,6 +257,10 @@ def train_next_move_model(
                 "best_val_loss": float(best_val_loss),
             }
         )
+        if verbose:
+            print({"best_checkpoint_restored": best_checkpoint_info})
+    elif verbose:
+        print({"best_checkpoint_restored": best_checkpoint_info})
 
     artifact = {
         "state_dict": model.state_dict(),

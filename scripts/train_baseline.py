@@ -56,6 +56,10 @@ def main() -> None:
         help="Restore best validation checkpoint (lowest val_loss) before saving when validation rows exist",
     )
     args = parser.parse_args()
+    train_path = Path(args.train).resolve()
+    val_path = Path(args.val).resolve()
+    output_path = Path(args.output).resolve()
+    metrics_path = Path(args.metrics_out).resolve()
 
     print(
         {
@@ -66,11 +70,46 @@ def main() -> None:
             "requested_device": args.device,
         }
     )
+    print(
+        {
+            "train_start": {
+                "train_path": str(train_path),
+                "val_path": str(val_path),
+                "output_path": str(output_path),
+                "metrics_out": str(metrics_path),
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "lr": args.lr,
+                "seed": args.seed,
+                "embed_dim": args.embed_dim,
+                "hidden_dim": args.hidden_dim,
+                "num_layers": args.num_layers,
+                "dropout": args.dropout,
+                "winner_weight": args.winner_weight,
+                "use_winner": not args.no_winner_feature,
+                "device_requested": args.device,
+                "num_workers": args.num_workers,
+                "pin_memory_requested": args.pin_memory,
+                "amp_requested": args.amp,
+                "restore_best": args.restore_best,
+            }
+        }
+    )
 
     train_rows = list(read_jsonl(args.train))
     val_rows = list(read_jsonl(args.val))
     if not train_rows:
         raise SystemExit("No training rows found")
+    print(
+        {
+            "dataset_loaded": {
+                "train_rows": len(train_rows),
+                "val_rows": len(val_rows),
+                "train_has_rows": bool(train_rows),
+                "val_has_rows": bool(val_rows),
+            }
+        }
+    )
 
     artifact, history = train_next_move_model(
         train_rows=train_rows,
@@ -90,10 +129,10 @@ def main() -> None:
         pin_memory=args.pin_memory,
         amp=args.amp,
         restore_best=args.restore_best,
+        verbose=True,
     )
 
-    for row in history:
-        print(row)
+    print({"training_complete": {"epochs_ran": len(history), "last_epoch": (history[-1]["epoch"] if history else None)}})
 
     ensure_parent(args.output)
     torch.save(artifact, args.output)
@@ -113,6 +152,7 @@ def main() -> None:
         "best_checkpoint": artifact.get("runtime", {}).get("best_checkpoint"),
     }
     write_json(args.metrics_out, summary)
+    print({"best_checkpoint": summary.get("best_checkpoint")})
     print(f"Saved model: {args.output}")
     print(f"Saved metrics: {args.metrics_out}")
 

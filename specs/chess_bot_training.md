@@ -35,6 +35,8 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
+- CLI emits verbose startup logs including resolved input/output paths, requested hyperparameters, and loaded dataset row counts
+- Core training loop emits epoch start/end summaries plus best-checkpoint update/restore messages
 
 ## Output Artifact Contract
 `artifacts/model.pt` stores:
