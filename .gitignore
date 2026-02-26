@@ -36,5 +36,7 @@ journal.txt
 data/
 streamlit_chess_ai_demo
 simple_easy.md
+
+config/
 config/runpod_known_hosts
 config/runpod_tracked_pods.jsonl
