@@ -27,7 +27,11 @@ try:
 except Exception:
     print("keyring-unavailable")
     raise SystemExit(0)
-v = keyring.get_password("runpod", "RUNPOD_API_KEY")
+try:
+    v = keyring.get_password("runpod", "RUNPOD_API_KEY")
+except Exception as exc:
+    print(f"keyring-error:{exc.__class__.__name__}")
+    raise SystemExit(0)
 if not v:
     print("keyring-missing")
 else:
@@ -49,9 +53,15 @@ echo "[runpod-doctor] checking GraphQL gpu-search auth..."
 if "${PY_BIN}" "${PROVISION_SCRIPT}" gpu-search --limit 1 >/tmp/runpod_doctor_gpu.$$ 2>/tmp/runpod_doctor_gpu_err.$$; then
   echo "[runpod-doctor] graphql-gpu-search=ok"
 else
-  echo "[runpod-doctor] graphql-gpu-search=error"
-  sed -n '1,120p' /tmp/runpod_doctor_gpu_err.$$ >&2 || true
-  echo "[runpod-doctor] hint: if template-list works but gpu-search fails with 403, the key likely lacks GraphQL access/scopes; use RunPod UI launch or provision with explicit --gpu-type-id."
+  if grep -q "GraphQL request was denied (HTTP 403)" /tmp/runpod_doctor_gpu_err.$$; then
+    echo "[runpod-doctor] graphql-gpu-search=denied (HTTP 403; key/account lacks GraphQL access)"
+    sed -n '1,120p' /tmp/runpod_doctor_gpu_err.$$ >&2 || true
+    echo "[runpod-doctor] hint: REST auth can still be sufficient for provisioning if you pass explicit --gpu-type-id (or use RunPod UI launch)."
+  else
+    echo "[runpod-doctor] graphql-gpu-search=error"
+    sed -n '1,120p' /tmp/runpod_doctor_gpu_err.$$ >&2 || true
+    echo "[runpod-doctor] hint: if template-list works but gpu-search fails with 403, the key likely lacks GraphQL access/scopes; use RunPod UI launch or provision with explicit --gpu-type-id."
+  fi
 fi
 
 rm -f /tmp/runpod_doctor_templates.$$ /tmp/runpod_doctor_templates_err.$$ /tmp/runpod_doctor_gpu.$$ /tmp/runpod_doctor_gpu_err.$$ || true

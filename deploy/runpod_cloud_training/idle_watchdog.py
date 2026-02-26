@@ -10,6 +10,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+HTTP_USER_AGENT = "chess-bot-runpod-idle-watchdog/1.0"
+
 
 def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
     parser.add_argument(
@@ -106,11 +108,11 @@ def _stop_runpod_pod(endpoint: str, api_key: str, pod_id: str, verbose: bool) ->
         )
     attempts = [
         {
-            "query": "mutation StopPod($input: PodStopInput!) { podStop(input: $input) }",
+            "query": "mutation StopPod($input: PodStopInput!) { podStop(input: $input) { id desiredStatus } }",
             "variables": {"input": {"podId": pod_id}},
         },
         {
-            "query": "mutation StopPod($podId: String!) { podStop(input: { podId: $podId }) }",
+            "query": "mutation StopPod($podId: String!) { podStop(input: { podId: $podId }) { id desiredStatus } }",
             "variables": {"podId": pod_id},
         },
     ]
@@ -121,6 +123,8 @@ def _stop_runpod_pod(endpoint: str, api_key: str, pod_id: str, verbose: bool) ->
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": HTTP_USER_AGENT,
             },
             data=json.dumps(payload).encode("utf-8"),
         )
@@ -129,7 +133,17 @@ def _stop_runpod_pod(endpoint: str, api_key: str, pod_id: str, verbose: bool) ->
                 body = resp.read().decode("utf-8", errors="replace")
             if verbose:
                 print({"idle_watchdog_runpod_stop_response": body[:500]})
-            if "errors" not in body:
+            try:
+                parsed_body = json.loads(body)
+            except json.JSONDecodeError:
+                parsed_body = None
+            if isinstance(parsed_body, dict):
+                if parsed_body.get("errors"):
+                    continue
+                stop_data = (parsed_body.get("data") or {}).get("podStop")
+                if stop_data is not None:
+                    return True
+            elif "errors" not in body:
                 return True
         except Exception as exc:
             if verbose:

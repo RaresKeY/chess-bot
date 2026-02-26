@@ -15,6 +15,7 @@ REST_BASE = "https://rest.runpod.io/v1"
 GRAPHQL_BASE = "https://api.runpod.io/graphql"
 DEFAULT_KEYRING_SERVICE = "runpod"
 DEFAULT_KEYRING_USERNAME = "RUNPOD_API_KEY"
+HTTP_USER_AGENT = "chess-bot-runpod-cli/1.0 (+local automation)"
 
 
 def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
@@ -90,7 +91,11 @@ def _http_json(
     timeout_s: int = 60,
 ) -> Any:
     data = None
-    headers = {"Authorization": f"Bearer {bearer_token}"}
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
+    }
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -134,6 +139,8 @@ def _graphql_json(
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
         },
         data=json.dumps({"query": query, "variables": variables or {}}).encode("utf-8"),
     )
@@ -370,7 +377,20 @@ def cmd_provision(args: argparse.Namespace) -> int:
         raise SystemExit("Missing RunPod API key (use --api-key, env RUNPOD_API_KEY, or keyring)")
 
     chosen_gpu: Optional[Dict[str, Any]] = None
-    try:
+    if args.gpu_type_id:
+        # Allow provisioning with an explicit GPU type even when GraphQL gpuTypes
+        # discovery is unavailable to the API key (common for scoped keys).
+        chosen_gpu = {
+            "id": str(args.gpu_type_id),
+            "display_name": str(args.gpu_type_id),
+            "memory_gb": None,
+            "cloud_type": str(args.cloud_type).upper(),
+            "max_gpu_count": None,
+            "price_per_hr": None,
+            "spot_price_per_hr": None,
+            "graphql_lookup_skipped": True,
+        }
+    else:
         gpu_rows = _gpu_types(api_key, graphql_endpoint=args.graphql_endpoint)
         ranked_gpus = _rank_gpu_rows(
             gpu_rows,
@@ -378,43 +398,9 @@ def cmd_provision(args: argparse.Namespace) -> int:
             min_memory_gb=args.min_memory_gb,
             max_hourly_price=args.max_hourly_price,
         )
-        if args.gpu_type_id:
-            chosen_gpu = next(
-                (g for g in ranked_gpus if g["id"] == args.gpu_type_id or g["display_name"] == args.gpu_type_id),
-                None,
-            )
-            if chosen_gpu is None:
-                raise SystemExit(f"Requested GPU not found in filtered list: {args.gpu_type_id}")
-        else:
-            chosen_gpu = next((g for g in ranked_gpus if g.get("max_gpu_count", 0) >= int(args.gpu_count)), None)
+        chosen_gpu = next((g for g in ranked_gpus if g.get("max_gpu_count", 0) >= int(args.gpu_count)), None)
         if chosen_gpu is None:
             raise SystemExit("No GPU candidates available after filters")
-    except SystemExit as exc:
-        if args.gpu_type_id and "GraphQL request was denied" in str(exc):
-            chosen_gpu = {
-                "id": str(args.gpu_type_id),
-                "display_name": str(args.gpu_type_id),
-                "memory_gb": None,
-                "cloud_type": str(args.cloud_type).upper(),
-                "max_gpu_count": None,
-                "price_per_hr": None,
-                "spot_price_per_hr": None,
-                "graphql_lookup_skipped": True,
-            }
-            print(
-                json.dumps(
-                    {
-                        "warning": {
-                            "message": "GraphQL GPU discovery unavailable; proceeding with explicit --gpu-type-id without validation",
-                            "gpu_type_id": str(args.gpu_type_id),
-                        }
-                    },
-                    ensure_ascii=True,
-                ),
-                file=sys.stderr,
-            )
-        else:
-            raise
 
     templates = _list_templates(
         api_key,
