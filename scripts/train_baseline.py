@@ -2,9 +2,13 @@
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # Allow direct script execution without requiring PYTHONPATH=. from repo root.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +19,264 @@ import torch
 
 from src.chessbot.io_utils import ensure_parent, write_json
 from src.chessbot.training import train_next_move_model_from_jsonl_paths
+
+
+def _safe_float(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s or s.upper() in {"N/A", "NA"}:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _safe_int(v: Any) -> Optional[int]:
+    try:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s or s.upper() in {"N/A", "NA"}:
+            return None
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _parse_nvidia_smi_csv_line(line: str) -> Dict[str, Any]:
+    parts = [p.strip() for p in line.split(",")]
+    # index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit
+    while len(parts) < 8:
+        parts.append("")
+    return {
+        "gpu_index": _safe_int(parts[0]),
+        "gpu_name": parts[1] or None,
+        "gpu_util_percent": _safe_float(parts[2]),
+        "vram_used_mib": _safe_float(parts[3]),
+        "vram_total_mib": _safe_float(parts[4]),
+        "gpu_temp_c": _safe_float(parts[5]),
+        "gpu_power_w": _safe_float(parts[6]),
+        "gpu_power_limit_w": _safe_float(parts[7]),
+    }
+
+
+def _read_proc_status_kv() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                out[k.strip()] = v.strip()
+    except Exception:
+        return out
+    return out
+
+
+def _summarize_telemetry_samples(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    numeric_keys = [
+        "gpu_util_percent",
+        "vram_used_mib",
+        "vram_total_mib",
+        "gpu_temp_c",
+        "gpu_power_w",
+        "gpu_power_limit_w",
+        "proc_rss_kib",
+        "epoch",
+        "last_train_loss",
+        "last_val_loss",
+        "last_top1",
+        "last_top5",
+    ]
+    metrics: Dict[str, Any] = {}
+    for key in numeric_keys:
+        vals: List[float] = []
+        for s in samples:
+            v = s.get(key)
+            if isinstance(v, (int, float)):
+                vals.append(float(v))
+        if not vals:
+            continue
+        metrics[key] = {
+            "count": len(vals),
+            "min": min(vals),
+            "max": max(vals),
+            "mean": sum(vals) / len(vals),
+        }
+    first_ts = samples[0].get("ts_ms") if samples else None
+    last_ts = samples[-1].get("ts_ms") if samples else None
+    return {
+        "sample_count": len(samples),
+        "first_ts_ms": first_ts,
+        "last_ts_ms": last_ts,
+        "duration_seconds": ((last_ts - first_ts) / 1000.0) if (isinstance(first_ts, int) and isinstance(last_ts, int)) else None,
+        "metrics": metrics,
+    }
+
+
+class _TrainingTelemetryLogger:
+    def __init__(
+        self,
+        enabled: bool,
+        run_dir: Optional[Path],
+        interval_sec: float,
+        requested_device: str,
+    ) -> None:
+        self.enabled = bool(enabled and run_dir is not None)
+        self.run_dir = run_dir
+        self.interval_sec = max(0.5, float(interval_sec))
+        self.requested_device = str(requested_device)
+        self._state_lock = threading.Lock()
+        self._latest_state: Dict[str, Any] = {}
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._samples_fh = None
+        self._samples: List[Dict[str, Any]] = []
+        self._gpu_index_hint = self._infer_gpu_index_hint(self.requested_device)
+        self._nvidia_smi_available = shutil.which("nvidia-smi") is not None
+        self._meta: Dict[str, Any] = {}
+
+    @staticmethod
+    def _infer_gpu_index_hint(device: str) -> Optional[int]:
+        dev = str(device or "").strip().lower()
+        if dev.startswith("cuda:"):
+            try:
+                return int(dev.split(":", 1)[1])
+            except Exception:
+                return 0
+        if dev in {"cuda", "auto"}:
+            return 0
+        return None
+
+    def init_run(self, meta: Dict[str, Any]) -> None:
+        if not self.enabled or self.run_dir is None:
+            return
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self._meta = dict(meta)
+        write_json(str(self.run_dir / "run_meta.json"), self._meta)
+        self._samples_fh = (self.run_dir / "samples.jsonl").open("a", encoding="utf-8")
+
+    def update_meta(self, extra: Dict[str, Any]) -> None:
+        if not self.enabled or self.run_dir is None:
+            return
+        self._meta.update(extra)
+        write_json(str(self.run_dir / "run_meta.json"), self._meta)
+
+    def update_from_progress_event(self, event: Dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+        evt = dict(event or {})
+        state_updates: Dict[str, Any] = {}
+        event_name = str(evt.get("event", ""))
+        state_updates["last_event"] = event_name
+        if "epoch" in evt:
+            state_updates["epoch"] = _safe_int(evt.get("epoch"))
+        if "epochs" in evt:
+            state_updates["epochs"] = _safe_int(evt.get("epochs"))
+        if event_name == "train_setup":
+            for key in [
+                "train_rows",
+                "val_rows",
+                "device_selected",
+                "amp_enabled",
+                "batch_size",
+                "data_loading",
+                "dataset_schema",
+                "training_objective",
+                "rollout_horizon",
+                "closeness_horizon",
+            ]:
+                if key in evt:
+                    state_updates[key] = evt.get(key)
+        if event_name == "epoch_end":
+            metrics = evt.get("metrics") or {}
+            if isinstance(metrics, dict):
+                state_updates["last_train_loss"] = _safe_float(metrics.get("train_loss"))
+                state_updates["last_val_loss"] = _safe_float(metrics.get("val_loss"))
+                state_updates["last_top1"] = _safe_float(metrics.get("top1"))
+                state_updates["last_top5"] = _safe_float(metrics.get("top5"))
+                state_updates["last_lr"] = _safe_float(metrics.get("lr"))
+        with self._state_lock:
+            self._latest_state.update({k: v for k, v in state_updates.items() if v is not None or isinstance(v, str)})
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="train-telemetry-sampler", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(5.0, self.interval_sec * 2))
+        if self._samples_fh is not None:
+            self._samples_fh.close()
+            self._samples_fh = None
+
+    def write_final_summary(self, extra: Optional[Dict[str, Any]] = None) -> None:
+        if not self.enabled or self.run_dir is None:
+            return
+        summary = _summarize_telemetry_samples(self._samples)
+        if extra:
+            summary["training_summary"] = extra
+        write_json(str(self.run_dir / "summary.json"), summary)
+
+    def _query_gpu_row(self) -> Dict[str, Any]:
+        if not self._nvidia_smi_available or self._gpu_index_hint is None:
+            return {}
+        try:
+            proc = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+        except Exception:
+            return {}
+        if proc.returncode != 0:
+            return {}
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parsed = _parse_nvidia_smi_csv_line(line)
+            if parsed.get("gpu_index") == self._gpu_index_hint:
+                return parsed
+        return {}
+
+    def _sample(self) -> Dict[str, Any]:
+        ts_ms = int(time.time() * 1000)
+        row: Dict[str, Any] = {"ts_ms": ts_ms, "pid": int(os.getpid())}
+        proc_status = _read_proc_status_kv()
+        vmrss = proc_status.get("VmRSS", "")
+        if vmrss:
+            parts = vmrss.split()
+            if parts:
+                row["proc_rss_kib"] = _safe_int(parts[0])
+        gpu = self._query_gpu_row()
+        row.update(gpu)
+        with self._state_lock:
+            row.update(self._latest_state)
+        return row
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            row = self._sample()
+            self._samples.append(row)
+            if self._samples_fh is not None:
+                self._samples_fh.write(json.dumps(row, ensure_ascii=True) + "\n")
+                self._samples_fh.flush()
+            self._stop.wait(self.interval_sec)
 
 
 def main() -> None:
@@ -34,6 +296,12 @@ def main() -> None:
     parser.add_argument("--output", default="artifacts/model.pt")
     parser.add_argument("--metrics-out", default="artifacts/train_metrics.json")
     parser.add_argument("--progress-jsonl-out", default="", help="Optional JSONL progress event stream path (epoch-level updates)")
+    parser.add_argument("--rollout-horizon", type=int, default=1, help="Predict N future plies with teacher-forced recursive loss (1 preserves baseline)")
+    parser.add_argument("--closeness-horizon", type=int, default=4, help="Evaluate continuation closeness on first N rollout plies (clamped to rollout horizon)")
+    parser.add_argument("--rollout-loss-decay", type=float, default=0.7, help="Decay factor for multistep rollout loss weights")
+    parser.add_argument("--runtime-min-context", type=int, default=8, help="Runtime splicing min context plies for game-level datasets")
+    parser.add_argument("--runtime-min-target", type=int, default=1, help="Runtime splicing min target plies for game-level datasets")
+    parser.add_argument("--runtime-max-samples-per-game", type=int, default=0, help="Runtime splicing sample cap per game (0=no cap)")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -122,6 +390,23 @@ def main() -> None:
         default=True,
         help="Show per-epoch batch progress bar (requires --verbose)",
     )
+    parser.add_argument(
+        "--telemetry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Sample local GPU/process/training telemetry to local_logs/training_telemetry/ during training",
+    )
+    parser.add_argument(
+        "--telemetry-interval-sec",
+        type=float,
+        default=2.0,
+        help="Telemetry sampling interval in seconds",
+    )
+    parser.add_argument(
+        "--telemetry-dir",
+        default="local_logs/training_telemetry",
+        help="Base directory for per-run telemetry logs (gitignored local folder)",
+    )
     args = parser.parse_args()
     train_paths = [Path(p).resolve() for p in args.train]
     val_paths = [Path(p).resolve() for p in args.val]
@@ -130,11 +415,64 @@ def main() -> None:
     output_path = Path(args.output).resolve()
     metrics_path = Path(args.metrics_out).resolve()
     progress_jsonl_path = Path(args.progress_jsonl_out).resolve() if args.progress_jsonl_out else None
+    telemetry_run_dir = (
+        Path(args.telemetry_dir).resolve()
+        / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        / f"{output_path.stem}"
+    )
 
     progress_fh = None
+    telemetry = _TrainingTelemetryLogger(
+        enabled=bool(args.telemetry),
+        run_dir=telemetry_run_dir,
+        interval_sec=float(args.telemetry_interval_sec),
+        requested_device=str(args.device),
+    )
+
+    telemetry.init_run(
+        {
+            "schema_version": 1,
+            "started_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "cwd": str(Path.cwd()),
+            "pid": int(os.getpid()),
+            "command": " ".join(sys.argv),
+            "output_path": str(output_path),
+            "metrics_out": str(metrics_path),
+            "train_paths": [str(p) for p in train_paths],
+            "val_paths": [str(p) for p in val_paths],
+            "requested_device": str(args.device),
+            "telemetry_interval_sec": float(args.telemetry_interval_sec),
+            "model_request": {
+                "embed_dim": int(args.embed_dim),
+                "hidden_dim": int(args.hidden_dim),
+                "num_layers": int(args.num_layers),
+                "dropout": float(args.dropout),
+                "phase_feature": bool(args.phase_feature),
+                "phase_embed_dim": int(args.phase_embed_dim),
+                "side_to_move_feature": bool(args.side_to_move_feature),
+                "side_to_move_embed_dim": int(args.side_to_move_embed_dim),
+                "rollout_horizon": int(args.rollout_horizon),
+                "closeness_horizon": int(args.closeness_horizon),
+                "rollout_loss_decay": float(args.rollout_loss_decay),
+            },
+            "train_request": {
+                "epochs": int(args.epochs),
+                "batch_size": int(args.batch_size),
+                "lr": float(args.lr),
+                "num_workers": int(args.num_workers),
+                "pin_memory": bool(args.pin_memory),
+                "amp": bool(args.amp),
+                "runtime_min_context": int(args.runtime_min_context),
+                "runtime_min_target": int(args.runtime_min_target),
+                "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),
+            },
+        }
+    )
+    telemetry.start()
 
     def emit_progress(event: dict) -> None:
         nonlocal progress_fh
+        telemetry.update_from_progress_event(event)
         if progress_jsonl_path is None:
             return
         if progress_fh is None:
@@ -185,6 +523,12 @@ def main() -> None:
                     "num_workers": args.num_workers,
                     "pin_memory_requested": args.pin_memory,
                     "amp_requested": args.amp,
+                    "rollout_horizon": args.rollout_horizon,
+                    "closeness_horizon": args.closeness_horizon,
+                    "rollout_loss_decay": args.rollout_loss_decay,
+                    "runtime_min_context": args.runtime_min_context,
+                    "runtime_min_target": args.runtime_min_target,
+                    "runtime_max_samples_per_game": args.runtime_max_samples_per_game,
                     "restore_best": args.restore_best,
                     "lr_scheduler": args.lr_scheduler,
                     "lr_scheduler_metric": args.lr_scheduler_metric,
@@ -223,9 +567,19 @@ def main() -> None:
             "batch_size": int(args.batch_size),
             "num_workers": int(args.num_workers),
             "amp_requested": bool(args.amp),
+            "rollout_horizon": int(args.rollout_horizon),
+            "closeness_horizon": int(args.closeness_horizon),
+            "rollout_loss_decay": float(args.rollout_loss_decay),
+            "runtime_min_context": int(args.runtime_min_context),
+            "runtime_min_target": int(args.runtime_min_target),
+            "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),
         }
     )
 
+    artifact = None
+    history = []
+    dataset_info = {}
+    train_started_monotonic = time.monotonic()
     try:
         artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
             train_paths=[str(p) for p in train_paths],
@@ -267,9 +621,30 @@ def main() -> None:
             verbose=args.verbose,
             show_progress=args.progress,
             progress_callback=emit_progress,
+            rollout_horizon=args.rollout_horizon,
+            closeness_horizon=args.closeness_horizon,
+            rollout_loss_decay=args.rollout_loss_decay,
+            runtime_min_context=args.runtime_min_context,
+            runtime_min_target=args.runtime_min_target,
+            runtime_max_samples_per_game=args.runtime_max_samples_per_game,
         )
     except Exception as exc:
         emit_progress({"event": "script_error", "error_type": type(exc).__name__, "message": str(exc)})
+        telemetry.update_meta(
+            {
+                "ended_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+        )
+        telemetry.stop()
+        telemetry.write_final_summary(
+            {
+                "status": "error",
+                "runtime_seconds": float(time.monotonic() - train_started_monotonic),
+            }
+        )
         raise
 
     train_rows_by_file = dataset_info["train_rows_by_file"]
@@ -285,6 +660,9 @@ def main() -> None:
                     "train_rows_by_file": train_rows_by_file,
                     "val_rows_by_file": val_rows_by_file,
                     "data_loading": dataset_info.get("data_loading"),
+                    "dataset_schema": dataset_info.get("dataset_schema"),
+                    "train_games": dataset_info.get("train_games"),
+                    "val_games": dataset_info.get("val_games"),
                 }
             }
         )
@@ -294,6 +672,7 @@ def main() -> None:
 
     ensure_parent(args.output)
     torch.save(artifact, args.output)
+    param_count = sum(int(v.numel()) for v in artifact.get("state_dict", {}).values())
     summary = {
         "train_rows": dataset_info["train_rows"],
         "val_rows": dataset_info["val_rows"],
@@ -302,6 +681,14 @@ def main() -> None:
         "train_rows_by_file": train_rows_by_file,
         "val_rows_by_file": val_rows_by_file,
         "data_loading": dataset_info.get("data_loading"),
+        "dataset_schema": dataset_info.get("dataset_schema"),
+        "train_games": dataset_info.get("train_games"),
+        "val_games": dataset_info.get("val_games"),
+        "train_games_by_file": dataset_info.get("train_games_by_file"),
+        "val_games_by_file": dataset_info.get("val_games_by_file"),
+        "runtime_splice": dataset_info.get("runtime_splice"),
+        "runtime_splice_index_bytes_train": dataset_info.get("runtime_splice_index_bytes_train"),
+        "runtime_splice_index_bytes_val": dataset_info.get("runtime_splice_index_bytes_val"),
         "epochs": args.epochs,
         "history": history,
         "model_path": args.output,
@@ -321,6 +708,12 @@ def main() -> None:
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory,
         "amp": args.amp,
+        "rollout_horizon": args.rollout_horizon,
+        "closeness_horizon": args.closeness_horizon,
+        "rollout_loss_decay": args.rollout_loss_decay,
+        "runtime_min_context": args.runtime_min_context,
+        "runtime_min_target": args.runtime_min_target,
+        "runtime_max_samples_per_game": args.runtime_max_samples_per_game,
         "restore_best": args.restore_best,
         "lr_scheduler": args.lr_scheduler,
         "lr_scheduler_metric": args.lr_scheduler_metric,
@@ -336,8 +729,33 @@ def main() -> None:
         "best_checkpoint": artifact.get("runtime", {}).get("best_checkpoint"),
         "early_stopping": artifact.get("runtime", {}).get("early_stopping"),
         "lr_scheduler_runtime": artifact.get("runtime", {}).get("lr_scheduler"),
+        "training_objective": artifact.get("runtime", {}).get("training_objective", "single_step_next_move"),
+        "rollout_loss_weights": artifact.get("runtime", {}).get("rollout_loss_weights"),
+        "param_count": param_count,
     }
     write_json(args.metrics_out, summary)
+    telemetry.update_meta(
+        {
+            "ended_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "status": "ok",
+            "dataset_loaded": {
+                "data_loading": dataset_info.get("data_loading"),
+                "dataset_schema": dataset_info.get("dataset_schema"),
+                "train_rows": dataset_info.get("train_rows"),
+                "val_rows": dataset_info.get("val_rows"),
+                "train_games": dataset_info.get("train_games"),
+                "val_games": dataset_info.get("val_games"),
+                "runtime_splice": dataset_info.get("runtime_splice"),
+                "runtime_splice_index_bytes_train": dataset_info.get("runtime_splice_index_bytes_train"),
+                "runtime_splice_index_bytes_val": dataset_info.get("runtime_splice_index_bytes_val"),
+            },
+            "model_final": {
+                "param_count": int(param_count),
+                "artifact_training_objective": artifact.get("runtime", {}).get("training_objective"),
+                "config": artifact.get("config"),
+            },
+        }
+    )
     emit_progress(
         {
             "event": "script_complete",
@@ -353,6 +771,20 @@ def main() -> None:
         print({"best_checkpoint": summary.get("best_checkpoint")})
     print(f"Saved model: {args.output}")
     print(f"Saved metrics: {args.metrics_out}")
+    if args.telemetry:
+        print(f"Saved telemetry logs: {telemetry_run_dir}")
+    telemetry.stop()
+    telemetry.write_final_summary(
+        {
+            "status": "ok",
+            "runtime_seconds": float(time.monotonic() - train_started_monotonic),
+            "epochs_completed": int(len(history)),
+            "best_checkpoint": summary.get("best_checkpoint"),
+            "param_count": int(param_count),
+            "dataset_schema": dataset_info.get("dataset_schema"),
+            "data_loading": dataset_info.get("data_loading"),
+        }
+    )
     if progress_fh is not None:
         progress_fh.close()
 

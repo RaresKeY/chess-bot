@@ -36,7 +36,14 @@ journal.txt
 data/
 streamlit_chess_ai_demo
 simple_easy.md
+local_docs/
+local_logs/
 
 config/
 config/runpod_known_hosts
 config/runpod_tracked_pods.jsonl
+
+
+DATASET_TO_TRAINING_DEEP_DIVE.md
+MULTISTEP_8MOVE_TRAINING_IMPLEMENT_PLAN.md
+TRAINING_ARCHITECTURE_REPORT.md

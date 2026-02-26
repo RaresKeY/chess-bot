@@ -11,7 +11,15 @@ from src.chessbot.model import (
     SIDE_TO_MOVE_WHITE,
     side_to_move_id_from_context_len,
 )
-from src.chessbot.training import collate_train, train_next_move_model, train_next_move_model_from_jsonl_paths
+from src.chessbot.training import (
+    _build_rollout_step_weights,
+    _prefix_match_len,
+    _weighted_rollout_closeness,
+    collate_train,
+    collate_train_rollout,
+    train_next_move_model,
+    train_next_move_model_from_jsonl_paths,
+)
 
 
 class TrainingFeatureTests(unittest.TestCase):
@@ -34,6 +42,32 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertTrue(torch.equal(winners, torch.tensor([0, 1])))
         self.assertTrue(torch.equal(phases, torch.tensor([1, 3])))
         self.assertTrue(torch.equal(side_to_moves, torch.tensor([0, 1])))
+
+    def test_collate_train_rollout_returns_rollout_targets_and_mask(self):
+        batch = [
+            ([1, 2], 7, 0, 1, SIDE_TO_MOVE_WHITE, [7, 8, 0], [1, 1, 0]),
+            ([3], 8, 1, 3, SIDE_TO_MOVE_BLACK, [8, 9, 10], [1, 1, 1]),
+        ]
+        out = collate_train_rollout(batch)
+        self.assertEqual(len(out), 8)
+        tokens, lengths, labels, winners, phases, side_to_moves, rollout_targets, rollout_mask = out
+        self.assertEqual(tokens.shape, (2, 2))
+        self.assertEqual(rollout_targets.shape, (2, 3))
+        self.assertEqual(rollout_mask.shape, (2, 3))
+        self.assertTrue(torch.equal(lengths, torch.tensor([2, 1])))
+        self.assertTrue(torch.equal(labels, torch.tensor([7, 8])))
+        self.assertTrue(torch.equal(rollout_targets[0], torch.tensor([7, 8, 0])))
+        self.assertTrue(torch.equal(rollout_mask[0], torch.tensor([True, True, False])))
+
+    def test_rollout_weight_helpers(self):
+        ws = _build_rollout_step_weights(4, 0.7)
+        self.assertEqual(len(ws), 4)
+        self.assertAlmostEqual(ws[0], 1.0)
+        self.assertAlmostEqual(ws[1], 0.7)
+        self.assertEqual(_prefix_match_len([True, True, False, True], 4), 2)
+        score = _weighted_rollout_closeness([True, False, True, False], [1.0, 0.7, 0.5, 0.35], 4)
+        self.assertGreater(score, 0.0)
+        self.assertLess(score, 1.0)
 
     def test_model_forward_supports_phase_and_side_features(self):
         torch.manual_seed(0)
@@ -189,6 +223,77 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertEqual(epoch_end_events[1]["epoch"], 2)
         self.assertIn("metrics", epoch_end_events[0])
         self.assertIn("val_loss", epoch_end_events[0]["metrics"])
+
+    def test_train_next_move_model_from_jsonl_paths_multistep_emits_rollout_metrics(self):
+        train_rows = [
+            {"context": ["e2e4"], "target": ["e7e5", "g1f3", "b8c6", "f1b5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5", "c2c4", "e7e6", "b1c3"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+            {"context": ["g1f3"], "target": ["d7d5", "d2d4", "g8f6", "c2c4"], "next_move": "d7d5", "winner_side": "B", "phase": "middlegame"},
+            {"context": ["c2c4"], "target": ["e7e5", "b1c3", "g8f6", "g2g3"], "next_move": "e7e5", "winner_side": "B", "phase": "middlegame"},
+        ]
+        val_rows = [
+            {"context": ["e2e4", "e7e5"], "target": ["g1f3", "b8c6", "f1b5", "a7a6"], "next_move": "g1f3", "winner_side": "W", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = f"{tmp}/train.jsonl"
+            val_path = f"{tmp}/val.jsonl"
+            with open(train_path, "w", encoding="utf-8") as f:
+                for row in train_rows:
+                    f.write(json.dumps(row) + "\n")
+            with open(val_path, "w", encoding="utf-8") as f:
+                for row in val_rows:
+                    f.write(json.dumps(row) + "\n")
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[train_path],
+                val_paths=[val_path],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+                progress_callback=on_progress,
+                rollout_horizon=4,
+                closeness_horizon=4,
+                rollout_loss_decay=0.7,
+            )
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(dataset_info["training_objective"], "multistep_teacher_forced_recursive")
+        self.assertEqual(dataset_info["rollout_horizon"], 4)
+        self.assertIn("rollout_step1_acc", history[0])
+        self.assertIn("rollout_step4_acc", history[0])
+        self.assertIn("rollout_prefix_match_len_avg", history[0])
+        self.assertIn("rollout_weighted_continuation_score", history[0])
+        self.assertEqual(artifact["runtime"]["training_objective"], "multistep_teacher_forced_recursive")
+        self.assertEqual(artifact["runtime"]["rollout_horizon"], 4)
+
+        event_names = [e.get("event") for e in events]
+        self.assertIn("train_setup", event_names)
+        epoch_end = [e for e in events if e.get("event") == "epoch_end"][0]
+        self.assertIn("rollout_step4_acc", epoch_end["metrics"])
+        self.assertIn("rollout_weighted_continuation_score", epoch_end["metrics"])
 
 
 if __name__ == "__main__":

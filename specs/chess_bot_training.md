@@ -5,8 +5,12 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 
 ## Dataset Inputs
 - CLI accepts one or more `--train` JSONL paths and one or more `--val` JSONL paths (repeatable flags)
+- Training auto-detects input schema per path set:
+  - legacy splice-row JSONL (`context` + `target` + `next_move`)
+  - compact game-level JSONL (`moves` or `moves_uci`) with runtime splicing
 - Repeated `--train` / `--val` inputs are combined via file-backed JSONL indexing (line offsets) instead of concatenating row dicts in memory
 - Existing single-path usage remains supported (one `--train`, one `--val`)
+- For compact game-level datasets, training builds a sample index of `(game row offset, splice_index)` and derives `context`/`target` at runtime
 
 ## Code Ownership
 - CLI: `scripts/train_baseline.py`
@@ -22,6 +26,14 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - Optional phase embedding concatenated before classifier head (`phase` label from splice rows)
 - Optional side-to-move embedding concatenated before classifier head (derived from context ply parity)
 - Cross-entropy next-move objective
+
+## Training Objective Modes (current)
+- Default compatibility mode remains single-step next-move training (`rollout_horizon=1`)
+- Optional multistep mode is enabled by setting `--rollout-horizon > 1`
+  - current implementation uses teacher-forced recursive rollout training (repeated next-move predictions)
+  - loss is a weighted sum of per-step cross-entropy terms across the rollout horizon
+  - rollout loss weights decay geometrically from step 1 using `--rollout-loss-decay` (step 1 starts at weight `1.0`)
+  - continuation "closeness" metrics are reported over the first `--closeness-horizon` rollout plies (clamped to rollout horizon)
 
 ## Winner-Aware Behavior
 - Winner side encoded (`W`, `B`, `D`, `?`)
@@ -45,6 +57,13 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--pin-memory/--no-pin-memory` (auto-disabled on CPU)
   - `--amp/--no-amp` (CUDA mixed precision via `torch.amp`)
 - Model/training controls:
+  - `--rollout-horizon` (future plies predicted during training objective; `1` preserves baseline behavior)
+  - `--closeness-horizon` (validation continuation-closeness horizon; clamped to rollout horizon)
+  - `--rollout-loss-decay` (geometric decay factor for multistep rollout loss weights)
+  - runtime splicing controls for compact game datasets:
+    - `--runtime-min-context`
+    - `--runtime-min-target`
+    - `--runtime-max-samples-per-game` (0 = no cap)
   - `--num-layers` (LSTM layer count)
   - `--dropout` (embedding/head dropout and LSTM inter-layer dropout when multilayer)
   - `--phase-feature/--no-phase-feature`, `--phase-embed-dim`
@@ -60,7 +79,8 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `embed_dim=256`, `hidden_dim=512`, `num_layers=2`, `dropout=0.15`
   - `lr_scheduler=plateau` remains default; early stopping remains opt-in (`patience=0`)
 - Memory/loader safeguards:
-  - CLI streams train JSONL files to build vocabulary/counts, indexes train/val JSONL line offsets, and loads rows on-demand in `Dataset.__getitem__` (reduces host RAM vs eager row loading)
+  - legacy splice-row mode: streams train JSONL to build vocabulary/counts, indexes train/val line offsets, loads rows on-demand in `Dataset.__getitem__`
+  - compact game-level mode: streams train JSONL to build vocabulary and runtime-splice sample counts, builds sample index `(game offset, splice_i)`, loads game rows on-demand and splices per sample in `Dataset.__getitem__`
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
@@ -71,10 +91,15 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 
 ## Output Artifact Contract
 `artifacts/model.pt` stores:
+- root metadata for inference compatibility dispatch:
+  - `artifact_format_version` (current writer uses `2`)
+  - `model_family` (current baseline family: `next_move_lstm`)
+  - `training_objective` (root copy; e.g. `single_step_next_move` or multistep objective)
 - `state_dict`
 - `vocab`
 - `config` (`embed_dim`, `hidden_dim`, `num_layers`, `dropout`, `use_winner`, `use_phase`, `phase_embed_dim`, `use_side_to_move`, `side_to_move_embed_dim`)
 - `runtime` (`device`, `amp`, `best_checkpoint`, `early_stopping`, `lr_scheduler`) from the training run
+- `runtime.training_objective` and, in multistep mode, rollout settings (`rollout_horizon`, `closeness_horizon`, `rollout_loss_decay`, resolved `rollout_loss_weights`)
 - `runtime.phase_weights` (resolved per-phase multipliers used during training)
 
 ## Metrics Output
@@ -82,7 +107,10 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - dataset row counts
 - train/val input file lists and row counts per input file (when provided)
 - `data_loading` mode metadata (currently `indexed_jsonl_on_demand`)
+- `dataset_schema` metadata (`spliced` or `game`)
+- in compact game-level mode, metrics also include game counts (`train_games`, `val_games`) and `runtime_splice` settings used during indexing
 - epoch history (train_loss, val_loss, top1, top5)
+- when multistep mode is enabled (`rollout_horizon > 1`), epoch history additionally includes rollout metrics such as `rollout_step{n}_acc`, `rollout_prefix_match_len_avg`, `rollout_legal_rate`, and `rollout_weighted_continuation_score`
 - model path
 - runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)
 - requested `phase_weights`
@@ -90,18 +118,31 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - LR scheduler request fields and runtime scheduler summary (including final LR)
 - early-stopping request fields and runtime early-stopping summary
 - best-checkpoint summary copied from artifact runtime metadata
+- training-objective metadata (`training_objective`, rollout horizon/closeness/decay and resolved rollout loss weights when multistep mode is used)
 
 ## Optional Progress JSONL Output
 - `--progress-jsonl-out <path>` writes newline-delimited JSON events for long-running training observability without scraping stdout
 - Event rows include `ts_epoch_ms` and an `event` field; epoch-end rows include metric snapshots (`train_loss`, `val_loss`, `top1`, `top5`, `lr`)
+- in multistep mode, epoch-end progress events also include rollout summary metrics (for example `rollout_step4_acc`, `rollout_legal_rate`, `rollout_weighted_continuation_score`)
 - Intended use case: remote/RunPod training where a host-side watcher polls the file and renders a local progress bar
 
 ## Current Limitation
 - Training still stores per-row JSONL line offsets in RAM (much smaller than full row dicts/strings, but not fully streaming/iterable training).
+- Compact game-level runtime splicing currently recomputes phase labels from move prefixes in the loader, which is correct but CPU-heavy versus precomputed splice-row phase metadata.
+- Runtime-splice optimization (current):
+  - training now caches per-sample phase IDs during runtime splice-index construction (single replay pass per game at index-build time)
+  - runtime splice indexes use packed arrays (`array`-backed path IDs / offsets / splice indices / phase IDs) instead of Python int lists to reduce RAM usage substantially
+  - metrics summary may include `runtime_splice_index_bytes_train` / `runtime_splice_index_bytes_val` for visibility into index memory footprint
 
 ## Regression Tests (current)
 - `tests/test_training_features.py` covers:
   - side-to-move ID derivation parity/fallback
   - `collate_train()` phase + side-to-move tensor outputs
+  - `collate_train_rollout()` rollout-target/mask tensor outputs for multistep batches
   - `NextMoveLSTM` forward path with phase/side feature head inputs enabled
   - scheduler/early-stopping runtime metadata and early-stop behavior in a tiny synthetic training run
+  - multistep file-backed training path emits rollout metrics/progress fields and multistep runtime metadata
+- `tests/test_game_dataset_architecture.py` covers:
+  - compact game-dataset builder CLI output schema (`moves`, no duplicated splice rows)
+  - single-step training from compact game-level JSONL via runtime splicing
+  - multistep training from compact game-level JSONL via runtime splicing

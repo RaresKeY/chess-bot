@@ -139,6 +139,8 @@ def validate_game(game: chess.pgn.Game, source_file: str) -> Tuple[Optional[Dict
         "result": result,
         "winner_side": winner_from_result(result),
         "plies": len(moves_uci),
+        # Canonical game-level move list alias for runtime-splicing datasets.
+        "moves": moves_uci,
         "moves_uci": moves_uci,
     }
     return valid, None
@@ -233,6 +235,8 @@ def _validate_parsed_game(parsed: Dict, source_file: str) -> Tuple[Optional[Dict
         "result": result,
         "winner_side": winner_from_result(result),
         "plies": len(moves_uci),
+        # Canonical game-level move list alias for runtime-splicing datasets.
+        "moves": moves_uci,
         "moves_uci": moves_uci,
     }
     return valid, None

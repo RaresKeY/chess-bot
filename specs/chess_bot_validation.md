@@ -67,7 +67,13 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 - `result`
 - `winner_side`
 - `plies`
-- `moves_uci`
+- `moves_uci` (legacy/original field name)
+- `moves` (canonical alias; same UCI move list, added for game-level runtime-splice dataset builders)
+
+## Schema Compatibility Note
+- Validation now emits both `moves_uci` and `moves` for the same UCI mainline list.
+- Existing downstream code that reads `moves_uci` remains compatible.
+- New compact game-level dataset tooling can read either field and writes `moves` as the canonical move-list field.
 
 ## Schema Reuse (current)
 - The Lichess live bot archive (`scripts/lichess_bot.py`, `src/chessbot/lichess_bot.py`) appends live-played games to `data/live_play/lichess_bot_archive/valid_games.jsonl` using the same valid-record JSONL schema for downstream compatibility.
