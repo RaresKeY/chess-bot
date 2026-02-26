@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Allow direct script execution without requiring PYTHONPATH=. from repo root.
@@ -31,6 +33,7 @@ def main() -> None:
     )
     parser.add_argument("--output", default="artifacts/model.pt")
     parser.add_argument("--metrics-out", default="artifacts/train_metrics.json")
+    parser.add_argument("--progress-jsonl-out", default="", help="Optional JSONL progress event stream path (epoch-level updates)")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -126,6 +129,20 @@ def main() -> None:
     val_path = val_paths[0]
     output_path = Path(args.output).resolve()
     metrics_path = Path(args.metrics_out).resolve()
+    progress_jsonl_path = Path(args.progress_jsonl_out).resolve() if args.progress_jsonl_out else None
+
+    progress_fh = None
+
+    def emit_progress(event: dict) -> None:
+        nonlocal progress_fh
+        if progress_jsonl_path is None:
+            return
+        if progress_fh is None:
+            progress_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            progress_fh = progress_jsonl_path.open("a", encoding="utf-8")
+        row = {"ts_epoch_ms": int(time.time() * 1000), **event}
+        progress_fh.write(json.dumps(row, ensure_ascii=True) + "\n")
+        progress_fh.flush()
 
     if args.verbose:
         print(
@@ -194,47 +211,66 @@ def main() -> None:
                 }
             }
         )
-
-    artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
-        train_paths=[str(p) for p in train_paths],
-        val_paths=[str(p) for p in val_paths],
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        seed=args.seed,
-        embed_dim=args.embed_dim,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        winner_weight=args.winner_weight,
-        use_phase_feature=args.phase_feature,
-        phase_embed_dim=args.phase_embed_dim,
-        use_side_to_move_feature=args.side_to_move_feature,
-        side_to_move_embed_dim=args.side_to_move_embed_dim,
-        phase_weights={
-            "unknown": args.phase_weight_unknown,
-            "opening": args.phase_weight_opening,
-            "middlegame": args.phase_weight_middlegame,
-            "endgame": args.phase_weight_endgame,
-        },
-        use_winner=not args.no_winner_feature,
-        device_str=args.device,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        amp=args.amp,
-        restore_best=args.restore_best,
-        lr_scheduler=args.lr_scheduler,
-        lr_scheduler_metric=args.lr_scheduler_metric,
-        lr_plateau_factor=args.lr_plateau_factor,
-        lr_plateau_patience=args.lr_plateau_patience,
-        lr_plateau_threshold=args.lr_plateau_threshold,
-        lr_plateau_min_lr=args.lr_plateau_min_lr,
-        early_stopping_patience=args.early_stopping_patience,
-        early_stopping_metric=args.early_stopping_metric,
-        early_stopping_min_delta=args.early_stopping_min_delta,
-        verbose=args.verbose,
-        show_progress=args.progress,
+    emit_progress(
+        {
+            "event": "script_start",
+            "epochs_requested": int(args.epochs),
+            "train_paths": [str(p) for p in train_paths],
+            "val_paths": [str(p) for p in val_paths],
+            "output_path": str(output_path),
+            "metrics_out": str(metrics_path),
+            "device_requested": str(args.device),
+            "batch_size": int(args.batch_size),
+            "num_workers": int(args.num_workers),
+            "amp_requested": bool(args.amp),
+        }
     )
+
+    try:
+        artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+            train_paths=[str(p) for p in train_paths],
+            val_paths=[str(p) for p in val_paths],
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            seed=args.seed,
+            embed_dim=args.embed_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            winner_weight=args.winner_weight,
+            use_phase_feature=args.phase_feature,
+            phase_embed_dim=args.phase_embed_dim,
+            use_side_to_move_feature=args.side_to_move_feature,
+            side_to_move_embed_dim=args.side_to_move_embed_dim,
+            phase_weights={
+                "unknown": args.phase_weight_unknown,
+                "opening": args.phase_weight_opening,
+                "middlegame": args.phase_weight_middlegame,
+                "endgame": args.phase_weight_endgame,
+            },
+            use_winner=not args.no_winner_feature,
+            device_str=args.device,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            amp=args.amp,
+            restore_best=args.restore_best,
+            lr_scheduler=args.lr_scheduler,
+            lr_scheduler_metric=args.lr_scheduler_metric,
+            lr_plateau_factor=args.lr_plateau_factor,
+            lr_plateau_patience=args.lr_plateau_patience,
+            lr_plateau_threshold=args.lr_plateau_threshold,
+            lr_plateau_min_lr=args.lr_plateau_min_lr,
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_metric=args.early_stopping_metric,
+            early_stopping_min_delta=args.early_stopping_min_delta,
+            verbose=args.verbose,
+            show_progress=args.progress,
+            progress_callback=emit_progress,
+        )
+    except Exception as exc:
+        emit_progress({"event": "script_error", "error_type": type(exc).__name__, "message": str(exc)})
+        raise
 
     train_rows_by_file = dataset_info["train_rows_by_file"]
     val_rows_by_file = dataset_info["val_rows_by_file"]
@@ -302,10 +338,23 @@ def main() -> None:
         "lr_scheduler_runtime": artifact.get("runtime", {}).get("lr_scheduler"),
     }
     write_json(args.metrics_out, summary)
+    emit_progress(
+        {
+            "event": "script_complete",
+            "epochs_completed": int(len(history)),
+            "history_last_epoch": int(history[-1]["epoch"]) if history else None,
+            "model_path": str(output_path),
+            "metrics_out": str(metrics_path),
+            "best_checkpoint": summary.get("best_checkpoint"),
+            "early_stopping": summary.get("early_stopping"),
+        }
+    )
     if args.verbose:
         print({"best_checkpoint": summary.get("best_checkpoint")})
     print(f"Saved model: {args.output}")
     print(f"Saved metrics: {args.metrics_out}")
+    if progress_fh is not None:
+        progress_fh.close()
 
 
 if __name__ == "__main__":

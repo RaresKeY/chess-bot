@@ -11,6 +11,12 @@ class RunpodLocalSmokeScriptTests(unittest.TestCase):
         self.assertIn('run_timed "prepare_timing_log_file" prepare_timing_log_file', text)
         self.assertIn("chmod 666", text)
 
+    def test_can_pass_optional_progress_jsonl_to_train_preset(self):
+        text = Path("scripts/runpod_local_smoke_test.sh").read_text(encoding="utf-8")
+        self.assertIn('SMOKE_PROGRESS_JSONL_OUT="${SMOKE_PROGRESS_JSONL_OUT:-}"', text)
+        self.assertIn('-e TRAIN_PROGRESS_JSONL_OUT="${SMOKE_PROGRESS_JSONL_OUT}"', text)
+        self.assertIn('echo "[local-smoke] progress_jsonl=${SMOKE_PROGRESS_JSONL_OUT}"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

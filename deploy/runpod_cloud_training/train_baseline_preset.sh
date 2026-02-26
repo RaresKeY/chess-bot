@@ -16,10 +16,12 @@ HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID:-${HF_REPO_ID:-}}"
 HF_DATASET_PATH_PREFIX="${HF_DATASET_PATH_PREFIX:-validated_datasets}"
 HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${REPO_DIR}/data/hf_datasets}"
 HF_DATASET_FETCH_MANIFEST="${HF_DATASET_FETCH_MANIFEST:-${REPO_DIR}/artifacts/hf_dataset_fetch_manifest.json}"
+HF_USE_EXISTING_FETCH_MANIFEST="${HF_USE_EXISTING_FETCH_MANIFEST:-0}"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-6}"
 TRAIN_PHASE_WEIGHT_ENDGAME="${TRAIN_PHASE_WEIGHT_ENDGAME:-2.0}"
+TRAIN_PROGRESS_JSONL_OUT="${TRAIN_PROGRESS_JSONL_OUT:-}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
 RUNPOD_PHASE_TIMING_ENABLED="${RUNPOD_PHASE_TIMING_ENABLED:-1}"
 RUNPOD_PHASE_TIMING_LOG="${RUNPOD_PHASE_TIMING_LOG:-${REPO_DIR}/artifacts/timings/runpod_phase_times.jsonl}"
@@ -80,13 +82,8 @@ fetch_latest_hf_datasets() {
     --output-manifest "${HF_DATASET_FETCH_MANIFEST}"
 }
 
-t_detect0="$(now_epoch_ms)"
-if [[ "${HF_FETCH_LATEST_ALL_DATASETS}" == "1" && -z "${TRAIN_DATASET_DIR}" && -z "${TRAIN_PATH}" && -z "${VAL_PATH}" ]]; then
-  if ! fetch_latest_hf_datasets; then
-    t_detect1="$(now_epoch_ms)"
-    log_phase_timing "resolve_dataset_paths" "error" "$((t_detect1 - t_detect0))"
-    exit 1
-  fi
+load_hf_manifest_paths() {
+  [[ -f "${HF_DATASET_FETCH_MANIFEST}" ]] || return 1
   mapfile -t _hf_train_paths < <("${PY_BIN}" - "${HF_DATASET_FETCH_MANIFEST}" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
@@ -111,6 +108,18 @@ PY
   fi
   HF_ALL_TRAIN_PATHS=("${_hf_train_paths[@]}")
   HF_ALL_VAL_PATHS=("${_hf_val_paths[@]}")
+}
+
+t_detect0="$(now_epoch_ms)"
+if [[ "${HF_FETCH_LATEST_ALL_DATASETS}" == "1" && -z "${TRAIN_DATASET_DIR}" && -z "${TRAIN_PATH}" && -z "${VAL_PATH}" ]]; then
+  if [[ "${HF_USE_EXISTING_FETCH_MANIFEST}" == "1" && -f "${HF_DATASET_FETCH_MANIFEST}" ]]; then
+    echo "[runpod-train] reusing existing HF fetch manifest: ${HF_DATASET_FETCH_MANIFEST}"
+  elif ! fetch_latest_hf_datasets; then
+    t_detect1="$(now_epoch_ms)"
+    log_phase_timing "resolve_dataset_paths" "error" "$((t_detect1 - t_detect0))"
+    exit 1
+  fi
+  load_hf_manifest_paths || true
 fi
 
 if [[ -z "${TRAIN_DATASET_DIR}" && ( -z "${TRAIN_PATH}" || -z "${VAL_PATH}" ) ]]; then
@@ -153,6 +162,9 @@ if [[ -f "${HF_DATASET_FETCH_MANIFEST}" ]]; then
 fi
 echo "[runpod-train] output=${OUTPUT_PATH}"
 echo "[runpod-train] metrics=${METRICS_OUT}"
+if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then
+  echo "[runpod-train] progress_jsonl=${TRAIN_PROGRESS_JSONL_OUT}"
+fi
 echo "[runpod-train] preset=current_lstm_phase_side_v1 (embed=256 hidden=512 layers=2 dropout=0.15 epochs=40 lr=2e-4 plateau+early-stop)"
 
 cmd=(
@@ -180,6 +192,10 @@ cmd=(
   --early-stopping-metric val_loss
   --early-stopping-min-delta 0.002
 )
+
+if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then
+  cmd+=( --progress-jsonl-out "${TRAIN_PROGRESS_JSONL_OUT}" )
+fi
 
 if [[ "${HF_FETCH_LATEST_ALL_DATASETS}" == "1" && ${#HF_ALL_TRAIN_PATHS[@]} -gt 0 && ${#HF_ALL_VAL_PATHS[@]} -gt 0 ]]; then
   for p in "${HF_ALL_TRAIN_PATHS[@]}"; do

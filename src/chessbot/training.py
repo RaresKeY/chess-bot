@@ -2,7 +2,7 @@ import json
 import os
 import random
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -688,6 +688,7 @@ def train_next_move_model_from_jsonl_paths(
     early_stopping_min_delta: float = 0.0,
     verbose: bool = True,
     show_progress: bool = True,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -840,11 +841,35 @@ def train_next_move_model_from_jsonl_paths(
                 }
             }
         )
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "train_setup",
+                "epochs": int(epochs),
+                "batch_size": int(batch_size),
+                "train_rows": int(len(train_ds)),
+                "val_rows": int(len(val_ds)),
+                "device_selected": str(device),
+                "amp_enabled": bool(use_amp),
+                "num_workers": int(num_workers),
+                "pin_memory": bool(pin_memory),
+                "data_loading": "indexed_jsonl_on_demand",
+            }
+        )
 
     history: List[Dict] = []
     for epoch in range(1, epochs + 1):
         if verbose:
             print(f"[train] epoch {epoch}/{epochs} start")
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "epoch_start",
+                    "epoch": int(epoch),
+                    "epochs": int(epochs),
+                    "train_batches_total": int(len(train_loader)),
+                }
+            )
         model.train()
         running_loss = 0.0
         seen = 0
@@ -901,6 +926,21 @@ def train_next_move_model_from_jsonl_paths(
             **val_metrics,
         }
         history.append(row)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "epoch_end",
+                    "epoch": int(epoch),
+                    "epochs": int(epochs),
+                    "metrics": {
+                        "train_loss": float(train_loss),
+                        "val_loss": float(row.get("val_loss", 0.0)),
+                        "top1": float(row.get("top1", 0.0)),
+                        "top5": float(row.get("top5", 0.0)),
+                        "lr": float(row.get("lr", optimizer.param_groups[0]["lr"])),
+                    },
+                }
+            )
         if verbose:
             print(
                 {
@@ -977,6 +1017,19 @@ def train_next_move_model_from_jsonl_paths(
                     )
                     if verbose:
                         print({"early_stopping_triggered": early_stop_info})
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "event": "early_stopping_triggered",
+                                "epoch": int(epoch),
+                                "epochs": int(epochs),
+                                "metric": early_stop_metric_name,
+                                "bad_epochs": int(early_stop_bad_epochs),
+                                "best_metric": (
+                                    float(early_stop_best_metric) if early_stop_best_metric is not None else None
+                                ),
+                            }
+                        )
                     break
 
     if early_stop_enabled and not early_stop_info["used"]:
@@ -1056,4 +1109,14 @@ def train_next_move_model_from_jsonl_paths(
         "vocab_size": len(vocab),
         "data_loading": "indexed_jsonl_on_demand",
     }
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "train_complete",
+                "epochs_completed": int(len(history)),
+                "epochs_requested": int(epochs),
+                "best_checkpoint": best_checkpoint_info,
+                "early_stopping": early_stop_info,
+            }
+        )
     return artifact, history, dataset_info

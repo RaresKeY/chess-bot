@@ -1,3 +1,5 @@
+import json
+import tempfile
 import unittest
 from unittest import mock
 
@@ -9,7 +11,7 @@ from src.chessbot.model import (
     SIDE_TO_MOVE_WHITE,
     side_to_move_id_from_context_len,
 )
-from src.chessbot.training import collate_train, train_next_move_model
+from src.chessbot.training import collate_train, train_next_move_model, train_next_move_model_from_jsonl_paths
 
 
 class TrainingFeatureTests(unittest.TestCase):
@@ -115,6 +117,78 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertLess(runtime["lr_scheduler"]["final_lr"], 1e-3)
         self.assertTrue(artifact["config"]["use_phase"])
         self.assertTrue(artifact["config"]["use_side_to_move"])
+
+    def test_train_next_move_model_from_jsonl_paths_emits_progress_events(self):
+        train_rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+            {"context": ["g1f3"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "middlegame"},
+            {"context": ["c2c4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "middlegame"},
+        ]
+        val_rows = [
+            {"context": ["e2e4", "e7e5"], "target": ["g1f3"], "next_move": "g1f3", "winner_side": "W", "phase": "opening"},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = f"{tmp}/train.jsonl"
+            val_path = f"{tmp}/val.jsonl"
+            with open(train_path, "w", encoding="utf-8") as f:
+                for row in train_rows:
+                    f.write(json.dumps(row) + "\n")
+            with open(val_path, "w", encoding="utf-8") as f:
+                for row in val_rows:
+                    f.write(json.dumps(row) + "\n")
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            constant_val = {"val_loss": 1.0, "top1": 0.25, "top5": 0.5}
+            with mock.patch("src.chessbot.training.evaluate_loader", return_value=constant_val):
+                artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                    train_paths=[train_path],
+                    val_paths=[val_path],
+                    epochs=2,
+                    batch_size=2,
+                    lr=1e-3,
+                    seed=7,
+                    embed_dim=8,
+                    hidden_dim=16,
+                    num_layers=1,
+                    dropout=0.0,
+                    winner_weight=1.0,
+                    use_winner=True,
+                    device_str="cpu",
+                    num_workers=0,
+                    pin_memory=False,
+                    amp=False,
+                    restore_best=True,
+                    use_phase_feature=True,
+                    use_side_to_move_feature=True,
+                    lr_scheduler="none",
+                    early_stopping_patience=0,
+                    verbose=False,
+                    show_progress=False,
+                    progress_callback=on_progress,
+                )
+
+        self.assertEqual(dataset_info["train_rows"], 4)
+        self.assertEqual(dataset_info["val_rows"], 1)
+        self.assertEqual(len(history), 2)
+        self.assertTrue(artifact["runtime"]["best_checkpoint"]["enabled"])
+
+        event_names = [e.get("event") for e in events]
+        self.assertIn("train_setup", event_names)
+        self.assertEqual(event_names.count("epoch_start"), 2)
+        self.assertEqual(event_names.count("epoch_end"), 2)
+        self.assertEqual(event_names[-1], "train_complete")
+
+        epoch_end_events = [e for e in events if e.get("event") == "epoch_end"]
+        self.assertEqual(epoch_end_events[0]["epoch"], 1)
+        self.assertEqual(epoch_end_events[1]["epoch"], 2)
+        self.assertIn("metrics", epoch_end_events[0])
+        self.assertIn("val_loss", epoch_end_events[0]["metrics"])
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--early-stopping-patience`, `--early-stopping-metric`, `--early-stopping-min-delta`
   - `--verbose/--no-verbose` (toggle startup/epoch/checkpoint logs)
   - `--progress/--no-progress` (toggle per-epoch batch progress bar; useful with `--verbose`)
+  - `--progress-jsonl-out` (optional epoch-level machine-readable JSONL event stream for external monitoring/polling)
 - CLI defaults (current tuned baseline preset):
   - `epochs=40`, `lr=2e-4`
   - `embed_dim=256`, `hidden_dim=512`, `num_layers=2`, `dropout=0.15`
@@ -66,6 +67,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - CLI can emit verbose startup logs including resolved input/output paths, requested hyperparameters, and loaded dataset row counts
 - Verbose logs include per-file train/val input lists and loaded row counts per input file when multiple datasets are provided
 - Core training loop can emit epoch start/end summaries, a per-epoch batch progress bar, and best-checkpoint update/restore messages
+- When `--progress-jsonl-out` is set, the CLI appends JSONL events (for example `script_start`, `train_setup`, `epoch_start`, `epoch_end`, `train_complete`, `script_complete`) with timestamps for host-side progress polling
 
 ## Output Artifact Contract
 `artifacts/model.pt` stores:
@@ -88,6 +90,11 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - LR scheduler request fields and runtime scheduler summary (including final LR)
 - early-stopping request fields and runtime early-stopping summary
 - best-checkpoint summary copied from artifact runtime metadata
+
+## Optional Progress JSONL Output
+- `--progress-jsonl-out <path>` writes newline-delimited JSON events for long-running training observability without scraping stdout
+- Event rows include `ts_epoch_ms` and an `event` field; epoch-end rows include metric snapshots (`train_loss`, `val_loss`, `top1`, `top5`, `lr`)
+- Intended use case: remote/RunPod training where a host-side watcher polls the file and renders a local progress bar
 
 ## Current Limitation
 - Training still stores per-row JSONL line offsets in RAM (much smaller than full row dicts/strings, but not fully streaming/iterable training).
