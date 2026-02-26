@@ -16,7 +16,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_collect.sh`
 - `scripts/runpod_cycle_local_validate.sh`
 - `scripts/runpod_cycle_stop.sh`
+- `scripts/runpod_cycle_terminate_all_tracked.sh`
 - `scripts/runpod_cycle_full_smoke.sh`
+- `scripts/hf_dataset_publish.py`
+- `scripts/hf_dataset_fetch.py`
 - Runtime pod interfaces used by operators:
   - `ssh`
   - `scp` / `rsync`
@@ -29,6 +32,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   1. `--api-key`
   2. env `RUNPOD_API_KEY`
   3. keyring (`service=runpod`, `username=RUNPOD_API_KEY`)
+
+## RunPod Pod Lifecycle Terms (Do Not Conflate)
+- `provision` / `start`: create a new RunPod pod resource and start compute.
+- `stop`: RunPod `podStop` action on an existing pod. This halts compute, but the pod resource and attached storage can remain.
+- `terminate`: delete the pod resource (REST `DELETE /pods/<id>`). This is not the same as `stop`.
+- `AUTOSTOP_ACTION=exit` (inside the container) stops PID1/processes in the runtime; it is not a host-side RunPod pod deletion request.
 
 ## Image Build / Push Control
 - `scripts/build_runpod_image.sh` builds the RunPod image from `deploy/runpod_cloud_training/Dockerfile`
@@ -51,20 +60,26 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - use a key with GraphQL access
   - launch from RunPod UI template
   - or use `provision --gpu-type-id <gpuTypeId>` to bypass GPU discovery
+- Important diagnostic caveat (observed 2026-02-26 host run):
+  - Python `urllib` requests to `https://api.runpod.io/graphql` returned Cloudflare `error code: 1010` (`HTTP 403`) for `myself` and `gpuTypes`
+  - equivalent `curl` requests with the same bearer token returned `HTTP 200` for both queries
+  - implication: a reported GraphQL `403` from the Python helper may be a client-signature/WAF issue rather than an API key permission problem
+  - helper scripts now send an explicit `User-Agent` (+ `Accept`) header on RunPod REST/GraphQL requests to avoid this false-negative path on the observed host
 
 ## Provision Fallback with Explicit GPU Type ID
-- `provision --gpu-type-id <id>` normally validates the ID/display name against GraphQL-ranked GPUs
-- If GraphQL GPU discovery is denied (`403`) and `--gpu-type-id` is supplied:
-  - provisioning helper now proceeds with the explicit GPU type ID without GraphQL validation
-  - emits a stderr JSON warning indicating validation was skipped
-- This preserves a CLI provisioning path when the operator can pick the GPU type in RunPod UI first but GraphQL API listing is unavailable to the key
+- `provision --gpu-type-id <id>` now bypasses GraphQL GPU discovery/validation and uses the explicit GPU type directly in pod creation
+- This preserves a CLI provisioning path for keys that can use REST pod creation/template APIs but cannot access GraphQL `gpuTypes`
+- Practical effect:
+  - wrapper scripts that pass explicit `--gpu-type-id` no longer trigger GraphQL `gpu-search` access errors during provisioning
+  - invalid GPU type IDs are now rejected by RunPod pod creation (REST) instead of local GraphQL pre-validation
 
 ## RunPod CLI Helper Scripts
 - `scripts/runpod_cli_doctor.sh`
   - checks local key source (env vs keyring)
+  - tolerates missing local keyring backend (reports keyring unavailable/error instead of crashing)
   - checks REST auth via `template-list`
   - checks GraphQL auth via `gpu-search`
-  - prints a remediation hint when REST works but GraphQL fails
+  - reports GraphQL `403` as an expected access-scope limitation (with remediation hint) when REST still works
 - `scripts/runpod_regression_checks.sh`
   - runs RunPod-focused unit tests (`tests/test_runpod_api_helpers.py`, `tests/test_runpod_local_smoke_script.py`)
   - runs `scripts/runpod_cli_doctor.sh`
@@ -77,24 +92,72 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - inherits current `runpod_provision.py` defaults (notably `--use-runpod-training-preset-env` is now opt-in)
 - `scripts/runpod_cycle_common.sh`
   - shared helpers for modular lifecycle scripts (run id paths, keyring token lookup, pod JSON parsing, SSH/connection fields)
+  - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
   - provisions a pod from template using keyring-backed RunPod auth
+  - now injects local SSH public key env overrides by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`) from `~/.ssh/id_ed25519.pub` when present
+  - local SSH key injection can be controlled with `RUNPOD_INJECT_LOCAL_SSH_KEY_ENV` and `RUNPOD_SSH_PUBKEY_PATH`
+  - now injects a unique per-run `REPO_DIR` by default (`/workspace/chess-bot-<run_id>`) to avoid stale/root-owned repo directories on reused persistent volumes
+  - unique `REPO_DIR` injection can be controlled with `RUNPOD_SET_UNIQUE_REPO_DIR` and `RUNPOD_DEFAULT_REMOTE_REPO_DIR`
+  - now injects smoke-safe service env defaults by default (`START_SSHD=1`, `START_JUPYTER=0`, `START_INFERENCE_API=0`, `START_HF_WATCH=0`, `START_IDLE_WATCHDOG=0`) to keep `sshd` stable during lifecycle smoke tests
+  - smoke-service default injection can be controlled with `RUNPOD_SET_SMOKE_SERVICE_ENVS`
   - saves provisioning JSON to `artifacts/runpod_cycles/<run_id>/provision.json`
   - initializes a per-run markdown report under `artifacts/runpod_cycles/<run_id>/reports/observations.md`
+  - appends a `RUNNING` record to the tracked pod registry (`config/runpod_tracked_pods.jsonl`)
 - `scripts/runpod_cycle_push_dataset.sh`
   - pushes a valid local dataset directory (`train.jsonl`, `val.jsonl`) to the pod via `rsync`/SSH
   - defaults local dataset source to `data/dataset/_smoke_runpod`
+  - waits for remote `REPO_DIR` to exist and become writable before `mkdir`/`rsync` (avoids startup race with repo clone/chown)
+  - readiness wait is controlled with `RUNPOD_REMOTE_READY_TIMEOUT_SECONDS` / `RUNPOD_REMOTE_READY_POLL_SECONDS`
+- `scripts/hf_dataset_publish.py`
+  - publishes a validated dataset directory to a Hugging Face **dataset** repo using path versioning under `validated_datasets/<dataset_name>/<version>/`
+  - default token lookup order:
+    1. `--token`
+    2. env `HF_TOKEN`
+    3. keyring (`service=huggingface`, `username=codex_hf_write_token`)
+  - writes `manifest.json` + `checksums.sha256` and uploads either:
+    - a compressed `*.tar.gz` archive (default, faster for JSONL uploads), or
+    - raw copied files (`--archive-format none`)
+  - supports `--dry-run` to validate repo path/versioning without network upload
+- `scripts/hf_dataset_fetch.py`
+  - fetches a versioned dataset package from a Hugging Face dataset repo and extracts the uploaded archive by default
+  - supports `--all-latest` to fetch the latest version for every dataset under the repo prefix and emit an aggregate manifest of extracted `train.jsonl` / `val.jsonl` paths
+  - supports `--dry-run` to print the planned repo path and snapshot patterns without downloading
 - `scripts/runpod_cycle_train.sh`
   - runs `train_baseline_preset.sh` on the pod with explicit output/metrics paths under `artifacts/runpod_cycles/<run_id>/`
   - runs a short remote inference smoke command (`scripts/infer_move.py`) against the produced model
+  - waits for remote repo scripts/readiness before launching training (same timeout/poll env controls as dataset push)
+  - exports `REPO_DIR`, `RUNPOD_PHASE_TIMING_LOG`, and `PYTHONPATH` inside the remote SSH command so per-run `REPO_DIR` overrides work end-to-end
+  - supports HF-backed aggregate training mode via `RUNPOD_TRAIN_FROM_HF_LATEST_ALL=1` plus `RUNPOD_HF_DATASET_REPO_ID`:
+    - pod fetches the latest version of every dataset from the HF dataset repo prefix (default `validated_datasets`)
+    - `runpod_cycle_push_dataset.sh` can be skipped for this mode
+    - remote fetch summary manifest is written under `${REPO_DIR}/artifacts/hf_dataset_fetch_manifest.json`
 - `scripts/runpod_cycle_collect.sh`
   - pulls remote run artifacts and timing logs into local `artifacts/runpod_cycles/<run_id>/collected/`
 - `scripts/runpod_cycle_local_validate.sh`
   - runs local CPU inference (`scripts/infer_move.py`) on the collected `.pt` artifact and saves output
+  - exports local `PYTHONPATH=${REPO_ROOT}` before invoking `scripts/infer_move.py` so direct script execution resolves `src.*` imports reliably on the host
 - `scripts/runpod_cycle_stop.sh`
   - cleanly requests pod stop via RunPod GraphQL `podStop` using keyring-backed token and saved `pod_id`
+  - stop mutation payload now requests object subfields (`id`, `desiredStatus`) to match the current GraphQL schema and avoid validation failures
+  - appends a `STOPPED` record to the tracked pod registry for operator bookkeeping
+  - note: `stop` halts compute but does not delete the pod; storage charges can still apply until termination
+- `scripts/runpod_cycle_terminate_all_tracked.sh`
+  - safe cleanup utility to terminate (delete) all pods tracked by our scripts whose latest tracked state is not `TERMINATED`
+  - requires explicit confirmation (`--yes` or `RUNPOD_CONFIRM_TERMINATE_ALL=YES`)
+  - uses RunPod REST `DELETE /pods/<id>` and appends `TERMINATED` registry records on success
 - `scripts/runpod_cycle_full_smoke.sh`
   - orchestration wrapper that composes the modular scripts in order (start -> push -> train -> collect -> local-validate -> stop)
+
+## Tracked Pod Registry
+- Default file: `config/runpod_tracked_pods.jsonl`
+- Purpose: keep a local script-owned ledger of pods launched/stopped/terminated via the repo RunPod lifecycle scripts
+- Format: JSON Lines (one event per line, append-only)
+- Override path with `RUNPOD_TRACKED_PODS_FILE`
+- Typical states written by scripts:
+  - `RUNNING` (after `runpod_cycle_start.sh`)
+  - `STOPPED` (after `runpod_cycle_stop.sh`; pod still exists unless later terminated)
+  - `TERMINATED` (after `runpod_cycle_terminate_all_tracked.sh`; pod resource deleted via REST)
 
 ## Running Pod Control (CLI)
 - SSH into the pod using RunPod-provided connection info (port `22/tcp`)
@@ -114,10 +177,14 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `rsync`
   - Jupyter file browser
   - `rclone` (installed in image)
+  - Hugging Face dataset repo publish/fetch helpers (`scripts/hf_dataset_publish.py`, `scripts/hf_dataset_fetch.py`) for reusable validated datasets
 
 ## Modular Lifecycle Flow (host-side)
 - Full cycle (defaults to a short smoke run and local `_smoke_runpod` dataset):
   - `bash scripts/runpod_cycle_full_smoke.sh`
+  - ends with `stop` only (compute halt), not termination/deletion
+  - current smoke defaults intentionally disable optional pod services (Jupyter/inference/HF-watchdog/idle-watchdog) unless explicitly overridden, to prevent `entrypoint.sh` `wait -n` child-exit cleanup from killing `sshd` during the CLI smoke
+- For larger/reused validated datasets, prefer publishing once to a HF dataset repo and fetching into the pod/volume cache, instead of repeated host->pod `rsync` uploads
 - Stepwise modular flow:
   - If using the RunPod SSH gateway, export gateway overrides before steps 2-4:
     - `export RUNPOD_SSH_USER='<podid>-<route>'`
@@ -129,13 +196,23 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   4. `bash scripts/runpod_cycle_collect.sh`
   5. `bash scripts/runpod_cycle_local_validate.sh`
   6. `bash scripts/runpod_cycle_stop.sh`
+  - HF aggregate training variant (skip dataset push):
+    - `export RUNPOD_TRAIN_FROM_HF_LATEST_ALL=1`
+    - `export RUNPOD_HF_DATASET_REPO_ID='LogicLark-QuantumQuill/chess-bot-datasets'`
+    - optional `export RUNPOD_HF_DATASET_PATH_PREFIX='validated_datasets'`
+    - run steps `1 -> 3 -> 4 -> 5 -> 6`
 - Shared run identifier:
   - set `RUNPOD_CYCLE_RUN_ID=<custom-id>` to keep all files under one run directory
 - Core outputs per run:
   - `artifacts/runpod_cycles/<run_id>/provision.json`
   - `artifacts/runpod_cycles/<run_id>/reports/observations.md`
+  - `artifacts/runpod_cycles/<run_id>/logs/*` (persisted command/transfer logs for cycle steps)
   - `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/*`
   - `artifacts/runpod_cycles/<run_id>/local_validation/infer_move_output.txt`
+  - examples under `logs/`:
+    - `push_dataset_ready_check.log`, `push_dataset_rsync.log`
+    - `train_ready_check.log`, `train_remote_ssh.log`
+    - `collect_rsync_run_artifacts.log`, `collect_rsync_timing.log`
 
 ## Provisioning Helper Defaults (2026-02-26 update)
 - `provision --use-runpod-training-preset-env` is now **opt-in** (default disabled)
@@ -168,6 +245,40 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - Additional root cause found during follow-up debugging:
   - even with correct `/home/runner/.ssh/authorized_keys`, direct mapped `runner@<ip>:<port>` can still be denied when the `runner` account is locked by default (`useradd` on Ubuntu)
   - deployment flow now fixes this automatically by unlocking `runner` at image build/startup while keeping `PasswordAuthentication no`
+
+## Observed CLI Smoke Blocker (2026-02-26 host run)
+- Full `scripts/runpod_cycle_full_smoke.sh` retries were able to provision community pods (for example `RTX 4090`, `RTX 3090`) using explicit `RUNPOD_GPU_TYPE_ID` after transient REST capacity failures.
+- `gpu-search` remained unavailable for this API key/account due GraphQL `403`, so explicit GPU IDs were required.
+- Direct mapped SSH still failed with `Permission denied (publickey)` on newly provisioned pods even when the provision payload showed the expected public key in `AUTHORIZED_KEYS`/`PUBLIC_KEY`.
+- Practical implication:
+  - full CLI smoke could not progress past `runpod_cycle_push_dataset.sh` without a working SSH path
+  - operator should use the RunPod UI SSH gateway command (`ssh <podid>-<route>@ssh.runpod.io`) and export `RUNPOD_SSH_USER/HOST/PORT` to continue modular cycle steps, or update the template/image to a build that unlocks `runner`
+  - after failed runs, issue `stop` first to halt compute, then use the tracked terminate script when you want deletion cleanup
+- Additional API diagnostic from the same date:
+  - `scripts/runpod_cli_doctor.sh` reported GraphQL denial, but direct `curl` GraphQL probes (`myself`, `gpuTypes`) succeeded with the same key
+  - likely cause was Cloudflare/browser-signature filtering against the helper's Python `urllib` requests; helper code now adds an explicit `User-Agent` header and the doctor GraphQL probe returned `ok` after the fix
+
+## Observed Full Cycle Success (2026-02-26 host run, after fixes)
+- Successful end-to-end RunPod smoke run completed on `runpod-cycle-20260226T065518Z` after applying the following fixes:
+  - helper `User-Agent`/`Accept` headers for RunPod GraphQL requests (`urllib` Cloudflare `1010` false-negative fix)
+  - template image updated to `ghcr.io/rareskey/chess-bot-runpod:ssh-unlock-fix-20260226T0634Z` (runner unlock fix)
+  - cycle start default unique `REPO_DIR` injection (avoids root-owned stale repo path on reused volumes)
+  - cycle start smoke-service env defaults (keeps only `sshd` enabled for lifecycle smoke stability)
+  - dataset/train remote readiness waits
+  - train/local-validate `PYTHONPATH` + `REPO_DIR` path fixes
+- Pod/GPU details for the successful run:
+  - pod id: `qtxtw8ui07v3zg`
+  - gpu: `NVIDIA RTX A4000` community
+  - image: `ghcr.io/rareskey/chess-bot-runpod:ssh-unlock-fix-20260226T0634Z`
+- Successful phases:
+  - `start` (provision + wait-ready)
+  - `push_dataset`
+  - `train` (remote train preset + remote inference smoke)
+  - `collect`
+  - `local_validate`
+  - `stop`
+- Local artifacts collected under:
+  - `artifacts/runpod_cycles/runpod-cycle-20260226T065518Z/`
 
 ## Template Field Conventions (observed workflow)
 - Pod template type: `Pod`

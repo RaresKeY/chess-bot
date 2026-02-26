@@ -12,6 +12,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional host-side RunPod regression checks wrapper: `scripts/runpod_regression_checks.sh`
 - Optional host-side quick launch wrapper: `scripts/runpod_quick_launch.sh`
 - Optional host-side modular RunPod lifecycle scripts: `scripts/runpod_cycle_*.sh`
+- Optional host-side HF dataset publish/fetch helpers: `scripts/hf_dataset_publish.py`, `scripts/hf_dataset_fetch.py`
 - Container image build: `deploy/runpod_cloud_training/Dockerfile`
 - Startup orchestration: `deploy/runpod_cloud_training/entrypoint.sh`
 - Inference HTTP service: `deploy/runpod_cloud_training/inference_api.py`
@@ -33,6 +34,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional idle watchdog for autostop behavior
 - Operators may also access the running pod through the RunPod SSH gateway command (`ssh <podid>-<route>@ssh.runpod.io`) instead of direct mapped `22/tcp`
 - Entrypoint now explicitly unlocks the `runner` account (while keeping password auth disabled) so Ubuntu/Debian `sshd` accepts public-key auth for direct mapped SSH
+- Entrypoint uses `wait -n` to supervise services; if any enabled child process exits, cleanup can stop the remaining services (including `sshd`)
 
 ## Repo Bootstrap Behavior
 - Repo clone/pull at startup is supported and enabled by environment defaults (`CLONE_REPO_ON_START=1`, `GIT_AUTO_PULL=1`)
@@ -62,6 +64,11 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - On Linux Mint host setups, Docker can be configured to store GHCR credentials in the system keyring via the `secretservice` credential helper (`"credsStore": "secretservice"` in `~/.docker/config.json`) instead of plaintext auth entries.
 - Phase timings are logged in JSONL under a conventional artifacts path by default: `artifacts/timings/runpod_phase_times.jsonl` (configurable via `RUNPOD_PHASE_TIMING_LOG`)
 
+## RunPod Lifecycle Semantics (Stop vs Terminate)
+- `stop` in RunPod context means halting pod compute (for example via GraphQL `podStop`); the pod resource and storage can remain.
+- `terminate` means deleting the pod resource entirely (typically via RunPod REST pod delete).
+- These are intentionally different operator actions and billing outcomes; specs/scripts should not use them interchangeably.
+
 ## Inference API Behavior (module service)
 - Resolves model path from explicit arg/env or latest `*.pt` under repo `artifacts/`
 - Loads model once at startup on selected device (`auto` -> CUDA when available)
@@ -74,6 +81,12 @@ Provide a modular containerized deployment package for running this repo on GPU 
 ## RunPod Training Preset Launcher
 - `train_baseline_preset.sh` provides a one-command training path inside the container (`bash /opt/runpod_cloud_training/train_baseline_preset.sh`)
 - Auto-detects latest dataset dir under `data/dataset/` containing `train.jsonl` + `val.jsonl` when `TRAIN_DATASET_DIR` / `TRAIN_PATH` / `VAL_PATH` are not set
+- Supports optional HF dataset bootstrap mode for reusable datasets:
+  - `HF_FETCH_LATEST_ALL_DATASETS=1` fetches the latest published version of every dataset under `HF_DATASET_REPO_ID` + `HF_DATASET_PATH_PREFIX`
+  - fetched datasets are extracted under `HF_DATASET_CACHE_DIR`
+  - the preset aggregates all discovered `train.jsonl` and `val.jsonl` files and passes them to `scripts/train_baseline.py` via repeated `--train` / `--val` flags
+  - fetch summary manifest is written to `HF_DATASET_FETCH_MANIFEST`
+  - "latest" selection is lexicographic on the version path segment, so sortable version labels (for example timestamp-prefixed `validated-YYYYMMDDTHHMMSSZ`) are recommended
 - Uses current repo baseline architecture/training defaults:
   - `embed_dim=256`, `hidden_dim=512`, `num_layers=2`, `dropout=0.15`
   - `epochs=40`, `lr=2e-4`
@@ -114,14 +127,32 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - `hf_auto_sync_watch.py`: polls for changed files and triggers sync on change
 - Pattern-based file selection defaults to model/metrics artifacts (`*.pt`, `*.json`)
 
+## Validated Dataset HF Publish/Fetch Flow (host-side)
+- `scripts/hf_dataset_publish.py` publishes reusable validated datasets to a HF **dataset** repo with versioned paths:
+  - `validated_datasets/<dataset_name>/<version>/`
+- Publish script behavior:
+  - validates required `train.jsonl`/`val.jsonl` by default
+  - generates `manifest.json` and `checksums.sha256`
+  - uploads a compressed `tar.gz` bundle by default (faster transfer for JSONL-heavy datasets)
+  - supports `--archive-format none` to upload raw files instead
+  - token lookup defaults to keyring (`service=huggingface`, `username=codex_hf_write_token`), with `--token` / `HF_TOKEN` overrides
+  - sets `HF_HUB_ENABLE_HF_TRANSFER=1` by default for faster HF transfers when supported by the active env
+  - supports `--dry-run` to inspect repo path/versioning without network upload
+- `scripts/hf_dataset_fetch.py` fetches a published dataset version from the HF dataset repo and extracts the archive into a local destination by default
+- `scripts/hf_dataset_fetch.py --all-latest` can fetch the latest version for every dataset under a repo prefix and emit an aggregate manifest containing all extracted `train.jsonl` / `val.jsonl` paths (used by the RunPod train preset HF mode)
+- Recommended workflow for RunPod:
+  - publish validated dataset once from host
+  - fetch into pod persistent volume/cache on demand
+  - point training to the fetched dataset path (`TRAIN_DATASET_DIR` / `TRAIN_PATH` / `VAL_PATH`) or enable `HF_FETCH_LATEST_ALL_DATASETS=1` to train over all latest published datasets automatically
+
 ## Idle Watchdog Behavior
 - Polls GPU utilization/memory (`nvidia-smi`) and connection/process activity
 - Treats SSH, Jupyter, inference API traffic, matching process patterns, or heartbeat updates as activity
 - When idle timeout is exceeded:
-  - can call RunPod GraphQL API (`AUTOSTOP_ACTION=runpod_api`)
-  - or terminate PID1 (`AUTOSTOP_ACTION=exit`) as a fallback action
+  - can call RunPod GraphQL API (`AUTOSTOP_ACTION=runpod_api`) to request pod stop (compute halt, not pod deletion)
+  - or terminate PID1 (`AUTOSTOP_ACTION=exit`) as a fallback action (container process exit, not RunPod pod termination/deletion)
 - RunPod GraphQL payload is implemented with retry/fallback mutation shapes and may require env override if API schema changes
-- Watchdog strips any accidental `api_key` query parameter from the configured GraphQL endpoint and authenticates with `Authorization: Bearer ...`
+- Watchdog strips any accidental `api_key` query parameter from the configured GraphQL endpoint, authenticates with `Authorization: Bearer ...`, and sends explicit `Accept` / `User-Agent` headers for better compatibility with upstream filtering/WAF behavior
 
 ## RunPod API Provisioning Helper
 - `scripts/runpod_provision.py` supports:
@@ -139,6 +170,9 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - No built-in reverse proxy/TLS or API auth layer (assumes trusted networking or RunPod access controls)
 - Private repo clone/bootstrap is intentionally out of scope in this module version
 - RunPod API stop mutation schema may drift; watchdog includes best-effort defaults but may need adjustment
+- Watchdog stop mutation currently requests object subfields (`id`, `desiredStatus`) on `podStop` to match the observed GraphQL schema
+- This module/docs distinguish RunPod `stop` from pod `terminate`; operator cleanup may still require a separate pod delete step after stop/autostop
+- For host-side smoke/lifecycle validation, disabling optional services (Jupyter/inference/HF-watchdog/idle-watchdog) can improve SSH stability because a single child-process exit otherwise tears down `sshd`
 - First local Docker smoke run can be slow when `SYNC_REQUIREMENTS_ON_START=1` because the image venv intentionally installs repo `requirements.txt` (including `torch`) at startup when the repo requirements hash is not yet stamped
 - If `START_INFERENCE_API=1` and `torch` is missing from the deployment venv, the inference API itself remains unavailable until repo requirement sync installs `torch`; entrypoint now degrades by skipping API start instead of crashing the container
 

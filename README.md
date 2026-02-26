@@ -202,3 +202,152 @@ PYTHONPATH=. python scripts/play_vs_model_server.py --dir . --model artifacts/mo
 - Default training is winner-aware using winner embedding and weighted winner-side examples.
 - Viewer uses the open-source `cburnett` SVG piece set from the Lichess `lila` repository (`assets/pieces/cburnett`).
 - Play-vs-model uses legal fallback moves when the model predicts no legal move, so interactive games can continue.
+
+## RunPod Smoke Test (Host CLI)
+Host-side lifecycle smoke test for the RunPod training template/image (provision -> dataset push -> remote train -> collect -> local validate -> stop).
+
+Prereqs:
+- RunPod pod template exists (for example `chess-bot-training`)
+- host has `ssh`, `rsync`, `jq`, `curl`
+- host SSH public key exists at `~/.ssh/id_ed25519.pub`
+- RunPod API key available via keyring (preferred) or env fallback
+
+Preferred auth (keyring):
+
+```bash
+bash scripts/runpod_cli_doctor.sh
+```
+
+Optional explicit `.env` fallback (instead of keyring):
+
+1. Create a local file from the example and fill in your key:
+
+```bash
+cp .env.runpod.example .env.runpod
+```
+
+2. Load it explicitly for the current shell/session:
+
+```bash
+set -a
+. ./.env.runpod
+set +a
+```
+
+3. Re-run the doctor:
+
+```bash
+bash scripts/runpod_cli_doctor.sh
+```
+
+Build and push the RunPod image (recommended to use a pinned tag, not only `latest`):
+
+```bash
+IMAGE_REPO=ghcr.io/<your-user>/chess-bot-runpod \
+IMAGE_TAG=<your-tag> \
+PUSH_IMAGE=1 \
+bash scripts/build_runpod_image.sh
+```
+
+Then update the RunPod template image to the new pinned tag in the RunPod UI.
+
+Run the full smoke cycle:
+
+```bash
+bash scripts/runpod_cycle_full_smoke.sh
+```
+
+Notes for current smoke-cycle behavior:
+- The cycle launcher injects a unique `REPO_DIR` per run under `/workspace` to avoid stale/root-owned repo directories on reused volumes.
+- The cycle launcher disables optional pod services by default during smoke tests (`START_JUPYTER=0`, `START_INFERENCE_API=0`, `START_HF_WATCH=0`, `START_IDLE_WATCHDOG=0`) so `sshd` remains stable.
+- The full smoke cycle ends with RunPod `stop` (compute halted), not pod deletion.
+
+Cleanup (delete tracked pods, not just stop):
+
+```bash
+bash scripts/runpod_cycle_terminate_all_tracked.sh --yes
+```
+
+## Hugging Face Dataset Publish/Fetch Flow (Reusable Validated Datasets)
+Use this for validated datasets you want to reuse across multiple RunPod training runs. It avoids repeated host->pod `rsync` uploads and gives you versioned dataset paths.
+
+Preferred auth:
+- Hugging Face write token in keyring:
+  - `service=huggingface`
+  - `username=codex_hf_write_token`
+
+Optional explicit env fallback:
+
+```bash
+cp .env.hf_dataset.example .env.hf_dataset
+set -a
+. ./.env.hf_dataset
+set +a
+```
+
+Publish a validated dataset directory (default upload is a compressed `tar.gz` bundle + `manifest.json` + `checksums.sha256`):
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/hf_dataset_publish.py \
+  --repo-id <hf-user-or-org>/chess-bot-datasets \
+  --dataset-dir data/dataset/elite_2025-11_cap4 \
+  --dataset-name elite_2025_11_cap4 \
+  --version 2026-02-26-valid-v1
+```
+
+Dry-run first (no network upload):
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/hf_dataset_publish.py \
+  --repo-id <hf-user-or-org>/chess-bot-datasets \
+  --dataset-dir data/dataset/_smoke_runpod \
+  --dataset-name smoke_runpod \
+  --version test-$(date -u +%Y%m%dT%H%M%SZ) \
+  --dry-run
+```
+
+Fetch later (host or pod), then point training to the extracted path:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/hf_dataset_fetch.py \
+  --repo-id <hf-user-or-org>/chess-bot-datasets \
+  --dataset-name elite_2025_11_cap4 \
+  --version 2026-02-26-valid-v1 \
+  --dest-dir /workspace/datasets
+```
+
+After fetch, use the extracted dataset path with training:
+- example extracted path: `/workspace/datasets/elite_2025_11_cap4/2026-02-26-valid-v1/dataset`
+- then set `TRAIN_DATASET_DIR=/workspace/datasets/elite_2025_11_cap4/2026-02-26-valid-v1/dataset`
+
+Notes:
+- Install host deps if needed: `.venv/bin/pip install huggingface_hub hf_transfer`
+- The publish/fetch helpers default to `HF_HUB_ENABLE_HF_TRANSFER=1`
+- For tiny smoke datasets, direct `rsync` remains simpler; use HF for reusable validated datasets
+
+### RunPod: Train On All Latest HF Datasets
+Feasible and now supported.
+
+The RunPod training preset can fetch the latest published version of every dataset under your HF dataset repo prefix and train on all of them together (future uploads are picked up automatically as long as version names sort lexicographically, e.g. `validated-YYYYMMDDTHHMMSSZ`).
+
+Host-side modular flow (skip dataset push):
+
+```bash
+bash scripts/runpod_cycle_start.sh
+export RUNPOD_TRAIN_FROM_HF_LATEST_ALL=1
+export RUNPOD_HF_DATASET_REPO_ID='LogicLark-QuantumQuill/chess-bot-datasets'
+export RUNPOD_HF_DATASET_PATH_PREFIX='validated_datasets'   # optional (default)
+bash scripts/runpod_cycle_train.sh
+bash scripts/runpod_cycle_collect.sh
+bash scripts/runpod_cycle_local_validate.sh
+bash scripts/runpod_cycle_stop.sh
+```
+
+Inside the pod (manual usage), equivalent envs for the preset:
+
+```bash
+export HF_FETCH_LATEST_ALL_DATASETS=1
+export HF_DATASET_REPO_ID='LogicLark-QuantumQuill/chess-bot-datasets'
+export HF_DATASET_PATH_PREFIX='validated_datasets'
+bash /opt/runpod_cloud_training/train_baseline_preset.sh
+```
