@@ -17,6 +17,10 @@ HF_DATASET_PATH_PREFIX="${HF_DATASET_PATH_PREFIX:-validated_datasets}"
 HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${REPO_DIR}/data/hf_datasets}"
 HF_DATASET_FETCH_MANIFEST="${HF_DATASET_FETCH_MANIFEST:-${REPO_DIR}/artifacts/hf_dataset_fetch_manifest.json}"
 HF_USE_EXISTING_FETCH_MANIFEST="${HF_USE_EXISTING_FETCH_MANIFEST:-0}"
+HF_DATASET_SCHEMA_FILTER="${HF_DATASET_SCHEMA_FILTER:-auto}"
+TRAIN_RUNTIME_MIN_CONTEXT="${TRAIN_RUNTIME_MIN_CONTEXT:-8}"
+TRAIN_RUNTIME_MIN_TARGET="${TRAIN_RUNTIME_MIN_TARGET:-1}"
+TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-0}"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-6}"
@@ -29,6 +33,8 @@ RUNPOD_PHASE_TIMING_RUN_ID="${RUNPOD_PHASE_TIMING_RUN_ID:-runpod-train-$(date -u
 RUNPOD_PHASE_TIMING_SOURCE="${RUNPOD_PHASE_TIMING_SOURCE:-runpod_train_preset}"
 HF_ALL_TRAIN_PATHS=()
 HF_ALL_VAL_PATHS=()
+DETECTED_DATASET_SCHEMA="${DETECTED_DATASET_SCHEMA:-}"
+DETECTED_DATASET_FORMAT="${DETECTED_DATASET_FORMAT:-}"
 
 now_epoch_ms() {
   date +%s%3N
@@ -63,6 +69,50 @@ find_latest_dataset_dir() {
   printf '%s\n' "${best}"
 }
 
+detect_dataset_schema() {
+  local train_path="$1"
+  local dataset_dir="${2:-}"
+  local schema=""
+  local fmt=""
+  if [[ -n "${dataset_dir}" && -f "${dataset_dir}/stats.json" ]]; then
+    fmt="$("${PY_BIN}" - "${dataset_dir}/stats.json" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+print(str(d.get("dataset_format", "")))
+PY
+)"
+  fi
+  schema="$("${PY_BIN}" - "${train_path}" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        for line in f:
+            line=line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if "context" in row:
+                print("spliced")
+            elif "moves" in row or "moves_uci" in row:
+                print("game")
+            else:
+                print("unknown")
+            break
+        else:
+            print("empty")
+except Exception:
+    print("unknown")
+PY
+)"
+  DETECTED_DATASET_SCHEMA="${schema}"
+  DETECTED_DATASET_FORMAT="${fmt}"
+}
+
 if [[ ! -x "${PY_BIN}" ]]; then
   PY_BIN="python3"
 fi
@@ -84,22 +134,62 @@ fetch_latest_hf_datasets() {
 
 load_hf_manifest_paths() {
   [[ -f "${HF_DATASET_FETCH_MANIFEST}" ]] || return 1
-  mapfile -t _hf_train_paths < <("${PY_BIN}" - "${HF_DATASET_FETCH_MANIFEST}" <<'PY'
+  mapfile -t _hf_train_paths < <("${PY_BIN}" - "${HF_DATASET_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-for p in data.get("aggregate", {}).get("train_paths", []):
+schema_filter = (sys.argv[2] or "auto").strip()
+agg = data.get("aggregate", {})
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+def chosen():
+    if schema_filter and schema_filter not in {"", "auto"}:
+        return schema_filter
+    # prefer compact game dataset if present, else spliced, else fallback to aggregate
+    for cand in ("game_jsonl_runtime_splice_v1", "splice_rows_legacy"):
+        if cand in agg_by_format:
+            return cand
+    return ""
+fmt = chosen()
+paths = agg_by_format.get(fmt, {}).get("train_paths", []) if fmt else agg.get("train_paths", [])
+for p in paths:
     if p:
         print(p)
 PY
 )
-  mapfile -t _hf_val_paths < <("${PY_BIN}" - "${HF_DATASET_FETCH_MANIFEST}" <<'PY'
+  mapfile -t _hf_val_paths < <("${PY_BIN}" - "${HF_DATASET_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-for p in data.get("aggregate", {}).get("val_paths", []):
+schema_filter = (sys.argv[2] or "auto").strip()
+agg = data.get("aggregate", {})
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+def chosen():
+    if schema_filter and schema_filter not in {"", "auto"}:
+        return schema_filter
+    for cand in ("game_jsonl_runtime_splice_v1", "splice_rows_legacy"):
+        if cand in agg_by_format:
+            return cand
+    return ""
+fmt = chosen()
+paths = agg_by_format.get(fmt, {}).get("val_paths", []) if fmt else agg.get("val_paths", [])
+for p in paths:
     if p:
         print(p)
 PY
 )
+  export HF_SELECTED_SCHEMA="$("${PY_BIN}" - "${HF_DATASET_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+schema_filter = (sys.argv[2] or "auto").strip()
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+if schema_filter and schema_filter not in {"", "auto"}:
+    print(schema_filter)
+elif "game_jsonl_runtime_splice_v1" in agg_by_format:
+    print("game_jsonl_runtime_splice_v1")
+elif "splice_rows_legacy" in agg_by_format:
+    print("splice_rows_legacy")
+else:
+    print("")
+PY
+)"
   if (( ${#_hf_train_paths[@]} > 0 )); then
     TRAIN_PATH="${_hf_train_paths[0]}"
   fi
@@ -159,6 +249,8 @@ echo "[runpod-train] train=${TRAIN_PATH}"
 echo "[runpod-train] val=${VAL_PATH}"
 if [[ -f "${HF_DATASET_FETCH_MANIFEST}" ]]; then
   echo "[runpod-train] hf_dataset_fetch_manifest=${HF_DATASET_FETCH_MANIFEST}"
+  echo "[runpod-train] hf_dataset_schema_filter=${HF_DATASET_SCHEMA_FILTER}"
+  echo "[runpod-train] hf_selected_schema=${HF_SELECTED_SCHEMA:-}"
 fi
 echo "[runpod-train] output=${OUTPUT_PATH}"
 echo "[runpod-train] metrics=${METRICS_OUT}"
@@ -166,6 +258,11 @@ if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then
   echo "[runpod-train] progress_jsonl=${TRAIN_PROGRESS_JSONL_OUT}"
 fi
 echo "[runpod-train] preset=current_lstm_phase_side_v1 (embed=256 hidden=512 layers=2 dropout=0.15 epochs=40 lr=2e-4 plateau+early-stop)"
+detect_dataset_schema "${TRAIN_PATH}" "${TRAIN_DATASET_DIR:-$(dirname "${TRAIN_PATH}")}"
+echo "[runpod-train] detected_dataset_schema=${DETECTED_DATASET_SCHEMA}"
+if [[ -n "${DETECTED_DATASET_FORMAT}" ]]; then
+  echo "[runpod-train] detected_dataset_format=${DETECTED_DATASET_FORMAT}"
+fi
 
 cmd=(
   "${PY_BIN}" "${TRAIN_SCRIPT}"
@@ -193,6 +290,14 @@ cmd=(
   --early-stopping-min-delta 0.002
 )
 
+if [[ "${DETECTED_DATASET_SCHEMA}" == "game" ]]; then
+  cmd+=(
+    --runtime-min-context "${TRAIN_RUNTIME_MIN_CONTEXT}"
+    --runtime-min-target "${TRAIN_RUNTIME_MIN_TARGET}"
+    --runtime-max-samples-per-game "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"
+  )
+fi
+
 if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then
   cmd+=( --progress-jsonl-out "${TRAIN_PROGRESS_JSONL_OUT}" )
 fi
@@ -205,6 +310,9 @@ if [[ "${HF_FETCH_LATEST_ALL_DATASETS}" == "1" && ${#HF_ALL_TRAIN_PATHS[@]} -gt 
     cmd+=( --val "${p}" )
   done
   echo "[runpod-train] using_hf_latest_all_datasets=1 train_files=${#HF_ALL_TRAIN_PATHS[@]} val_files=${#HF_ALL_VAL_PATHS[@]}"
+  if [[ -n "${HF_SELECTED_SCHEMA:-}" ]]; then
+    echo "[runpod-train] using_hf_schema=${HF_SELECTED_SCHEMA}"
+  fi
 else
   cmd+=( --train "${TRAIN_PATH}" --val "${VAL_PATH}" )
 fi

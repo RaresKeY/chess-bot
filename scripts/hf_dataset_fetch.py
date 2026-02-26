@@ -186,6 +186,7 @@ def main() -> None:
     fetched_summaries = []
     aggregate_train_paths: list[str] = []
     aggregate_val_paths: list[str] = []
+    aggregate_by_format: dict[str, dict[str, list[str] | int]] = {}
     for dataset_name, version in selected:
         repo_path = f"{repo_path_prefix}/{dataset_name}/{version}"
         local_repo_path = snapshot_root / repo_path
@@ -205,6 +206,13 @@ def main() -> None:
             aggregate_train_paths.append(str(train_path))
         if val_path.is_file():
             aggregate_val_paths.append(str(val_path))
+        ds_format = str((manifest or {}).get("dataset_format") or "unknown")
+        slot = aggregate_by_format.setdefault(ds_format, {"train_paths": [], "val_paths": [], "dataset_count": 0})
+        if train_path.is_file():
+            slot["train_paths"].append(str(train_path))  # type: ignore[index]
+        if val_path.is_file():
+            slot["val_paths"].append(str(val_path))  # type: ignore[index]
+        slot["dataset_count"] = int(slot.get("dataset_count", 0)) + 1  # type: ignore[arg-type]
 
         fetched_summaries.append(
             {
@@ -214,6 +222,8 @@ def main() -> None:
                 "dest_dir": str(fetched_dir),
                 "snapshot_root": str(snapshot_root),
                 "manifest_present": bool(manifest),
+                "dataset_format": (manifest or {}).get("dataset_format"),
+                "stats_json_present": bool((manifest or {}).get("stats_json")),
                 "distribution_mode": (manifest or {}).get("distribution", {}).get("mode"),
                 "copied_entries": len(copied_files),
                 "train_path": str(train_path) if train_path.is_file() else "",
@@ -233,6 +243,16 @@ def main() -> None:
             "val_paths": aggregate_val_paths,
             "train_count": len(aggregate_train_paths),
             "val_count": len(aggregate_val_paths),
+        },
+        "aggregate_by_format": {
+            k: {
+                "dataset_count": int(v.get("dataset_count", 0)),
+                "train_paths": list(v.get("train_paths", [])),
+                "val_paths": list(v.get("val_paths", [])),
+                "train_count": len(list(v.get("train_paths", []))),
+                "val_count": len(list(v.get("val_paths", []))),
+            }
+            for k, v in aggregate_by_format.items()
         },
     }
     if args.output_manifest:

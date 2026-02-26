@@ -86,10 +86,13 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Supports optional HF dataset bootstrap mode for reusable datasets:
   - `HF_FETCH_LATEST_ALL_DATASETS=1` fetches the latest published version of every dataset under `HF_DATASET_REPO_ID` + `HF_DATASET_PATH_PREFIX`
   - fetched datasets are extracted under `HF_DATASET_CACHE_DIR`
-  - the preset aggregates all discovered `train.jsonl` and `val.jsonl` files and passes them to `scripts/train_baseline.py` via repeated `--train` / `--val` flags
+  - `scripts/hf_dataset_fetch.py` aggregate manifests now include `aggregate_by_format` (for example `game_jsonl_runtime_splice_v1`, `splice_rows_legacy`) when dataset manifests expose `dataset_format`
+  - the preset can filter aggregate training inputs by schema/format via `HF_DATASET_SCHEMA_FILTER` (`auto` default prefers compact game datasets when present, otherwise legacy splice datasets)
+  - the preset aggregates discovered `train.jsonl` and `val.jsonl` files from the selected schema bucket and passes them to `scripts/train_baseline.py` via repeated `--train` / `--val` flags
   - fetch summary manifest is written to `HF_DATASET_FETCH_MANIFEST`
   - `HF_USE_EXISTING_FETCH_MANIFEST=1` lets the preset reuse a previously-created aggregate fetch manifest (skip a second HF fetch and train from the cached dataset set)
   - "latest" selection is lexicographic on the version path segment, so sortable version labels (for example timestamp-prefixed `validated-YYYYMMDDTHHMMSSZ`) are recommended
+  - if the selected dataset rows are compact game-level rows (`moves`/`moves_uci` schema), the preset detects this and passes runtime splice controls through to `scripts/train_baseline.py` (`TRAIN_RUNTIME_MIN_CONTEXT`, `TRAIN_RUNTIME_MIN_TARGET`, `TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME`)
 - Uses current repo baseline architecture/training defaults:
   - `embed_dim=256`, `hidden_dim=512`, `num_layers=2`, `dropout=0.15`
   - `epochs=40`, `lr=2e-4`
@@ -137,13 +140,14 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Publish script behavior:
   - validates required `train.jsonl`/`val.jsonl` by default
   - generates `manifest.json` and `checksums.sha256`
+  - publish manifest includes `dataset_format` (detected from `stats.json` or row schema sniffing) and embeds `stats_json` when present for downstream schema-aware fetch/training flows
   - uploads a compressed `tar.gz` bundle by default (faster transfer for JSONL-heavy datasets)
   - supports `--archive-format none` to upload raw files instead
   - token lookup defaults to keyring (`service=huggingface`, `username=codex_hf_write_token`), with `--token` / `HF_TOKEN` overrides
   - sets `HF_HUB_ENABLE_HF_TRANSFER=1` by default for faster HF transfers when supported by the active env
   - supports `--dry-run` to inspect repo path/versioning without network upload
 - `scripts/hf_dataset_fetch.py` fetches a published dataset version from the HF dataset repo and extracts the archive into a local destination by default
-- `scripts/hf_dataset_fetch.py --all-latest` can fetch the latest version for every dataset under a repo prefix and emit an aggregate manifest containing all extracted `train.jsonl` / `val.jsonl` paths (used by the RunPod train preset HF mode)
+- `scripts/hf_dataset_fetch.py --all-latest` can fetch the latest version for every dataset under a repo prefix and emit an aggregate manifest containing all extracted `train.jsonl` / `val.jsonl` paths plus `aggregate_by_format` buckets keyed by dataset manifest `dataset_format` (used by the RunPod train preset HF mode)
 - Recommended workflow for RunPod:
   - publish validated dataset once from host
   - fetch into pod persistent volume/cache on demand

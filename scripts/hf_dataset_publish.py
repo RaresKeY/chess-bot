@@ -89,8 +89,46 @@ def _collect_file_meta(dataset_dir: Path) -> list[FileMeta]:
     return out
 
 
+def _read_stats_json(dataset_dir: Path) -> dict | None:
+    stats_path = dataset_dir / "stats.json"
+    if not stats_path.is_file():
+        return None
+    try:
+        data = json.loads(stats_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _detect_dataset_format(dataset_dir: Path, stats: dict | None) -> str:
+    if isinstance(stats, dict):
+        fmt = str(stats.get("dataset_format", "")).strip()
+        if fmt:
+            return fmt
+    # Lightweight fallback sniff
+    train_path = dataset_dir / "train.jsonl"
+    if train_path.is_file():
+        try:
+            with train_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    if "moves" in row or "moves_uci" in row:
+                        return "game_jsonl_runtime_splice_v1"
+                    if "context" in row:
+                        return "splice_rows_legacy"
+                    break
+        except Exception:
+            pass
+    return "unknown"
+
+
 def _write_manifest(stage_dir: Path, *, dataset_dir: Path, dataset_name: str, version: str, metas: list[FileMeta], archive_name: str | None) -> None:
     total_bytes = sum(m.size_bytes for m in metas)
+    stats_json = _read_stats_json(dataset_dir)
+    dataset_format = _detect_dataset_format(dataset_dir, stats_json)
     manifest = {
         "schema_version": 1,
         "kind": "chess-bot-validated-dataset",
@@ -100,10 +138,12 @@ def _write_manifest(stage_dir: Path, *, dataset_dir: Path, dataset_name: str, ve
         "source_dir": str(dataset_dir),
         "file_count": len(metas),
         "total_bytes": total_bytes,
+        "dataset_format": dataset_format,
         "required_files_present": {
             "train.jsonl": any(m.rel_path == "train.jsonl" for m in metas),
             "val.jsonl": any(m.rel_path == "val.jsonl" for m in metas),
         },
+        "stats_json": stats_json,
         "files": [
             {"path": m.rel_path, "size_bytes": m.size_bytes, "sha256": m.sha256}
             for m in metas

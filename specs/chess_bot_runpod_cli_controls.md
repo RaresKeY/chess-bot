@@ -167,6 +167,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
   - default remote `num_workers` now uses the pod's available CPU threads minus one (`max(nproc-1, 1)`) unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
+  - operational caveat: if the local watcher step fails after remote training has started/completed, the wrapper's error trap can stop the pod before `collect`; this does not mutate/delete the source HF dataset repo, and remote run artifacts typically remain on the pod volume until the pod is terminated (restart the same pod and run `scripts/runpod_cycle_collect.sh` for the same `RUNPOD_CYCLE_RUN_ID`)
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
   - aggregates `gpu_full_training_observation_*.json` artifacts across runs, groups by GPU SKU, and emits heuristic next-run override suggestions (batch size / workers)
   - supports JSON and Markdown summary outputs for operator notes/spec updates
@@ -188,6 +189,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 ## Running Pod Control (CLI)
 - SSH into the pod using RunPod-provided connection info (port `22/tcp`)
 - For direct mapped SSH on this image, use `runner@<public-ip>:<mapped-port>` (not `root@...`): `sshd` is configured with `PermitRootLogin no` and `AllowUsers runner`
+- Operator support ergonomics for ad-hoc/manual recovery commands: when reconstructing commands from a prior run log (`public_ip`, mapped SSH port, temp key path), present the minimal working SSH command first (`ssh -i <key> -p <port> runner@<ip>`); include stricter host-key/known-hosts options only as an explicitly labeled optional variant
 - SSH client security defaults for lifecycle scripts:
   - host key checking now defaults to `StrictHostKeyChecking=accept-new` (override with `RUNPOD_SSH_HOST_KEY_CHECKING=yes|no|accept-new`)
   - known hosts are persisted in `config/runpod_known_hosts` by default (override with `RUNPOD_SSH_KNOWN_HOSTS_FILE`)
@@ -215,6 +217,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - optional GPU/cost overrides: `RUNPOD_GPU_TYPE_ID`, `RUNPOD_GPU_MIN_MEMORY_GB`, `RUNPOD_GPU_MAX_HOURLY_PRICE`
   - `bash scripts/runpod_cycle_full_train_hf.sh`
   - wrapper currently fetches HF datasets first, writes remote context/spec-suggestion artifacts (dataset rows/size + GPU/VRAM snapshot + suggested params), runs async training with progress JSONL + GPU sampling, collects artifacts, and stops the pod
+  - if the local progress watcher crashes near the end of training, check the remote `train_exit_code.txt` / train log under `${REPO_DIR}/artifacts/runpod_cycles/<run_id>/`, then restart the same pod and run `RUNPOD_CYCLE_RUN_ID=<run_id> bash scripts/runpod_cycle_collect.sh`
 - One-command "just run it" wrapper (same full flow, opinionated defaults):
   - `bash scripts/runpod_full_train_easy.sh`
   - defaults:
