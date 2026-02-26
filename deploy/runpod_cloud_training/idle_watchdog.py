@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -93,6 +94,16 @@ def _heartbeat_recent(path_text: str, max_age: int) -> bool:
 
 
 def _stop_runpod_pod(endpoint: str, api_key: str, pod_id: str, verbose: bool) -> bool:
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.query:
+        keep = []
+        for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            if k.lower() == "api_key":
+                continue
+            keep.append((k, v))
+        endpoint = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(keep), parsed.fragment)
+        )
     attempts = [
         {
             "query": "mutation StopPod($input: PodStopInput!) { podStop(input: $input) }",

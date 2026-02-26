@@ -33,11 +33,48 @@ IDLE_CHECK_INTERVAL_SECONDS="${IDLE_CHECK_INTERVAL_SECONDS:-60}"
 IDLE_GPU_UTIL_THRESHOLD="${IDLE_GPU_UTIL_THRESHOLD:-10}"
 IDLE_GPU_MEM_MB_THRESHOLD="${IDLE_GPU_MEM_MB_THRESHOLD:-1024}"
 IDLE_WATCHDOG_VERBOSE="${IDLE_WATCHDOG_VERBOSE:-1}"
+RUNPOD_PHASE_TIMING_ENABLED="${RUNPOD_PHASE_TIMING_ENABLED:-1}"
+RUNPOD_PHASE_TIMING_LOG="${RUNPOD_PHASE_TIMING_LOG:-${REPO_DIR}/artifacts/timings/runpod_phase_times.jsonl}"
+RUNPOD_PHASE_TIMING_RUN_ID="${RUNPOD_PHASE_TIMING_RUN_ID:-runpod-entrypoint-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 PIDS=()
 
 log() {
   printf '[entrypoint] %s\n' "$*"
+}
+
+_now_epoch_ms() {
+  date +%s%3N
+}
+
+log_phase_timing() {
+  local phase="$1"
+  local status="$2"
+  local elapsed_ms="$3"
+  local extra="${4:-}"
+  if [[ "${RUNPOD_PHASE_TIMING_ENABLED}" != "1" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "${RUNPOD_PHASE_TIMING_LOG}")" 2>/dev/null || true
+  printf '{"ts_epoch_ms":%s,"source":"runpod_entrypoint","run_id":"%s","phase":"%s","status":"%s","elapsed_ms":%s%s}\n' \
+    "$(_now_epoch_ms)" "${RUNPOD_PHASE_TIMING_RUN_ID}" "${phase}" "${status}" "${elapsed_ms}" "${extra}" \
+    >> "${RUNPOD_PHASE_TIMING_LOG}" 2>/dev/null || true
+}
+
+run_timed_phase() {
+  local phase="$1"
+  shift
+  local t0 t1
+  t0="$(_now_epoch_ms)"
+  if "$@"; then
+    t1="$(_now_epoch_ms)"
+    log_phase_timing "${phase}" "ok" "$((t1 - t0))"
+    return 0
+  fi
+  local rc=$?
+  t1="$(_now_epoch_ms)"
+  log_phase_timing "${phase}" "error" "$((t1 - t0))" ",\"exit_code\":${rc}"
+  return "${rc}"
 }
 
 run_as_runner() {
@@ -151,10 +188,10 @@ trap cleanup EXIT INT TERM
 mkdir -p /workspace
 chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace "${RUNNER_HOME}"
 
-ensure_ssh_keys
-configure_sshd
-clone_or_update_repo
-sync_repo_requirements
+run_timed_phase "ensure_ssh_keys" ensure_ssh_keys
+run_timed_phase "configure_sshd" configure_sshd
+run_timed_phase "clone_or_update_repo" clone_or_update_repo
+run_timed_phase "sync_repo_requirements" sync_repo_requirements
 
 if [[ ! -d "${REPO_DIR}" ]]; then
   log "Repo dir ${REPO_DIR} is missing. Set CLONE_REPO_ON_START=1 or mount the repo."
@@ -172,11 +209,11 @@ if [[ -z "${JUPYTER_TOKEN}" ]]; then
 fi
 
 if [[ "${START_SSHD}" == "1" ]]; then
-  start_bg "sshd" /usr/sbin/sshd -D -e
+  run_timed_phase "start_sshd" start_bg "sshd" /usr/sbin/sshd -D -e
 fi
 
 if [[ "${START_JUPYTER}" == "1" ]]; then
-  start_runner_bg "jupyterlab" \
+  run_timed_phase "start_jupyter" start_runner_bg "jupyterlab" \
     "cd '${REPO_DIR}' && '${VENV_DIR}/bin/jupyter' lab \
       --ServerApp.ip=0.0.0.0 \
       --ServerApp.port='${JUPYTER_PORT}' \
@@ -192,7 +229,7 @@ if [[ "${START_INFERENCE_API}" == "1" ]]; then
   if [[ "${INFERENCE_API_VERBOSE}" == "1" ]]; then
     inference_verbose_flag="--verbose"
   fi
-  start_runner_bg "inference-api" \
+  run_timed_phase "start_inference_api" start_runner_bg "inference-api" \
     "cd '${REPO_DIR}' && '${VENV_DIR}/bin/python' /opt/runpod_cloud_training/inference_api.py \
       --repo-dir '${REPO_DIR}' \
       --model '${INFERENCE_API_MODEL_PATH}' \
@@ -208,7 +245,7 @@ if [[ "${START_HF_WATCH}" == "1" ]]; then
   if [[ "${HF_SYNC_VERBOSE}" == "1" ]]; then
     hf_watch_verbose_flag="--verbose"
   fi
-  start_runner_bg "hf-auto-sync" \
+  run_timed_phase "start_hf_watch" start_runner_bg "hf-auto-sync" \
     "cd '${REPO_DIR}' && '${VENV_DIR}/bin/python' /opt/runpod_cloud_training/hf_auto_sync_watch.py \
       --source-dir '${HF_SYNC_SOURCE_DIR}' \
       --patterns '${HF_SYNC_PATTERNS}' \
@@ -221,7 +258,7 @@ if [[ "${START_IDLE_WATCHDOG}" == "1" ]]; then
   if [[ "${IDLE_WATCHDOG_VERBOSE}" == "1" ]]; then
     idle_watchdog_verbose_flag="--verbose"
   fi
-  start_bg "idle-watchdog" \
+  run_timed_phase "start_idle_watchdog" start_bg "idle-watchdog" \
     "${VENV_DIR}/bin/python" /opt/runpod_cloud_training/idle_watchdog.py \
       --idle-seconds "${IDLE_TIMEOUT_SECONDS}" \
       --check-interval-seconds "${IDLE_CHECK_INTERVAL_SECONDS}" \
@@ -243,7 +280,10 @@ if [[ "${START_INFERENCE_API}" == "1" ]]; then
 fi
 
 if [[ "$#" -gt 0 ]]; then
+  custom_t0="$(_now_epoch_ms)"
   start_bg "custom-cmd" "$@"
+  custom_t1="$(_now_epoch_ms)"
+  log_phase_timing "start_custom_cmd" "ok" "$((custom_t1 - custom_t0))"
 fi
 
 if [[ "${#PIDS[@]}" -eq 0 ]]; then
