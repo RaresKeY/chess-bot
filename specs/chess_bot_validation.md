@@ -14,6 +14,9 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 ## Inputs
 - PGN file, glob, or directory (`--input`)
 - For month-based acquisition workflows, `scripts/batch_prepare_elite_months.py` accepts a text file of `YYYY-MM` entries and/or Lichess elite ZIP URLs (one per line, comments allowed) and invokes `scripts/acquire_and_prepare_elite_month.py` per month.
+- `scripts/acquire_and_prepare_elite_month.py` now skips months that already have complete validated + dataset outputs when `--overwrite` is omitted; partial existing outputs still fail fast and require `--overwrite` for rebuild safety.
+- `scripts/download_lichess_elite_month.py` now validates cached ZIPs before reuse, automatically deletes/re-downloads invalid cached files, and rejects HTML/error-page responses so unavailable months do not get cached as fake `.zip` files.
+- As of **February 26, 2026**, the `database.nikonoel.fr` elite monthly archive is publishing dumps through **2025-11** (archive begins at **2020-06**). The repo’s default `config/elite_month_validator_links.txt` is a curated subset (currently 2025-01..2025-11).
 
 ## Outputs
 - `valid_games.jsonl`: canonicalized accepted games (UCI move lists + metadata)

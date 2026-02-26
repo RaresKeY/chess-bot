@@ -40,6 +40,7 @@ For each valid game and splice index `i`:
 
 ## Execution / Performance Notes
 - `scripts/acquire_and_prepare_elite_month.py` now defaults `--max-samples-per-game` to `8`, and its default dataset output directory suffix is derived dynamically as `elite_<month>_cap<max-samples-per-game>`.
+- The default batch month list (`config/elite_month_validator_links.txt`) is curated to published elite months only; as of **February 26, 2026** it targets `2025-01..2025-11` because later months were not yet available on the source archive.
 - `scripts/build_splice_dataset.py` uses a two-pass streaming build for large corpora:
   - Pass 1: stream validated games to collect spliceable `game_id`s and compute train/val/test split assignment
   - Pass 2: stream validated games again and write samples directly to split JSONL outputs
