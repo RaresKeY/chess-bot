@@ -70,6 +70,27 @@ def _parse_repo_dataset_versions(repo_files: list[str], prefix: str) -> dict[str
     return {k: sorted(v) for k, v in roots.items()}
 
 
+def _select_versions(
+    *,
+    versions_by_dataset: dict[str, list[str]],
+    all_latest: bool,
+    dataset_name: str,
+    version: str,
+) -> list[tuple[str, str]]:
+    if all_latest:
+        selected: list[tuple[str, str]] = []
+        for ds_name, versions in sorted(versions_by_dataset.items()):
+            if versions:
+                selected.append((ds_name, versions[-1]))
+        return selected
+    if version:
+        return [(dataset_name, version)]
+    versions = versions_by_dataset.get(dataset_name, [])
+    if not versions:
+        raise SystemExit(f"No datasets found for '{dataset_name}'")
+    return [(dataset_name, versions[-1])]
+
+
 def _copy_or_extract_dataset(local_repo_path: Path, fetched_dir: Path, extract_archive: bool) -> tuple[list[str], dict | None]:
     manifest_path = local_repo_path / "manifest.json"
     manifest = None
@@ -104,8 +125,7 @@ def main() -> None:
         raise SystemExit("HF dataset repo id is required (--repo-id or HF_DATASET_REPO_ID)")
     if not args.all_latest and not args.dataset_name:
         raise SystemExit("--dataset-name is required unless --all-latest is used")
-    if not args.all_latest and not args.version:
-        raise SystemExit("--version is required unless --all-latest is used")
+    single_dataset_latest = bool((not args.all_latest) and args.dataset_name and (not args.version))
 
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
@@ -114,11 +134,16 @@ def main() -> None:
 
     repo_path_prefix = args.repo_path_prefix.strip("/ ")
     planned_repo_path = (
-        f"{repo_path_prefix}/{args.dataset_name}/{args.version}"
+        f"{repo_path_prefix}/{args.dataset_name}/{(args.version or '<latest>')}"
         if not args.all_latest
         else f"{repo_path_prefix}/<dataset>/<latest>"
     )
-    allow_patterns = [f"{repo_path_prefix}/**"] if args.all_latest else [f"{planned_repo_path}/**"]
+    if args.all_latest:
+        allow_patterns = [f"{repo_path_prefix}/**"]
+    elif single_dataset_latest:
+        allow_patterns = [f"{repo_path_prefix}/{args.dataset_name}/**"]
+    else:
+        allow_patterns = [f"{planned_repo_path}/**"]
 
     if args.verbose:
         print(
@@ -160,14 +185,16 @@ def main() -> None:
         )
 
     selected: list[tuple[str, str]]
-    if args.all_latest:
+    if args.all_latest or single_dataset_latest:
         api = HfApi(token=token)
         repo_files = api.list_repo_files(repo_id=args.repo_id, repo_type="dataset")
         versions_by_dataset = _parse_repo_dataset_versions(repo_files, repo_path_prefix)
-        selected = []
-        for dataset_name, versions in sorted(versions_by_dataset.items()):
-            if versions:
-                selected.append((dataset_name, versions[-1]))
+        selected = _select_versions(
+            versions_by_dataset=versions_by_dataset,
+            all_latest=bool(args.all_latest),
+            dataset_name=str(args.dataset_name or ""),
+            version=str(args.version or ""),
+        )
         if not selected:
             raise SystemExit(f"No datasets found under prefix '{repo_path_prefix}' in repo {args.repo_id}")
         allow_patterns = [f"{repo_path_prefix}/{dataset_name}/{version}/**" for dataset_name, version in selected]

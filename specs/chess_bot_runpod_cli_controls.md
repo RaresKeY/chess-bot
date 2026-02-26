@@ -347,7 +347,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 
 ## Observed CLI Smoke Blocker (2026-02-26 host run)
 - Full `scripts/runpod_cycle_full_smoke.sh` retries were able to provision community pods (for example `RTX 4090`, `RTX 3090`) using explicit `RUNPOD_GPU_TYPE_ID` after transient REST capacity failures.
-- `gpu-search` remained unavailable for this API key/account due GraphQL `403`, so explicit GPU IDs were required.
+- At that point `gpu-search` appeared unavailable due GraphQL `403`, so explicit GPU IDs were required.
 - Direct mapped SSH still failed with `Permission denied (publickey)` on newly provisioned pods even when the provision payload showed the expected public key in `AUTHORIZED_KEYS`/`PUBLIC_KEY`.
 - Practical implication:
   - full CLI smoke could not progress past `runpod_cycle_push_dataset.sh` without a working SSH path
@@ -356,6 +356,34 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - Additional API diagnostic from the same date:
   - `scripts/runpod_cli_doctor.sh` reported GraphQL denial, but direct `curl` GraphQL probes (`myself`, `gpuTypes`) succeeded with the same key
   - likely cause was Cloudflare/browser-signature filtering against the helper's Python `urllib` requests; helper code now adds an explicit `User-Agent` header and the doctor GraphQL probe returned `ok` after the fix
+
+## Current GPU Availability Query (2026-02-26 host run, keyring-backed)
+- `gpu-search` is working again with the current RunPod API key/keyring flow and should be used before ad-hoc relaunch retries.
+- Exact command used:
+  - ``.venv/bin/python scripts/runpod_provision.py --keyring-service runpod --keyring-username RUNPOD_API_KEY gpu-search --cloud-type COMMUNITY --limit 20``
+- Practical use:
+  - pick a cheap/community GPU from the live list (for example `RTX A5000`, `RTX A4000`, `RTX 3070`, `RTX 3080`) instead of retrying a stale hardcoded SKU
+  - then set `RUNPOD_GPU_TYPE_ID` explicitly for `scripts/runpod_cycle_start.sh` or `scripts/runpod_full_train_easy_smoke_test.sh`
+- Reminder:
+  - the list is an API capability/pricing snapshot and does not guarantee capacity on the next provision call; transient `500`/`no instances` can still happen
+
+## Wait-Ready Timing Caveat (2026-02-26 host run correction)
+- `desiredStatus="RUNNING"` with empty `publicIp` / null `portMappings` is **not** sufficient evidence that provisioning is dead.
+- We observed pods remain in this state for an extended period after rent while the wrapper was polling `--wait-ready`.
+- Operational rule:
+  - do **not** terminate early based only on a short sequence of `wait_status` logs with empty `publicIp`
+  - use a longer readiness timeout/window and re-check the live pod JSON before concluding failure
+- Practical implication for manual recovery/testing:
+  - if a pod is rented and `RUNNING`, prefer waiting longer (or resuming later) before deleting it, unless there is a confirmed terminal error/state from the API
+
+## SECURE vs COMMUNITY for SSH-Based Cycle Flows (2026-02-26)
+- `scripts/runpod_provision.py provision --wait-ready` currently waits for `publicIp` to become non-empty.
+- The helper also auto-sets `supportPublicIp=true` only for `COMMUNITY` (`--support-public-ip-auto` behavior).
+- Consequence:
+  - `SECURE` cloud pods launched via current helper defaults can remain `RUNNING` with empty `publicIp` indefinitely from the wrapper's perspective (not a pod failure, but incompatible with this readiness check + direct SSH workflow).
+- For `scripts/runpod_cycle_*` and `scripts/runpod_full_train_easy*.sh` (direct SSH/rsync flows):
+  - prefer `RUNPOD_CLOUD_TYPE=COMMUNITY`
+  - or patch the provisioning/readiness logic before attempting `SECURE`
 
 ## Observed Full Cycle Success (2026-02-26 host run, after fixes)
 - Successful end-to-end RunPod smoke run completed on `runpod-cycle-20260226T065518Z` after applying the following fixes:
