@@ -94,6 +94,25 @@ ensure_ssh_keys() {
   chown -R "${RUNNER_USER}:${RUNNER_USER}" "${ssh_dir}"
 }
 
+ensure_runner_ssh_account() {
+  local shadow_entry shadow_hash
+  shadow_entry="$(getent shadow "${RUNNER_USER}" 2>/dev/null || true)"
+  shadow_hash="$(printf '%s' "${shadow_entry}" | cut -d: -f2)"
+  if [[ -z "${shadow_hash}" ]]; then
+    log "No shadow entry found for ${RUNNER_USER}; skipping account unlock check"
+    return 0
+  fi
+  if [[ "${shadow_hash}" == '!'* || "${shadow_hash}" == '*'* ]]; then
+    if passwd -d "${RUNNER_USER}" >/dev/null 2>&1; then
+      log "Unlocked ${RUNNER_USER} account for SSH public-key auth"
+    elif usermod -U "${RUNNER_USER}" >/dev/null 2>&1; then
+      log "Unlocked ${RUNNER_USER} account for SSH public-key auth via usermod"
+    else
+      log "Warning: failed to unlock ${RUNNER_USER} account; direct SSH pubkey auth may be denied"
+    fi
+  fi
+}
+
 configure_sshd() {
   mkdir -p /var/run/sshd /etc/ssh/sshd_config.d
   cat >/etc/ssh/sshd_config.d/chessbot.conf <<EOF
@@ -104,6 +123,8 @@ PubkeyAuthentication yes
 ChallengeResponseAuthentication no
 UsePAM no
 X11Forwarding no
+AuthorizedKeysFile .ssh/authorized_keys
+LogLevel VERBOSE
 AllowUsers ${RUNNER_USER}
 EOF
 }
@@ -115,6 +136,25 @@ clone_or_update_repo() {
   fi
 
   mkdir -p "$(dirname "${REPO_DIR}")"
+  if [[ -e "${REPO_DIR}" && ! -d "${REPO_DIR}" ]]; then
+    log "REPO_DIR exists but is not a directory: ${REPO_DIR}"
+    return 1
+  fi
+  if [[ -d "${REPO_DIR}" && ! -d "${REPO_DIR}/.git" ]]; then
+    if [[ -z "$(ls -A "${REPO_DIR}" 2>/dev/null)" ]]; then
+      log "Cloning repo ${REPO_URL} -> existing empty dir ${REPO_DIR}"
+      git clone --branch "${REPO_REF}" --single-branch "${REPO_URL}" "${REPO_DIR}"
+      chown -R "${RUNNER_USER}:${RUNNER_USER}" "${REPO_DIR}"
+      return 0
+    fi
+    if [[ -f "${REPO_DIR}/requirements.txt" ]]; then
+      log "Using existing non-git repo directory at ${REPO_DIR} (requirements.txt detected); skipping clone/pull"
+      return 0
+    fi
+    log "REPO_DIR exists and is non-empty but not a git repo: ${REPO_DIR}; skipping clone/pull"
+    log "Set REPO_DIR to an empty path or mount a valid repo checkout to enable sync/startup services"
+    return 0
+  fi
   if [[ ! -d "${REPO_DIR}/.git" ]]; then
     log "Cloning repo ${REPO_URL} -> ${REPO_DIR}"
     git clone --branch "${REPO_REF}" --single-branch "${REPO_URL}" "${REPO_DIR}"
@@ -158,6 +198,11 @@ sync_repo_requirements() {
   fi
 }
 
+python_module_available() {
+  local module_name="$1"
+  "${VENV_DIR}/bin/python" -c "import ${module_name}" >/dev/null 2>&1
+}
+
 start_bg() {
   local name="$1"
   shift
@@ -189,6 +234,7 @@ mkdir -p /workspace
 chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace "${RUNNER_HOME}"
 
 run_timed_phase "ensure_ssh_keys" ensure_ssh_keys
+run_timed_phase "ensure_runner_ssh_account" ensure_runner_ssh_account
 run_timed_phase "configure_sshd" configure_sshd
 run_timed_phase "clone_or_update_repo" clone_or_update_repo
 run_timed_phase "sync_repo_requirements" sync_repo_requirements
@@ -222,6 +268,13 @@ if [[ "${START_JUPYTER}" == "1" ]]; then
       --ServerApp.allow_remote_access=True \
       --ServerApp.root_dir='${REPO_DIR}' \
       --no-browser"
+fi
+
+if [[ "${START_INFERENCE_API}" == "1" ]]; then
+  if ! python_module_available torch; then
+    log "Skipping inference API start: torch is not installed in ${VENV_DIR} yet"
+    START_INFERENCE_API="0"
+  fi
 fi
 
 if [[ "${START_INFERENCE_API}" == "1" ]]; then

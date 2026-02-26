@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash runner \
+    && passwd -d runner \
     && mkdir -p /var/run/sshd /workspace /opt/runpod_cloud_training \
     && chown -R runner:runner /workspace /home/runner
 

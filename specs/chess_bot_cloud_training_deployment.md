@@ -8,6 +8,10 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional RunPod provisioning helper: `scripts/runpod_provision.py`
 - Optional image build/push helper: `scripts/build_runpod_image.sh`
 - Optional local smoke helper (Docker, RunPod-style entrypoint/training): `scripts/runpod_local_smoke_test.sh`
+- Optional host-side CLI diagnostics helper: `scripts/runpod_cli_doctor.sh`
+- Optional host-side RunPod regression checks wrapper: `scripts/runpod_regression_checks.sh`
+- Optional host-side quick launch wrapper: `scripts/runpod_quick_launch.sh`
+- Optional host-side modular RunPod lifecycle scripts: `scripts/runpod_cycle_*.sh`
 - Container image build: `deploy/runpod_cloud_training/Dockerfile`
 - Startup orchestration: `deploy/runpod_cloud_training/entrypoint.sh`
 - Inference HTTP service: `deploy/runpod_cloud_training/inference_api.py`
@@ -27,11 +31,17 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - FastAPI/uvicorn inference endpoint (`/healthz`, `/infer`)
 - Optional Hugging Face artifact auto-sync watcher
 - Optional idle watchdog for autostop behavior
+- Operators may also access the running pod through the RunPod SSH gateway command (`ssh <podid>-<route>@ssh.runpod.io`) instead of direct mapped `22/tcp`
+- Entrypoint now explicitly unlocks the `runner` account (while keeping password auth disabled) so Ubuntu/Debian `sshd` accepts public-key auth for direct mapped SSH
 
 ## Repo Bootstrap Behavior
 - Repo clone/pull at startup is supported and enabled by environment defaults (`CLONE_REPO_ON_START=1`, `GIT_AUTO_PULL=1`)
 - Public GitHub repo flow only (no private clone token bootstrap logic)
 - Startup requirement sync compares repo `requirements.txt` hash against a venv stamp and runs `pip install -r` when changed (or forced)
+- If `REPO_DIR` exists but is non-git:
+  - existing empty dir: clone into it
+  - existing non-empty dir with `requirements.txt`: treat as mounted checkout and skip clone/pull
+  - existing non-empty dir without `.git`/`requirements.txt`: log and skip clone/pull (operator must choose a valid `REPO_DIR` or mount a repo)
 
 ## Environment / Deployment Decisions (current)
 - Prebuilt Python venv in image (`/opt/venvs/chessbot`)
@@ -45,6 +55,11 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - pass via `Authorization: Bearer ...` headers (not URL query params)
   - never print/log the key in script output
 - Docker image for the RunPod module can be built directly with `docker build` or via `scripts/build_runpod_image.sh` (tags with git SHA + `latest`, optional registry push)
+- GHCR image repository names must be lowercase (for example `ghcr.io/rareskey/chess-bot-runpod`); `scripts/build_runpod_image.sh` now normalizes `IMAGE_REPO` to lowercase before tagging/building.
+- GitHub CLI (`gh auth login`) auth and Docker registry auth are separate:
+  - `gh auth` authenticates GitHub API/CLI usage on the host
+  - `docker login ghcr.io` authenticates local Docker/Buildx pushes to GHCR
+- On Linux Mint host setups, Docker can be configured to store GHCR credentials in the system keyring via the `secretservice` credential helper (`"credsStore": "secretservice"` in `~/.docker/config.json`) instead of plaintext auth entries.
 - Phase timings are logged in JSONL under a conventional artifacts path by default: `artifacts/timings/runpod_phase_times.jsonl` (configurable via `RUNPOD_PHASE_TIMING_LOG`)
 
 ## Inference API Behavior (module service)
@@ -54,6 +69,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Per-request response includes `topk`, `predicted_uci`, `best_legal`, `device`, and latency
 - API request inference computes phase and side-to-move feature inputs so predictions align with artifacts trained using the expanded model head
 - Touches a heartbeat file so idle watchdog can treat API traffic as activity
+- Entry-point startup now skips launching the inference API (with a log message) when `torch` is not installed in the image/runtime venv, avoiding a full container restart loop during smoke/provisioning scenarios
 
 ## RunPod Training Preset Launcher
 - `train_baseline_preset.sh` provides a one-command training path inside the container (`bash /opt/runpod_cloud_training/train_baseline_preset.sh`)
@@ -116,12 +132,32 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Pod create flow supports common chess-bot ports (`22/tcp`, `8888/http`, `8000/http`) and optional env injection
 - Key lookup order is explicit arg -> env `RUNPOD_API_KEY` -> keyring (`runpod` / `RUNPOD_API_KEY`); scripts should avoid echoing CLI/env values containing the token
 - Provisioning helper strips any accidental `api_key` query parameter from GraphQL endpoints and uses bearer headers for GraphQL/REST authentication
+- GraphQL GPU listing (`gpuTypes`) can fail with `HTTP 403` even when REST template listing works if the API key/account lacks GraphQL access; helper now raises an actionable error instead of a raw traceback
+- `provision --gpu-type-id <id>` now supports a fallback path when GraphQL GPU discovery is denied: it proceeds with the explicit GPU type ID (without GraphQL validation) and emits a warning
 
 ## Current Limitations
 - No built-in reverse proxy/TLS or API auth layer (assumes trusted networking or RunPod access controls)
 - Private repo clone/bootstrap is intentionally out of scope in this module version
 - RunPod API stop mutation schema may drift; watchdog includes best-effort defaults but may need adjustment
 - First local Docker smoke run can be slow when `SYNC_REQUIREMENTS_ON_START=1` because the image venv intentionally installs repo `requirements.txt` (including `torch`) at startup when the repo requirements hash is not yet stamped
+- If `START_INFERENCE_API=1` and `torch` is missing from the deployment venv, the inference API itself remains unavailable until repo requirement sync installs `torch`; entrypoint now degrades by skipping API start instead of crashing the container
+
+## Observed RunPod Failure + Fix (2026-02-26)
+- Observed on a community GPU smoke pod (`NVIDIA GeForce RTX 4090`) provisioned from template `chess-bot-training`
+- Failure mode:
+  - `REPO_DIR` (`/workspace/chess-bot`) existed and was non-empty but not a valid git checkout, so clone failed (`destination path already exists and is not an empty directory`)
+  - requirement sync skipped (`requirements.txt` missing in that directory)
+  - inference API startup failed (`ModuleNotFoundError: No module named 'torch'`)
+  - entrypoint exited after child process failure, causing a pod restart loop
+- Fixes implemented:
+  - `entrypoint.sh` now handles non-git `REPO_DIR` states more explicitly (empty dir clone / mounted checkout detect / non-git warning)
+  - `entrypoint.sh` now preflights `torch` and skips inference API start when missing
+  - `scripts/runpod_provision.py` now keeps helper env injection opt-in by default (prevents overriding template service flags unexpectedly)
+- Detailed operator-facing problem/solution report saved at `artifacts/reports/runpod_cycle_observations_2026-02-26.md`
+- Follow-on operator note from the same date:
+  - direct mapped SSH auth may fail if template `AUTHORIZED_KEYS` is malformed
+  - RunPod SSH gateway access can still succeed and provide a recovery shell for fixing `/home/runner/.ssh/authorized_keys`
+  - direct mapped SSH auth can also fail even with a correct `authorized_keys` when the `runner` account is created in a locked state (`useradd` default on Ubuntu); `entrypoint.sh` now unlocks `runner` at startup and `Dockerfile` also clears the password during image build (`passwd -d runner`) while `PasswordAuthentication no` remains enforced
 
 ## Regression Tests (current)
 - `tests/test_runpod_api_helpers.py` covers:

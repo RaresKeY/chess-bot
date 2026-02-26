@@ -50,9 +50,12 @@ bash scripts/build_runpod_image.sh
   - `8888` (Jupyter)
   - `8000` (inference API)
 - Set environment variables from `deploy/runpod_cloud_training/env.example`
+- Access options:
+  - direct mapped SSH (`22/tcp` exposed on pod public IP)
+  - RunPod SSH gateway command shown in the RunPod UI (for example `ssh <podid>-<route>@ssh.runpod.io`)
 
 ## Startup Behavior (default)
-1. Configure SSH for user `runner` using `AUTHORIZED_KEYS`
+1. Configure SSH for user `runner` using `AUTHORIZED_KEYS` and ensure the `runner` account is unlocked for pubkey auth (password auth remains disabled)
 2. Clone/pull `https://github.com/RaresKeY/chess-bot.git` into `/workspace/chess-bot`
 3. Compare repo `requirements.txt` hash and `pip install -r` if changed
 4. Start `sshd`, JupyterLab, and inference API
@@ -172,6 +175,11 @@ Records include a `source` field (for example `local_runpod_smoke`, `runpod_entr
 - JupyterLab file browser download/upload
 - `rclone` (S3/GCS/Drive/etc.)
 - Hugging Face auto-sync (`hf_auto_sync_watch.py`) for model artifacts
+
+## SSH Notes (Observed 2026-02-26)
+- If direct mapped SSH (`runner@<public-ip> -p <mapped-port>`) fails with `Permission denied (publickey)`, verify template `AUTHORIZED_KEYS` formatting and the resulting `/home/runner/.ssh/authorized_keys` on the pod.
+- A separate failure mode is a locked `runner` account (Ubuntu `useradd` default); the image/entrypoint now unlocks `runner` automatically while keeping `PasswordAuthentication no`.
+- RunPod's SSH gateway command (from the pod UI) may still succeed and can be used as a recovery shell to inspect/fix `authorized_keys`.
 
 ## Notes / Limits
 - Public repo clone flow only (no private repo token bootstrap included)
