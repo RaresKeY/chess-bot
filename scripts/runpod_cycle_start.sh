@@ -20,6 +20,7 @@ GPU_COUNT="${RUNPOD_GPU_COUNT:-1}"
 GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 3090}"
 VOLUME_GB="${RUNPOD_VOLUME_GB:-40}"
 CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-15}"
+DEFAULT_REMOTE_REPO_DIR="${RUNPOD_DEFAULT_REMOTE_REPO_DIR:-/workspace/chess-bot-${RUN_ID}}"
 
 cmd=(
   "${PY_BIN}" "${REPO_ROOT}/scripts/runpod_provision.py"
@@ -42,6 +43,31 @@ else
   cmd+=( --no-use-runpod-training-preset-env )
 fi
 
+if [[ "${RUNPOD_INJECT_LOCAL_SSH_KEY_ENV:-1}" == "1" ]]; then
+  SSH_PUBKEY_PATH="${RUNPOD_SSH_PUBKEY_PATH:-$HOME/.ssh/id_ed25519.pub}"
+  if [[ -f "${SSH_PUBKEY_PATH}" ]]; then
+    SSH_PUBKEY_VALUE="$(<"${SSH_PUBKEY_PATH}")"
+    if [[ -n "${SSH_PUBKEY_VALUE}" ]]; then
+      cmd+=( --env "AUTHORIZED_KEYS=${SSH_PUBKEY_VALUE}" )
+      cmd+=( --env "PUBLIC_KEY=${SSH_PUBKEY_VALUE}" )
+    fi
+  else
+    echo "[runpod-cycle-start] warning: local ssh pubkey not found at ${SSH_PUBKEY_PATH}; continuing without AUTHORIZED_KEYS/PUBLIC_KEY override" >&2
+  fi
+fi
+
+if [[ "${RUNPOD_SET_UNIQUE_REPO_DIR:-1}" == "1" ]]; then
+  cmd+=( --env "REPO_DIR=${DEFAULT_REMOTE_REPO_DIR}" )
+fi
+
+if [[ "${RUNPOD_SET_SMOKE_SERVICE_ENVS:-1}" == "1" ]]; then
+  cmd+=( --env "START_SSHD=1" )
+  cmd+=( --env "START_JUPYTER=0" )
+  cmd+=( --env "START_INFERENCE_API=0" )
+  cmd+=( --env "START_HF_WATCH=0" )
+  cmd+=( --env "START_IDLE_WATCHDOG=0" )
+fi
+
 for extra_env in ${RUNPOD_START_ENVS:-}; do
   cmd+=( --env "${extra_env}" )
 done
@@ -57,6 +83,20 @@ SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
 SSH_USER="$(runpod_cycle_ssh_user)"
 POD_ID="$(runpod_cycle_pod_id "${PROVISION_JSON}")"
+POD_NAME_RECORDED="$(runpod_cycle_pod_name "${PROVISION_JSON}")"
+
+runpod_cycle_registry_record \
+  "${REPO_ROOT}" \
+  "runpod_cycle_start.sh" \
+  "start" \
+  "RUNNING" \
+  "${POD_ID}" \
+  "${RUN_ID}" \
+  "${POD_NAME_RECORDED:-$POD_NAME}" \
+  "${IP}" \
+  "${SSH_HOST}" \
+  "${SSH_PORT}" \
+  "Provisioned via runpod_cycle_start.sh (wait-ready enabled)"
 
 runpod_cycle_append_report "${REPORT_MD}" \
   "# RunPod Cycle Report (${RUN_ID})" \
@@ -71,6 +111,7 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- SSH user (effective): \`${SSH_USER}\`" \
   "- SSH port: \`${SSH_PORT}\`" \
   "- Provision record: \`${PROVISION_JSON}\`" \
+  "- Tracked pods registry: \`$(runpod_cycle_registry_file "${REPO_ROOT}")\`" \
   ""
 
 echo "[runpod-cycle-start] run_id=${RUN_ID}"

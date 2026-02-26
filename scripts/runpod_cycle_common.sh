@@ -44,6 +44,17 @@ runpod_cycle_report_md() {
   printf '%s\n' "${RUNPOD_CYCLE_REPORT_MD:-$(runpod_cycle_dir "${repo_root}" "${run_id}")/reports/observations.md}"
 }
 
+runpod_cycle_logs_dir() {
+  local repo_root="$1"
+  local run_id="$2"
+  printf '%s\n' "${RUNPOD_CYCLE_LOGS_DIR:-$(runpod_cycle_dir "${repo_root}" "${run_id}")/logs}"
+}
+
+runpod_cycle_registry_file() {
+  local repo_root="$1"
+  printf '%s\n' "${RUNPOD_TRACKED_PODS_FILE:-${repo_root}/config/runpod_tracked_pods.jsonl}"
+}
+
 runpod_cycle_keyring_token() {
   local py_bin="$1"
   "${py_bin}" - <<'PY'
@@ -75,6 +86,11 @@ runpod_cycle_ssh_port() {
 runpod_cycle_pod_id() {
   local pod_json="$1"
   runpod_cycle_pod_field "${pod_json}" '(.pod_id // .create_response.id // .create_response.podId // "")'
+}
+
+runpod_cycle_pod_name() {
+  local pod_json="$1"
+  runpod_cycle_pod_field "${pod_json}" '(.pod_status.name // .create_response.name // "")'
 }
 
 runpod_cycle_remote_repo_dir() {
@@ -125,4 +141,48 @@ runpod_cycle_append_report() {
       printf '%s\n' "$line"
     done
   } >> "${report_path}"
+}
+
+runpod_cycle_registry_record() {
+  local repo_root="$1"
+  local source_script="$2"
+  local action="$3"
+  local state="$4"
+  local pod_id="$5"
+  local run_id="${6:-}"
+  local pod_name="${7:-}"
+  local public_ip="${8:-}"
+  local ssh_host="${9:-}"
+  local ssh_port="${10:-}"
+  local note="${11:-}"
+
+  local registry_file
+  registry_file="$(runpod_cycle_registry_file "${repo_root}")"
+  mkdir -p "$(dirname "${registry_file}")"
+
+  jq -nc \
+    --arg ts_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg source_script "${source_script}" \
+    --arg action "${action}" \
+    --arg state "${state}" \
+    --arg pod_id "${pod_id}" \
+    --arg run_id "${run_id}" \
+    --arg pod_name "${pod_name}" \
+    --arg public_ip "${public_ip}" \
+    --arg ssh_host "${ssh_host}" \
+    --arg ssh_port "${ssh_port}" \
+    --arg note "${note}" \
+    '{
+      ts_utc: $ts_utc,
+      source_script: $source_script,
+      action: $action,
+      state: $state,
+      pod_id: $pod_id
+    }
+    + (if $run_id != "" then {run_id: $run_id} else {} end)
+    + (if $pod_name != "" then {pod_name: $pod_name} else {} end)
+    + (if $public_ip != "" then {public_ip: $public_ip} else {} end)
+    + (if $ssh_host != "" then {ssh_host: $ssh_host} else {} end)
+    + (if $ssh_port != "" then {ssh_port: $ssh_port} else {} end)
+    + (if $note != "" then {note: $note} else {} end)' >> "${registry_file}"
 }

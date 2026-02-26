@@ -21,21 +21,50 @@ TOKEN="$(runpod_cycle_keyring_token "${PY_BIN}")"
 
 mkdir -p "${CYCLE_DIR}"
 OUT_JSON="${CYCLE_DIR}/stop_response.json"
+POD_NAME="${RUNPOD_POD_NAME:-}"
+if [[ -z "${POD_NAME}" && -f "${PROVISION_JSON}" ]]; then
+  POD_NAME="$(runpod_cycle_pod_name "${PROVISION_JSON}" || true)"
+fi
 
 resp="$(
   curl -sS "${GRAPHQL_ENDPOINT}" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Content-Type: application/json" \
-    --data "{\"query\":\"mutation StopPod(\\$input: PodStopInput!) { podStop(input: \\$input) }\",\"variables\":{\"input\":{\"podId\":\"${POD_ID}\"}}}"
+    --data '{"query":"mutation StopPod($input: PodStopInput!) { podStop(input: $input) { id desiredStatus } }","variables":{"input":{"podId":"'"${POD_ID}"'"}}}'
 )"
 
 printf '%s\n' "${resp}" | jq . | tee "${OUT_JSON}"
+
+STOP_STATE="STOP_REQUESTED"
+STOP_NOTE="Requested podStop via GraphQL; pod storage may still incur charges until terminated"
+if printf '%s\n' "${resp}" | jq -e 'has("errors") | not' >/dev/null 2>&1; then
+  STOP_STATE="STOPPED"
+  STOP_NOTE="podStop mutation returned without GraphQL errors; pod storage may still incur charges until terminated"
+elif printf '%s\n' "${resp}" | jq -e '.errors' >/dev/null 2>&1; then
+  STOP_STATE="STOP_ERROR"
+  STOP_NOTE="podStop response included GraphQL errors; inspect stop_response.json"
+fi
+
+runpod_cycle_registry_record \
+  "${REPO_ROOT}" \
+  "runpod_cycle_stop.sh" \
+  "stop" \
+  "${STOP_STATE}" \
+  "${POD_ID}" \
+  "${RUN_ID}" \
+  "${POD_NAME}" \
+  "" \
+  "" \
+  "" \
+  "${STOP_NOTE}"
 
 runpod_cycle_append_report "${REPORT_MD}" \
   "## Pod Stop" \
   "- Pod ID: \`${POD_ID}\`" \
   "- GraphQL endpoint: \`${GRAPHQL_ENDPOINT}\`" \
   "- Stop response: \`${OUT_JSON}\`" \
+  "- Tracked pods registry: \`$(runpod_cycle_registry_file "${REPO_ROOT}")\`" \
+  "- Note: RunPod stop halts compute but can continue storage charges; use tracked terminate script to delete pods when done." \
   ""
 
 echo "[runpod-cycle-stop] pod_id=${POD_ID}"

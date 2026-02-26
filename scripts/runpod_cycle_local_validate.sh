@@ -28,6 +28,7 @@ INFER_CONTEXT="${RUNPOD_INFER_CONTEXT:-e2e4 e7e5 g1f3}"
 
 (
   cd "${REPO_ROOT}"
+  export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
   "${PY_BIN}" scripts/infer_move.py \
     --model "${MODEL_PATH}" \
     --context "${INFER_CONTEXT}" \
