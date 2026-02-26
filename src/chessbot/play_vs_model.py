@@ -21,6 +21,13 @@ class PlayConfig:
 class LoadedMoveModel:
     def __init__(self, artifact: Dict):
         self.artifact = artifact
+        runtime_meta = artifact.get("runtime") or {}
+        self.training_objective = str(runtime_meta.get("training_objective") or artifact.get("training_objective") or "single_step_next_move")
+        try:
+            self.artifact_rollout_horizon = max(0, int(runtime_meta.get("rollout_horizon") or 0))
+        except Exception:
+            self.artifact_rollout_horizon = 0
+        self.policy_mode_default = "rollout" if self.training_objective.startswith("multistep_") else "next"
         self.vocab = artifact["vocab"]
         self.inv_vocab = {idx: tok for tok, idx in self.vocab.items()}
         cfg = artifact["config"]
@@ -34,6 +41,11 @@ class LoadedMoveModel:
         return cls(artifact)
 
     def infer(self, context: List[str], winner_side: str, topk: int) -> Dict:
+        if self.policy_mode_default == "rollout" and self.artifact_rollout_horizon > 0:
+            return self.infer_rollout(context=context, winner_side=winner_side, topk=topk, rollout_plies=self.artifact_rollout_horizon)
+        return self.infer_next(context=context, winner_side=winner_side, topk=topk)
+
+    def infer_next(self, context: List[str], winner_side: str, topk: int) -> Dict:
         original_context_len = len(context)
         context_ids = encode_tokens(context, self.vocab)
         if not context_ids:
@@ -53,6 +65,44 @@ class LoadedMoveModel:
         topk_tokens = [self.inv_vocab.get(i, "") for i in pred_ids]
         legal = best_legal_from_topk(topk_tokens, context)
         return {"topk": topk_tokens, "best_legal": legal}
+
+    def infer_rollout(self, context: List[str], winner_side: str, topk: int, rollout_plies: int) -> Dict:
+        board = board_from_context(context)
+        local_context = list(context)
+        rollout: List[str] = []
+        first_topk: List[str] = []
+        first_predicted_uci = ""
+        fallback_moves = 0
+        for step in range(max(1, int(rollout_plies))):
+            out = self.infer_next(local_context, winner_side=winner_side, topk=topk)
+            topk_tokens = out.get("topk", [])
+            if step == 0:
+                first_topk = list(topk_tokens)
+                first_predicted_uci = topk_tokens[0] if topk_tokens else ""
+            chosen = out.get("best_legal", "")
+            if not chosen and not board.is_game_over(claim_draw=True):
+                fallback_move = next(iter(board.legal_moves), None)
+                if fallback_move is not None:
+                    chosen = fallback_move.uci()
+                    fallback_moves += 1
+            if not chosen:
+                break
+            mv = chess.Move.from_uci(chosen)
+            if mv not in board.legal_moves:
+                break
+            board.push(mv)
+            local_context.append(chosen)
+            rollout.append(chosen)
+            if board.is_game_over(claim_draw=True):
+                break
+        return {
+            "topk": first_topk,
+            "best_legal": (rollout[0] if rollout else ""),
+            "rollout": rollout,
+            "predicted_uci": first_predicted_uci,
+            "fallback_moves": fallback_moves,
+            "policy_mode_used": "rollout",
+        }
 
 
 def board_from_context(context: List[str]) -> chess.Board:

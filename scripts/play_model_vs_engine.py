@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.chessbot.inference import infer_from_artifact_on_device
+from src.chessbot.inference import infer_first_move_auto_from_artifact_on_device
 from src.chessbot.io_utils import ensure_parent, write_json
 
 
@@ -35,14 +35,16 @@ def _model_move(
     device_str: str,
     board: chess.Board,
 ) -> Dict:
-    out = infer_from_artifact_on_device(
+    out = infer_first_move_auto_from_artifact_on_device(
         artifact=artifact,
         context=context,
         winner_side=winner_side,
         topk=topk,
         device_str=device_str,
+        policy_mode="auto",
+        rollout_fallback_legal=True,
     )
-    uci = out.get("best_legal", "")
+    uci = out.get("move_uci", "") or out.get("best_legal", "")
     if uci:
         try:
             mv = chess.Move.from_uci(uci)
@@ -50,7 +52,7 @@ def _model_move(
             mv = None
         if mv is not None and mv in board.legal_moves:
             out["move_uci"] = uci
-            out["fallback"] = False
+            out["fallback"] = bool(out.get("fallback", False))
             return out
 
     fallback = next(iter(board.legal_moves), None)

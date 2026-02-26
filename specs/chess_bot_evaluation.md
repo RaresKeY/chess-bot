@@ -6,6 +6,7 @@ Evaluate a trained model artifact on held-out splice rows and report quality + l
 ## Code Ownership
 - CLI: `scripts/eval_model.py`
 - Engine match benchmark CLI: `scripts/play_model_vs_engine.py`
+- Model-vs-model benchmark CLI: `scripts/play_model_vs_model.py`
 - Core logic: `src/chessbot/evaluation.py`
 - Model dependency: `src/chessbot/model.py`
 
@@ -30,6 +31,15 @@ Evaluate a trained model artifact on held-out splice rows and report quality + l
 
 ## Engine Match Benchmark Helper (current)
 - `scripts/play_model_vs_engine.py` runs the model against a UCI engine binary (e.g. Stockfish) using `python-chess.engine`
+- compatibility dispatch mirrors inference helper behavior: old artifacts use legacy next-move policy, multistep artifacts automatically use rollout-first-move policy
 - Alternates colors across games and reports W/D/L, score percentage, and average plies
 - Tracks model fallback move usage (when no legal model prediction is found and a legal fallback move is used)
+- Supports optional summary JSON and PGN export for later analysis
+
+## Model-vs-Model Benchmark Helper (current)
+- `scripts/play_model_vs_model.py` runs head-to-head matches between two trained model artifacts (A vs B) without an external engine
+- Loads each model artifact once (device-aware via `--device-a` / `--device-b`, default `auto` -> CUDA when available) and alternates colors by default across games
+- compatibility dispatch: detects artifact training objective metadata; legacy artifacts default to next-move policy, multistep artifacts default to rollout-first-move policy using the artifact's rollout horizon
+- Reports W/D/L and score percentage from model A's perspective, average plies, and fallback move usage totals/averages for both models
+- Supports separate inference settings per model (`--topk-a`/`--topk-b`, `--winner-side-a`/`--winner-side-b`)
 - Supports optional summary JSON and PGN export for later analysis

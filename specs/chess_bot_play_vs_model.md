@@ -16,6 +16,9 @@ Provide an interactive browser UI to play chess against the trained move model, 
 - Browser UI renders board and move list from server-provided FEN snapshots
 - Python backend validates user moves using `python-chess`
 - Backend requests model move from loaded artifact and applies it if legal
+- loaded-artifact inference now uses compatibility auto-dispatch:
+  - legacy artifacts (no multistep metadata) use next-move inference
+  - multistep-trained artifacts default to rollout-first-move inference using the artifact rollout horizon
 - If model has no legal prediction, backend falls back to a legal move so play can continue
 - HTTP server uses threaded handling with graceful shutdown on `SIGINT`/`SIGTERM`, explicit socket close, and address reuse enabled for quick restarts
 
