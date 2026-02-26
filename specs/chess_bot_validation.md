@@ -7,11 +7,13 @@ Parse and replay PGN games from initial position, reject malformed/illegal/noisy
 - CLI: `scripts/validate_games.py`
 - Companion data download utility: `scripts/download_lichess_elite_month.py`
 - End-to-end monthly prep orchestrator (invokes validation): `scripts/acquire_and_prepare_elite_month.py`
+- Batch monthly prep orchestrator from month/URL lists: `scripts/batch_prepare_elite_months.py`
 - Core logic: `src/chessbot/validation.py`
 - Shared IO: `src/chessbot/io_utils.py`
 
 ## Inputs
 - PGN file, glob, or directory (`--input`)
+- For month-based acquisition workflows, `scripts/batch_prepare_elite_months.py` accepts a text file of `YYYY-MM` entries and/or Lichess elite ZIP URLs (one per line, comments allowed) and invokes `scripts/acquire_and_prepare_elite_month.py` per month.
 
 ## Outputs
 - `valid_games.jsonl`: canonicalized accepted games (UCI move lists + metadata)

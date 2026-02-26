@@ -1,0 +1,11 @@
+# Lichess elite monthly ZIP links (one per line) for batch validation/dataset prep.
+# Script support: lines may also be just YYYY-MM.
+#
+# Existing raw downloads in this repo include 2025-10..2025-12.
+# 2026-01 is a good next full month to add. 2026-02 may not be fully published yet.
+
+https://database.nikonoel.fr/lichess_elite_2025-10.zip
+https://database.nikonoel.fr/lichess_elite_2025-11.zip
+https://database.nikonoel.fr/lichess_elite_2025-12.zip
+https://database.nikonoel.fr/lichess_elite_2026-01.zip
+

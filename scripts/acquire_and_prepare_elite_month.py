@@ -30,7 +30,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Download, validate, and splice a Lichess elite monthly dataset")
     parser.add_argument("--month", required=True, help="Month in YYYY-MM format (e.g. 2025-10)")
     parser.add_argument("--validated-dir", default="", help="Output dir for validated corpus (default data/validated/elite_<month>)")
-    parser.add_argument("--dataset-dir", default="", help="Output dir for splice dataset (default data/dataset/elite_<month>_cap4)")
+    parser.add_argument(
+        "--dataset-dir",
+        default="",
+        help="Output dir for splice dataset (default data/dataset/elite_<month>_cap<max-samples-per-game>)",
+    )
     parser.add_argument("--re-download", action="store_true", help="Force re-download ZIP even if already present")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into existing validated/dataset output dirs")
     parser.add_argument("--min-plies", type=int, default=8)
@@ -39,7 +43,7 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--min-context", type=int, default=8)
     parser.add_argument("--min-target", type=int, default=1)
-    parser.add_argument("--max-samples-per-game", type=int, default=4)
+    parser.add_argument("--max-samples-per-game", type=int, default=8)
     parser.add_argument("--allow-draws", action="store_true")
     parser.add_argument("--splice-workers", type=int, default=0, help="Splice pass-2 threads (0 uses all cores)")
     parser.add_argument("--splice-batch-size", type=int, default=256)
@@ -51,7 +55,11 @@ def main() -> None:
         raise SystemExit("Expected --month in YYYY-MM format")
 
     validated_dir = Path(args.validated_dir) if args.validated_dir else REPO_ROOT / "data" / "validated" / f"elite_{month}"
-    dataset_dir = Path(args.dataset_dir) if args.dataset_dir else REPO_ROOT / "data" / "dataset" / f"elite_{month}_cap4"
+    dataset_dir = (
+        Path(args.dataset_dir)
+        if args.dataset_dir
+        else REPO_ROOT / "data" / "dataset" / f"elite_{month}_cap{args.max_samples_per_game}"
+    )
     validated_dir = validated_dir.resolve()
     dataset_dir = dataset_dir.resolve()
 

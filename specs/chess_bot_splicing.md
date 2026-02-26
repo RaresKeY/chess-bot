@@ -6,6 +6,7 @@ Transform validated games into supervised splice samples and perform leakage-saf
 ## Code Ownership
 - CLI: `scripts/build_splice_dataset.py`
 - End-to-end monthly prep orchestrator (invokes splicing): `scripts/acquire_and_prepare_elite_month.py`
+- Batch monthly prep orchestrator (iterates month/URL lists): `scripts/batch_prepare_elite_months.py`
 - Core logic: `src/chessbot/splicing.py`
 - Shared IO: `src/chessbot/io_utils.py`
 
@@ -38,6 +39,7 @@ For each valid game and splice index `i`:
 - Default filtering favors decisive games (`1-0`, `0-1`)
 
 ## Execution / Performance Notes
+- `scripts/acquire_and_prepare_elite_month.py` now defaults `--max-samples-per-game` to `8`, and its default dataset output directory suffix is derived dynamically as `elite_<month>_cap<max-samples-per-game>`.
 - `scripts/build_splice_dataset.py` uses a two-pass streaming build for large corpora:
   - Pass 1: stream validated games to collect spliceable `game_id`s and compute train/val/test split assignment
   - Pass 2: stream validated games again and write samples directly to split JSONL outputs
