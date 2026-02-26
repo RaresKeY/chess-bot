@@ -156,6 +156,27 @@ a:hover { text-decoration: underline; }
       <button id="opponentSearchRefreshBtn" type="button">Refresh bots now</button>
       <span id="opponentSearchStatus" class="muted small">Search off</span>
     </div>
+    <div class="toolbar" style="margin-top:10px;">
+      <span class="pill">Auto Challenge</span>
+      <label><input id="autoChallengeEnabled" type="checkbox" /> Continuously challenge</label>
+      <label>Interval (ms) <input id="autoChallengeIntervalMs" type="number" min="2000" step="1000" value="20000" style="width:110px" /></label>
+      <label>Rating
+        <select id="autoChallengeRatingKey">
+          <option value="blitz">blitz</option>
+          <option value="bullet">bullet</option>
+          <option value="rapid">rapid</option>
+          <option value="classical">classical</option>
+        </select>
+      </label>
+      <label>Min ELO <input id="autoChallengeMinElo" type="number" min="0" step="1" value="350" style="width:90px" /></label>
+      <label>Max ELO <input id="autoChallengeMaxElo" type="number" min="0" step="1" value="700" style="width:90px" /></label>
+      <label>Cooldown (s) <input id="autoChallengeCooldownSec" type="number" min="0" step="10" value="900" style="width:90px" /></label>
+      <label><input id="autoChallengeRequireNoActiveGame" type="checkbox" checked /> Only if no active game</label>
+      <label><input id="autoChallengeIncludePlaying" type="checkbox" /> Include playing bots</label>
+      <label><input id="opponentListFilterByElo" type="checkbox" checked /> Filter list to ELO range</label>
+      <button id="autoChallengeTickBtn" type="button">Auto challenge now</button>
+      <span id="autoChallengeStatus" class="muted small">Auto challenge off</span>
+    </div>
     <div style="margin-top:10px;">
       <div id="onlineBotsList" class="bot-list"><div class="muted small">No bot list loaded yet.</div></div>
     </div>
@@ -224,7 +245,11 @@ a:hover { text-decoration: underline; }
     indexObj: null,
     timer: null,
     opponentSearchTimer: null,
+    autoChallengeTimer: null,
+    autoChallengeBusy: false,
     onlineBots: [],
+    latestManualChallenge: null,
+    latestAutoChallenge: null,
     lastRefreshEpochMs: 0,
   };
 
@@ -253,6 +278,17 @@ a:hover { text-decoration: underline; }
     opponentSearchIntervalMs: document.getElementById("opponentSearchIntervalMs"),
     opponentSearchRefreshBtn: document.getElementById("opponentSearchRefreshBtn"),
     opponentSearchStatus: document.getElementById("opponentSearchStatus"),
+    autoChallengeEnabled: document.getElementById("autoChallengeEnabled"),
+    autoChallengeIntervalMs: document.getElementById("autoChallengeIntervalMs"),
+    autoChallengeRatingKey: document.getElementById("autoChallengeRatingKey"),
+    autoChallengeMinElo: document.getElementById("autoChallengeMinElo"),
+    autoChallengeMaxElo: document.getElementById("autoChallengeMaxElo"),
+    autoChallengeCooldownSec: document.getElementById("autoChallengeCooldownSec"),
+    autoChallengeRequireNoActiveGame: document.getElementById("autoChallengeRequireNoActiveGame"),
+    autoChallengeIncludePlaying: document.getElementById("autoChallengeIncludePlaying"),
+    opponentListFilterByElo: document.getElementById("opponentListFilterByElo"),
+    autoChallengeTickBtn: document.getElementById("autoChallengeTickBtn"),
+    autoChallengeStatus: document.getElementById("autoChallengeStatus"),
     onlineBotsList: document.getElementById("onlineBotsList"),
     boardMeta: document.getElementById("boardMeta"),
     boardGrid: document.getElementById("boardGrid"),
@@ -554,7 +590,12 @@ a:hover { text-decoration: underline; }
       }
       els.gameSelect.value = state.selectedGameId || "";
       renderRows(games);
-      renderLogList(els.globalLogs, (logsObj && logsObj.logs) || []);
+      const globalLogs = (logsObj && logsObj.logs) || [];
+      renderLogList(els.globalLogs, globalLogs);
+      state.latestManualChallenge = updateTrackedChallengeFromLogs(state.latestManualChallenge, globalLogs);
+      state.latestAutoChallenge = updateTrackedChallengeFromLogs(state.latestAutoChallenge, globalLogs);
+      if (state.latestManualChallenge) setTrackedChallenge("manual", state.latestManualChallenge);
+      if (state.latestAutoChallenge) setTrackedChallenge("auto", state.latestAutoChallenge);
       await loadSelectedGame();
       state.lastRefreshEpochMs = Date.now();
       setStatus(`Updated ${new Date().toLocaleTimeString()} · games=${games.length} · global_logs=${Number(indexObj.global_log_count || 0)}`);
@@ -583,6 +624,93 @@ a:hover { text-decoration: underline; }
     els.opponentSearchStatus.className = (isWarn ? "warn" : "muted") + " small";
   }
 
+  function setAutoChallengeStatus(msg, isWarn=false) {
+    els.autoChallengeStatus.textContent = msg;
+    els.autoChallengeStatus.className = (isWarn ? "warn" : "muted") + " small";
+  }
+
+  function normalizedChallengeStateLabel(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    if (!s || s === "created") return "Pending";
+    if (s === "accepted" || s === "started") return "Accepted";
+    if (s === "declined") return "Declined";
+    if (s === "canceled" || s === "cancelled") return "Canceled";
+    if (s === "expired") return "Expired";
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function challengeStatusText(ch) {
+    if (!ch || typeof ch !== "object") return "";
+    const label = normalizedChallengeStateLabel(ch.status);
+    const who = String(ch.username || "");
+    const cid = String(ch.challengeId || "");
+    const msg = String(ch.message || "").trim();
+    const parts = [];
+    parts.push(`${label}${who ? `: ${who}` : ""}`);
+    if (cid) parts.push(`(${cid})`);
+    if (msg) parts.push(msg);
+    return parts.join(" · ");
+  }
+
+  function trackerFromApiResponse(res, fallbackUsername="") {
+    if (!res || typeof res !== "object") return null;
+    const username = String(res.username || fallbackUsername || "").trim();
+    const challengeId = String(res.challenge_id || "").trim();
+    const status = String(res.challenge_status || "created").trim() || "created";
+    const url = String(res.challenge_url || "").trim();
+    const message = String(res.outcome_message || "").trim();
+    if (!username && !challengeId) return null;
+    return { username, challengeId, status, url, message };
+  }
+
+  function setTrackedChallenge(target, tracker) {
+    if (!tracker || typeof tracker !== "object") return;
+    const normalized = {
+      username: String(tracker.username || ""),
+      challengeId: String(tracker.challengeId || ""),
+      status: String(tracker.status || "created"),
+      url: String(tracker.url || ""),
+      message: String(tracker.message || ""),
+    };
+    if (target === "auto") {
+      state.latestAutoChallenge = normalized;
+      const label = normalizedChallengeStateLabel(normalized.status);
+      setAutoChallengeStatus(challengeStatusText(normalized), ["Declined", "Canceled", "Expired"].includes(label));
+    } else {
+      state.latestManualChallenge = normalized;
+      const label = normalizedChallengeStateLabel(normalized.status);
+      setChallengeStatus(challengeStatusText(normalized), ["Declined", "Canceled", "Expired"].includes(label));
+    }
+  }
+
+  function updateTrackedChallengeFromLogs(tracker, logs) {
+    if (!tracker || typeof tracker !== "object") return tracker;
+    const cid = String(tracker.challengeId || "").trim();
+    if (!cid || !Array.isArray(logs)) return tracker;
+    let out = { ...tracker };
+    for (const item of logs) {
+      if (!item || typeof item !== "object") continue;
+      const evt = String(item.event || "");
+      if (evt === "game_start") {
+        const gid = String(item.game_id || "");
+        if (gid === cid) out.status = "accepted";
+        continue;
+      }
+      if (evt !== "event_stream_item") continue;
+      const st = String(item.stream_event_type || "");
+      const payload = (item.payload && typeof item.payload === "object") ? item.payload : {};
+      const ch = (payload.challenge && typeof payload.challenge === "object") ? payload.challenge : {};
+      if (String(ch.id || "") !== cid) continue;
+      if (st === "challengeDeclined") {
+        out.status = "declined";
+        out.message = String(ch.declineReason || ch.declineReasonKey || out.message || "");
+      } else if (st === "challengeCanceled" || st === "challengeCancelled") {
+        out.status = "canceled";
+      }
+    }
+    return out;
+  }
+
   function prefillChallengeForm(username) {
     els.challengeUser.value = String(username || "");
     setChallengeStatus(`Prefilled ${String(username || "")}`);
@@ -597,17 +725,60 @@ a:hover { text-decoration: underline; }
     return parts.join(" · ");
   }
 
+  function getOpponentListFilter() {
+    const key = String(els.autoChallengeRatingKey.value || "blitz");
+    const minElo = Math.max(0, Number(els.autoChallengeMinElo.value || 0) || 0);
+    const rawMax = Math.max(0, Number(els.autoChallengeMaxElo.value || 0) || 0);
+    const maxElo = Math.max(minElo, rawMax);
+    return {
+      enabled: !!els.opponentListFilterByElo.checked,
+      ratingKey: key,
+      minElo,
+      maxElo,
+    };
+  }
+
+  function botRating(bot, ratingKey) {
+    if (!bot || typeof bot !== "object") return null;
+    const ratings = (bot.ratings && typeof bot.ratings === "object") ? bot.ratings : {};
+    const val = ratings[ratingKey];
+    return (typeof val === "number" && Number.isFinite(val)) ? val : null;
+  }
+
   function renderOnlineBots() {
     const bots = Array.isArray(state.onlineBots) ? state.onlineBots : [];
     if (!bots.length) {
       els.onlineBotsList.innerHTML = '<div class="muted small">No online bots returned.</div>';
       return;
     }
+    const filter = getOpponentListFilter();
+    let visibleBots = bots;
+    if (filter.enabled) {
+      visibleBots = bots.filter((bot) => {
+        const r = botRating(bot, filter.ratingKey);
+        return typeof r === "number" && r >= filter.minElo && r <= filter.maxElo;
+      });
+    }
+    if (!visibleBots.length) {
+      const msg = filter.enabled
+        ? `No bots in ${filter.ratingKey} ${filter.minElo}-${filter.maxElo} range.`
+        : "No online bots returned.";
+      els.onlineBotsList.innerHTML = `<div class="muted small">${escapeHtml(msg)}</div>`;
+      return;
+    }
     els.onlineBotsList.innerHTML = "";
-    for (const bot of bots.slice(0, 300)) {
+    const header = document.createElement("div");
+    header.className = "small muted";
+    header.style.paddingBottom = "6px";
+    header.textContent = filter.enabled
+      ? `Showing ${Math.min(300, visibleBots.length)} of ${visibleBots.length} bots in ${filter.ratingKey} ${filter.minElo}-${filter.maxElo} (total online: ${bots.length})`
+      : `Showing ${Math.min(300, bots.length)} of ${bots.length} online bots`;
+    els.onlineBotsList.appendChild(header);
+    for (const bot of visibleBots.slice(0, 300)) {
       const username = String(bot.username || bot.id || "");
       const title = String(bot.title || "");
       const playing = !!bot.playing;
+      const fr = filter.enabled ? botRating(bot, filter.ratingKey) : null;
       const row = document.createElement("div");
       row.className = "bot-row";
       row.innerHTML = `
@@ -615,6 +786,7 @@ a:hover { text-decoration: underline; }
           <div class="rowline">
             <b>${escapeHtml((title ? title + " " : "") + username)}</b>
             ${playing ? '<span class="pill">playing</span>' : '<span class="pill">idle</span>'}
+            ${fr !== null ? `<span class="pill">${escapeHtml(filter.ratingKey)}:${escapeHtml(String(fr))}</span>` : ""}
           </div>
           <div class="small muted">${escapeHtml(ratingsSummary(bot) || "No rating summary")}</div>
         </div>
@@ -665,6 +837,87 @@ a:hover { text-decoration: underline; }
     state.opponentSearchTimer = setInterval(() => refreshOnlineBots(false), ms);
   }
 
+  function buildAutoChallengePayload() {
+    return {
+      rated: !!els.challengeRated.checked,
+      clock_limit: Math.max(0, Number(els.challengeLimit.value || 0) || 0),
+      clock_increment: Math.max(0, Number(els.challengeInc.value || 0) || 0),
+      color: String(els.challengeColor.value || "random"),
+      variant: String(els.challengeVariant.value || "standard").trim() || "standard",
+      rating_key: String(els.autoChallengeRatingKey.value || "blitz"),
+      min_elo: Math.max(0, Number(els.autoChallengeMinElo.value || 0) || 0),
+      max_elo: Math.max(0, Number(els.autoChallengeMaxElo.value || 0) || 0),
+      cooldown_s: Math.max(0, Number(els.autoChallengeCooldownSec.value || 0) || 0),
+      require_no_active_game: !!els.autoChallengeRequireNoActiveGame.checked,
+      include_playing: !!els.autoChallengeIncludePlaying.checked,
+      force_refresh_online_bots: true,
+    };
+  }
+
+  async function autoChallengeTick(manual=false) {
+    if (state.autoChallengeBusy) return;
+    state.autoChallengeBusy = true;
+    els.autoChallengeTickBtn.disabled = true;
+    if (manual) {
+      setAutoChallengeStatus("Running auto-challenge tick...");
+    }
+    try {
+      const res = await postJson("/api/auto-challenge-tick", buildAutoChallengePayload());
+      if (Array.isArray(res.online_bots)) {
+        state.onlineBots = res.online_bots;
+        renderOnlineBots();
+      }
+      const action = String(res.action || "");
+      if (action === "challenged") {
+        const tracker = trackerFromApiResponse(res, String(res.username || ""));
+        if (tracker) {
+          setTrackedChallenge("auto", tracker);
+        } else {
+          const msg = res.challenge_id
+            ? `Pending: ${res.username} (${res.challenge_id})`
+            : `Pending: ${res.username}`;
+          setAutoChallengeStatus(msg);
+        }
+        await refreshAll();
+      } else if (action === "skipped") {
+        setAutoChallengeStatus(`Skipped: ${String(res.reason || "no_candidate")}`);
+      } else if (action === "error") {
+        const tracker = trackerFromApiResponse(res, String(res.username || ""));
+        if (tracker) {
+          if (!tracker.message) tracker.message = String(res.error || "unknown");
+          setTrackedChallenge("auto", tracker);
+        } else {
+          setAutoChallengeStatus(`Auto challenge failed: ${String(res.error || "unknown")}`, true);
+        }
+      } else {
+        setAutoChallengeStatus(`Auto challenge: ${action || "no action"}`);
+      }
+    } catch (err) {
+      setAutoChallengeStatus(`Auto challenge failed: ${err.message || String(err)}`, true);
+    } finally {
+      state.autoChallengeBusy = false;
+      els.autoChallengeTickBtn.disabled = false;
+    }
+  }
+
+  function scheduleAutoChallenge() {
+    if (state.autoChallengeTimer) {
+      clearInterval(state.autoChallengeTimer);
+      state.autoChallengeTimer = null;
+    }
+    if (!els.autoChallengeEnabled.checked) {
+      setAutoChallengeStatus("Auto challenge off");
+      return;
+    }
+    const ms = Math.max(2000, Number(els.autoChallengeIntervalMs.value || 20000) || 20000);
+    autoChallengeTick(false);
+    state.autoChallengeTimer = setInterval(() => autoChallengeTick(false), ms);
+  }
+
+  function rerenderOnlineBotsForFilterChange() {
+    renderOnlineBots();
+  }
+
   async function sendChallenge() {
     const username = String(els.challengeUser.value || "").trim();
     if (!username) {
@@ -683,10 +936,12 @@ a:hover { text-decoration: underline; }
     setChallengeStatus(`Sending challenge to ${username}...`);
     try {
       const res = await postJson("/api/challenge", payload);
-      const summary = res.challenge_id
-        ? `Sent: ${username} (challenge ${res.challenge_id})`
-        : `Submitted to ${username}`;
-      setChallengeStatus(summary, false);
+      const tracker = trackerFromApiResponse(res, username);
+      if (tracker) {
+        setTrackedChallenge("manual", tracker);
+      } else {
+        setChallengeStatus(`Pending: ${username}`, false);
+      }
       await refreshAll();
     } catch (err) {
       setChallengeStatus(`Challenge failed: ${err.message || String(err)}`, true);
@@ -703,6 +958,13 @@ a:hover { text-decoration: underline; }
   els.opponentSearchRefreshBtn.addEventListener("click", () => refreshOnlineBots(true));
   els.opponentSearchEnabled.addEventListener("change", scheduleOpponentSearch);
   els.opponentSearchIntervalMs.addEventListener("change", scheduleOpponentSearch);
+  els.autoChallengeTickBtn.addEventListener("click", () => autoChallengeTick(true));
+  els.autoChallengeEnabled.addEventListener("change", scheduleAutoChallenge);
+  els.autoChallengeIntervalMs.addEventListener("change", scheduleAutoChallenge);
+  els.autoChallengeRatingKey.addEventListener("change", rerenderOnlineBotsForFilterChange);
+  els.autoChallengeMinElo.addEventListener("change", rerenderOnlineBotsForFilterChange);
+  els.autoChallengeMaxElo.addEventListener("change", rerenderOnlineBotsForFilterChange);
+  els.opponentListFilterByElo.addEventListener("change", rerenderOnlineBotsForFilterChange);
 
   const params = new URLSearchParams(window.location.search);
   const initialGame = params.get("game_id");
@@ -713,6 +975,7 @@ a:hover { text-decoration: underline; }
 
   schedule();
   scheduleOpponentSearch();
+  scheduleAutoChallenge();
   refreshAll();
 })();
 </script>
@@ -800,6 +1063,57 @@ def _run_outbound_challenge(**kwargs) -> dict:
     }
 
 
+def _challenge_result_summary(run_res: dict) -> dict:
+    result_obj = run_res.get("result") if isinstance(run_res, dict) and isinstance(run_res.get("result"), dict) else {}
+    response_obj = result_obj.get("response") if isinstance(result_obj.get("response"), dict) else {}
+    challenge_obj = response_obj.get("challenge") if isinstance(response_obj.get("challenge"), dict) else {}
+    # Some challenge-create responses return the challenge object directly under `response`.
+    if not challenge_obj and isinstance(response_obj.get("id"), str):
+        challenge_obj = response_obj
+    error_obj = response_obj.get("error") if isinstance(response_obj.get("error"), dict) else {}
+
+    challenge_id = str(challenge_obj.get("id", "") or "")
+    challenge_status = str(challenge_obj.get("status", "") or "")
+    challenge_url = str(challenge_obj.get("url", "") or "")
+    decline_reason = str(challenge_obj.get("declineReason", "") or challenge_obj.get("declineReasonKey", "") or "")
+
+    message_parts = []
+    for key in ("error", "message"):
+        val = response_obj.get(key)
+        if isinstance(val, str) and val.strip():
+            message_parts.append(val.strip())
+    for key in ("message", "error"):
+        val = error_obj.get(key)
+        if isinstance(val, str) and val.strip():
+            message_parts.append(val.strip())
+    if decline_reason:
+        message_parts.append(decline_reason)
+    should_use_stdio_fallback = not challenge_id or challenge_status in {"declined", "canceled", "cancelled", "expired"}
+    if not message_parts and should_use_stdio_fallback:
+        stderr = str(run_res.get("stderr", "") or "").strip()
+        stdout = str(run_res.get("stdout", "") or "").strip()
+        if stderr:
+            message_parts.append(stderr.splitlines()[-1].strip())
+        elif stdout:
+            message_parts.append(stdout.splitlines()[-1].strip())
+
+    outcome_message = ""
+    seen = set()
+    for part in message_parts:
+        norm = part.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        outcome_message = f"{outcome_message} | {part}" if outcome_message else part
+
+    return {
+        "challenge_id": challenge_id,
+        "challenge_status": challenge_status,
+        "challenge_url": challenge_url,
+        "outcome_message": outcome_message,
+    }
+
+
 def _fetch_online_bots(*, token: str, timeout_s: int = 20) -> dict:
     headers = {
         "User-Agent": "chessbot-lichess-preview/0.1",
@@ -849,6 +1163,129 @@ def _fetch_online_bots(*, token: str, timeout_s: int = 20) -> dict:
     return {"ok": True, "count": len(bots), "bots": bots, "fetched_at_epoch": time.time()}
 
 
+_RATING_KEYS = ("bullet", "blitz", "rapid", "classical")
+_TERMINAL_GAME_STATUSES = {
+    "aborted",
+    "cheat",
+    "draw",
+    "mate",
+    "noStart",
+    "outoftime",
+    "resign",
+    "stalemate",
+    "timeout",
+    "variantEnd",
+}
+
+
+def _normalize_rating_key(value: str) -> str:
+    key = str(value or "blitz").strip().lower()
+    return key if key in _RATING_KEYS else "blitz"
+
+
+def _bot_rating(bot: dict, rating_key: str) -> int | None:
+    if not isinstance(bot, dict):
+        return None
+    ratings = bot.get("ratings")
+    if not isinstance(ratings, dict):
+        return None
+    raw = ratings.get(_normalize_rating_key(rating_key))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _count_active_games_from_index(index_obj: dict) -> int:
+    games = index_obj.get("games") if isinstance(index_obj, dict) else []
+    if not isinstance(games, list):
+        return 0
+    count = 0
+    for g in games:
+        if not isinstance(g, dict):
+            continue
+        status = str(g.get("status", "") or "").strip()
+        if not status:
+            continue
+        if status.lower() not in _TERMINAL_GAME_STATUSES:
+            count += 1
+    return count
+
+
+def _load_preview_index(serve_dir: Path) -> dict:
+    try:
+        raw = (serve_dir / "index.json").read_text(encoding="utf-8")
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _choose_auto_challenge_candidate(
+    bots: list[dict],
+    *,
+    rating_key: str,
+    min_elo: int,
+    max_elo: int,
+    include_playing: bool,
+    cooldown_s: int,
+    recent_attempts: dict[str, float],
+    now_epoch: float,
+) -> tuple[dict | None, dict]:
+    key = _normalize_rating_key(rating_key)
+    lo = max(0, int(min_elo))
+    hi = max(lo, int(max_elo))
+    cooldown = max(0, int(cooldown_s))
+    target = (lo + hi) / 2.0
+    eligible = []
+    stats = {"total": 0, "with_rating": 0, "in_range": 0, "cooldown_blocked": 0, "playing_blocked": 0}
+    for bot in bots:
+        if not isinstance(bot, dict):
+            continue
+        stats["total"] += 1
+        username = str(bot.get("username") or bot.get("id") or "").strip()
+        if not username:
+            continue
+        if bool(bot.get("playing")) and not include_playing:
+            stats["playing_blocked"] += 1
+            continue
+        rating = _bot_rating(bot, key)
+        if rating is None:
+            continue
+        stats["with_rating"] += 1
+        if rating < lo or rating > hi:
+            continue
+        stats["in_range"] += 1
+        recent_key = username.lower()
+        last_attempt = float(recent_attempts.get(recent_key, 0.0) or 0.0)
+        if cooldown > 0 and last_attempt > 0.0 and (now_epoch - last_attempt) < cooldown:
+            stats["cooldown_blocked"] += 1
+            continue
+        eligible.append((bot, username, rating))
+    eligible.sort(
+        key=lambda t: (
+            1 if bool(t[0].get("playing")) else 0,
+            abs(t[2] - target),
+            t[2],
+            t[1].lower(),
+        )
+    )
+    chosen = eligible[0][0] if eligible else None
+    meta = {
+        "rating_key": key,
+        "min_elo": lo,
+        "max_elo": hi,
+        "eligible_count": len(eligible),
+        "stats": stats,
+    }
+    if eligible:
+        meta["candidate_rating"] = eligible[0][2]
+        meta["username"] = eligible[0][1]
+    return chosen, meta
+
+
 def _app_html(preview_dir: Path) -> bytes:
     title_note = html.escape(str(preview_dir))
     page = APP_HTML.replace("Lichess Bot Live Preview", f"Lichess Bot Live Preview ({title_note})", 1)
@@ -871,6 +1308,32 @@ def make_handler(
         "ok": True,
     }
     access_log_path = serve_dir / "preview_server_access.log"
+    auto_challenge_state = {
+        "recent_attempts": {},
+        "last_result": {},
+    }
+
+    def _refresh_online_bots_cache(force: bool) -> dict:
+        max_age_s = 15.0
+        now = time.time()
+        should_refresh = force or (now - float(online_bots_cache.get("fetched_at_epoch", 0.0))) > max_age_s
+        if should_refresh:
+            try:
+                fresh = _fetch_online_bots(token=token)
+                online_bots_cache.clear()
+                online_bots_cache.update(fresh)
+                online_bots_cache["error"] = ""
+            except urllib.error.URLError as exc:
+                online_bots_cache["ok"] = False
+                online_bots_cache["error"] = str(exc)
+                online_bots_cache["fetched_at_epoch"] = now
+            except Exception as exc:
+                online_bots_cache["ok"] = False
+                online_bots_cache["error"] = str(exc)
+                online_bots_cache["fetched_at_epoch"] = now
+        payload = dict(online_bots_cache)
+        payload["cache_age_s"] = max(0.0, now - float(payload.get("fetched_at_epoch", 0.0)))
+        return payload
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -933,31 +1396,12 @@ def make_handler(
             if parsed.path == "/api/online-bots":
                 q = parse_qs(parsed.query)
                 force = str((q.get("force") or ["0"])[0]).lower() in {"1", "true", "yes"}
-                max_age_s = 15.0
-                now = time.time()
-                should_refresh = force or (now - float(online_bots_cache.get("fetched_at_epoch", 0.0))) > max_age_s
-                if should_refresh:
-                    try:
-                        fresh = _fetch_online_bots(token=token)
-                        online_bots_cache.clear()
-                        online_bots_cache.update(fresh)
-                        online_bots_cache["error"] = ""
-                    except urllib.error.URLError as exc:
-                        online_bots_cache["ok"] = False
-                        online_bots_cache["error"] = str(exc)
-                        online_bots_cache["fetched_at_epoch"] = now
-                    except Exception as exc:
-                        online_bots_cache["ok"] = False
-                        online_bots_cache["error"] = str(exc)
-                        online_bots_cache["fetched_at_epoch"] = now
-                payload = dict(online_bots_cache)
-                payload["cache_age_s"] = max(0.0, now - float(payload.get("fetched_at_epoch", 0.0)))
-                return self._send_json(payload)
+                return self._send_json(_refresh_online_bots_cache(force))
             return super().do_GET()
 
         def do_POST(self):
             parsed = urlparse(self.path)
-            if parsed.path != "/api/challenge":
+            if parsed.path not in {"/api/challenge", "/api/auto-challenge-tick"}:
                 return self._send_json({"ok": False, "error": "not_found"}, status=404)
             try:
                 raw_len = int(self.headers.get("Content-Length", "0") or "0")
@@ -968,6 +1412,130 @@ def make_handler(
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except Exception:
                 return self._send_json({"ok": False, "error": "invalid_json"}, status=400)
+            if parsed.path == "/api/auto-challenge-tick":
+                force_refresh = bool((payload or {}).get("force_refresh_online_bots", True))
+                online_payload = _refresh_online_bots_cache(force_refresh)
+                bots = online_payload.get("bots") if isinstance(online_payload.get("bots"), list) else []
+                if not online_payload.get("ok"):
+                    return self._send_json(
+                        {
+                            "ok": True,
+                            "action": "error",
+                            "error": str(online_payload.get("error") or "online_bots_fetch_failed"),
+                            "online_bots": bots,
+                            "online_bots_count": len(bots),
+                        }
+                    )
+                require_no_active = bool((payload or {}).get("require_no_active_game", True))
+                index_obj = _load_preview_index(serve_dir)
+                active_games = _count_active_games_from_index(index_obj)
+                if require_no_active and active_games > 0:
+                    return self._send_json(
+                        {
+                            "ok": True,
+                            "action": "skipped",
+                            "reason": "active_game_present",
+                            "active_game_count": active_games,
+                            "online_bots": bots,
+                            "online_bots_count": len(bots),
+                        }
+                    )
+                now_epoch = time.time()
+                recent_attempts = auto_challenge_state.get("recent_attempts")
+                if not isinstance(recent_attempts, dict):
+                    recent_attempts = {}
+                    auto_challenge_state["recent_attempts"] = recent_attempts
+                cooldown_s = int((payload or {}).get("cooldown_s", 900) or 900)
+                prune_before = now_epoch - max(3600, max(0, cooldown_s) * 4)
+                for k, v in list(recent_attempts.items()):
+                    try:
+                        if float(v) < prune_before:
+                            recent_attempts.pop(k, None)
+                    except Exception:
+                        recent_attempts.pop(k, None)
+                candidate, meta = _choose_auto_challenge_candidate(
+                    bots,
+                    rating_key=str((payload or {}).get("rating_key", "blitz") or "blitz"),
+                    min_elo=int((payload or {}).get("min_elo", 0) or 0),
+                    max_elo=int((payload or {}).get("max_elo", 4000) or 4000),
+                    include_playing=bool((payload or {}).get("include_playing", False)),
+                    cooldown_s=cooldown_s,
+                    recent_attempts=recent_attempts,
+                    now_epoch=now_epoch,
+                )
+                if not candidate:
+                    return self._send_json(
+                        {
+                            "ok": True,
+                            "action": "skipped",
+                            "reason": "no_candidate",
+                            "active_game_count": active_games,
+                            "online_bots": bots,
+                            "online_bots_count": len(bots),
+                            **meta,
+                        }
+                    )
+                username = str(candidate.get("username") or candidate.get("id") or "").strip()
+                recent_attempts[username.lower()] = now_epoch
+                try:
+                    run_res = _run_outbound_challenge(
+                        token=token,
+                        keyring_service=keyring_service,
+                        keyring_username=keyring_username,
+                        min_request_interval_ms=min_request_interval_ms,
+                        username=username,
+                        rated=bool((payload or {}).get("rated", False)),
+                        clock_limit=int((payload or {}).get("clock_limit", 300) or 300),
+                        clock_increment=int((payload or {}).get("clock_increment", 0) or 0),
+                        color=str((payload or {}).get("color", "random") or "random"),
+                        variant=str((payload or {}).get("variant", "standard") or "standard"),
+                    )
+                except subprocess.TimeoutExpired:
+                    return self._send_json(
+                        {
+                            "ok": True,
+                            "action": "error",
+                            "error": "challenge_command_timeout",
+                            "username": username,
+                            "active_game_count": active_games,
+                            "online_bots": bots,
+                            "online_bots_count": len(bots),
+                            **meta,
+                        }
+                    )
+                result_obj = run_res.get("result") if isinstance(run_res.get("result"), dict) else {}
+                challenge_summary = _challenge_result_summary(run_res)
+                challenge_id = str(challenge_summary.get("challenge_id", "") or "")
+                if not run_res.get("ok"):
+                    return self._send_json(
+                        {
+                            "ok": True,
+                            "action": "error",
+                            "error": "challenge_command_failed",
+                            **challenge_summary,
+                            "username": username,
+                            "details": run_res,
+                            "active_game_count": active_games,
+                            "online_bots": bots,
+                            "online_bots_count": len(bots),
+                            **meta,
+                        }
+                    )
+                out = {
+                    "ok": True,
+                    "action": "challenged",
+                    "username": username,
+                    "challenge_id": challenge_id,
+                    **challenge_summary,
+                    "active_game_count": active_games,
+                    "online_bots": bots,
+                    "online_bots_count": len(bots),
+                    "details": run_res,
+                    **meta,
+                }
+                auto_challenge_state["last_result"] = out
+                return self._send_json(out)
+
             username = str((payload or {}).get("username", "") or "").strip()
             if not username:
                 return self._send_json({"ok": False, "error": "missing_username"}, status=400)
@@ -987,16 +1555,15 @@ def make_handler(
             except subprocess.TimeoutExpired:
                 return self._send_json({"ok": False, "error": "challenge_command_timeout"}, status=504)
 
-            result_obj = run_res.get("result") if isinstance(run_res.get("result"), dict) else {}
-            challenge_obj = (result_obj.get("response") or {}).get("challenge") if isinstance(result_obj, dict) else {}
-            challenge_id = ""
-            if isinstance(challenge_obj, dict):
-                challenge_id = str(challenge_obj.get("id", "") or "")
+            challenge_summary = _challenge_result_summary(run_res)
+            challenge_id = str(challenge_summary.get("challenge_id", "") or "")
             if not run_res.get("ok"):
                 return self._send_json(
                     {
                         "ok": False,
                         "error": "challenge_command_failed",
+                        "message": str(challenge_summary.get("outcome_message") or "challenge create failed"),
+                        **challenge_summary,
                         "details": run_res,
                     },
                     status=500,
@@ -1005,6 +1572,7 @@ def make_handler(
                 {
                     "ok": True,
                     "challenge_id": challenge_id,
+                    **challenge_summary,
                     "details": run_res,
                 }
             )

@@ -60,6 +60,10 @@ Provide a separate module for connecting the local move model to the Lichess Bot
 - The selected-game board highlights the last move (`from` and `to` squares) using a classic green square highlight treatment.
 - The live UI also exposes an outbound challenge form that POSTs to the local preview server (`/api/challenge`), which invokes a one-shot `scripts/lichess_bot.py --challenge-user ...` call using the same token/keyring settings.
 - The live UI also exposes an opponent-search panel with an `Actively search` toggle that polls a local `/api/online-bots` endpoint (backed by Lichess `/api/bot/online`) and renders clickable online bot candidates with `Prefill` / `Challenge` actions (default search interval `15000 ms`, server-side cache ~`15 s`).
+- The opponent-search list can be filtered client-side by the auto-challenge ELO range controls (rating bucket + min/max ELO) to narrow the visible candidates to the target strength window.
+- The live UI also exposes an `Auto Challenge` control row that can continuously trigger server-side auto-challenge ticks with configurable interval, rating bucket (`bullet`/`blitz`/`rapid`/`classical`), ELO min/max range, retry cooldown, `include playing bots` behavior, and an `only if no active game` guard.
+- Auto-challenge ticks POST to the local preview server endpoint `/api/auto-challenge-tick`, which refreshes/caches online bots, filters by the requested ELO range, skips recently attempted usernames for the configured cooldown window, optionally pauses while a live game is active (using preview `index.json` statuses), and then issues a one-shot outbound challenge via the existing `scripts/lichess_bot.py --challenge-user ...` flow.
+- Manual and auto-challenge responses include parsed challenge outcome metadata (challenge status/id/url when available plus a best-effort human-readable outcome/error message), which the UI surfaces in the challenge status text.
 - The opponent-search list is a discovery list of online bots, not a guarantee that a bot will accept the chosen challenge settings (policy, variant, time control, or current load may still cause rejection).
 - The live preview path no longer rewrites HTML files on each event; the bot writes JSON artifacts only.
 - `scripts/run_lichess_bot_with_preview.py` starts both the bot and preview server together and shuts them down as a pair.
@@ -78,5 +82,5 @@ Provide a separate module for connecting the local move model to the Lichess Bot
 - Preview-server HTTP access logs are written to `artifacts/lichess_live_preview/preview_server_access.log` (or `<preview-dir>/preview_server_access.log`), while routine `200` request lines are suppressed from terminal output; HTTP errors still print to stderr.
 
 ## Validation / Tests
-- Unit tests cover challenge filtering, turn-taking logic, move posting vs dry-run behavior, illegal stream move detection, preview JSON persistence, outbound challenge request encoding, live transcript-to-valid-record archive conversion, and request-rate throttling behavior.
+- Unit tests cover challenge filtering, turn-taking logic, move posting vs dry-run behavior, illegal stream move detection, preview JSON persistence, outbound challenge request encoding, live transcript-to-valid-record archive conversion, request-rate throttling behavior, and preview-server auto-challenge candidate/range filtering helpers.
 - Tests depend on `python-chess` being installed in the runtime.
