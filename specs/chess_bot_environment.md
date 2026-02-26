@@ -32,6 +32,25 @@ If checks fail, warn the user immediately before proceeding.
 - `/work/.venv` rebuilt in-container
 - End-to-end CLI pipeline executed successfully on sample PGN fixture
 
+## Gemini Sandbox Execution (2026-02-26)
+When running in the Gemini sandbox (where `/.containerenv` is at root), the existing `.venv` may be broken due to Python version mismatches (e.g., symlinked to `python3.12` when system is `3.11`).
+
+**Execution Strategy:**
+Use system `python3` but inject the virtual environment's site-packages into `PYTHONPATH`.
+
+**Example Commands:**
+```bash
+# General script execution
+PYTHONPATH=.:.venv/lib/python3.12/site-packages python3 scripts/render_game_viewer.py --help
+
+# Running tests
+PYTHONPATH=.:.venv/lib/python3.12/site-packages python3 .venv/bin/pytest tests/test_runpod_api_helpers.py
+```
+
+**Known Limitations:**
+- **Native Extensions:** Libraries with compiled C extensions (like `torch`) built for a different Python version (3.12) will fail with `ImportError` when loaded by the system Python (3.11).
+- **Pure Python:** Pure Python libraries (like `chess`, `PyYAML`) work correctly with this strategy.
+
 ## GPU Availability Snapshot (2026-02-22)
 - Container exposes NVIDIA device nodes (`/dev/nvidia*`) and `nvidia-smi` binary exists.
 - GPU is not usable from this runtime:

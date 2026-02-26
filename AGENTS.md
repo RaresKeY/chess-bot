@@ -8,3 +8,5 @@ If you must run a python script, prefer running in project venv.
 
 Before assuming host and container are aligned, run a quick container sanity check (`/run/.containerenv`, `/proc/1/*`, and `/work` path identity).
 If checks indicate we are not in the expected `/work` container context, explicitly warn the user before proceeding.
+
+**Gemini Sandbox Note:** If `/.containerenv` exists (Gemini-specific sandbox), use the `PYTHONPATH` workaround detailed in `specs/chess_bot_environment.md`.
