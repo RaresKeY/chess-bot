@@ -26,6 +26,19 @@ def _find_single_pgn(extract_dir: Path) -> Path:
     return pgns[0]
 
 
+def _is_completed_month_outputs(validated_dir: Path, dataset_dir: Path) -> bool:
+    return (
+        validated_dir.exists()
+        and dataset_dir.exists()
+        and (validated_dir / "summary.json").is_file()
+        and (validated_dir / "valid_games.jsonl").is_file()
+        and (dataset_dir / "stats.json").is_file()
+        and (dataset_dir / "train.jsonl").is_file()
+        and (dataset_dir / "val.jsonl").is_file()
+        and (dataset_dir / "test.jsonl").is_file()
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download, validate, and splice a Lichess elite monthly dataset")
     parser.add_argument("--month", required=True, help="Month in YYYY-MM format (e.g. 2025-10)")
@@ -64,10 +77,24 @@ def main() -> None:
     dataset_dir = dataset_dir.resolve()
 
     if not args.overwrite:
-        if validated_dir.exists():
-            raise SystemExit(f"Validated output dir already exists (use --overwrite): {validated_dir}")
-        if dataset_dir.exists():
-            raise SystemExit(f"Dataset output dir already exists (use --overwrite): {dataset_dir}")
+        if _is_completed_month_outputs(validated_dir, dataset_dir):
+            print(
+                {
+                    "skip_existing_complete": {
+                        "month": month,
+                        "validated_dir": str(validated_dir),
+                        "dataset_dir": str(dataset_dir),
+                        "validation_summary": str(validated_dir / "summary.json"),
+                        "dataset_stats": str(dataset_dir / "stats.json"),
+                    }
+                }
+            )
+            return
+        if validated_dir.exists() or dataset_dir.exists():
+            raise SystemExit(
+                "Output dir already exists but does not look complete "
+                f"(use --overwrite to rebuild): validated_dir={validated_dir} dataset_dir={dataset_dir}"
+            )
 
     py = str((REPO_ROOT / ".venv" / "bin" / "python") if (REPO_ROOT / ".venv" / "bin" / "python").exists() else sys.executable)
 
