@@ -7,7 +7,8 @@ import chess
 import torch
 
 from src.chessbot.inference import best_legal_from_topk
-from src.chessbot.model import NextMoveLSTM, encode_tokens, winner_to_id
+from src.chessbot.model import NextMoveLSTM, encode_tokens, side_to_move_id_from_context_len, winner_to_id
+from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_id
 
 
 @dataclass
@@ -33,6 +34,7 @@ class LoadedMoveModel:
         return cls(artifact)
 
     def infer(self, context: List[str], winner_side: str, topk: int) -> Dict:
+        original_context_len = len(context)
         context_ids = encode_tokens(context, self.vocab)
         if not context_ids:
             # If no context, produce a tensor with one unk token to avoid zero-length packed sequence.
@@ -40,9 +42,12 @@ class LoadedMoveModel:
         tokens = torch.tensor([context_ids], dtype=torch.long)
         lengths = torch.tensor([len(context_ids)], dtype=torch.long)
         winners = torch.tensor([winner_to_id(winner_side)], dtype=torch.long)
+        phase_name = str(classify_context_phase(context).get("phase", PHASE_UNKNOWN))
+        phases = torch.tensor([phase_to_id(phase_name)], dtype=torch.long)
+        side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long)
 
         with torch.no_grad():
-            logits = self.model(tokens, lengths, winners)
+            logits = self.model(tokens, lengths, winners, phases, side_to_moves)
             k = max(1, min(int(topk), logits.shape[-1]))
             pred_ids = logits.topk(k, dim=1).indices[0].tolist()
         topk_tokens = [self.inv_vocab.get(i, "") for i in pred_ids]

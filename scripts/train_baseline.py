@@ -31,14 +31,18 @@ def main() -> None:
     )
     parser.add_argument("--output", default="artifacts/model.pt")
     parser.add_argument("--metrics-out", default="artifacts/train_metrics.json")
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--embed-dim", type=int, default=128)
-    parser.add_argument("--hidden-dim", type=int, default=256)
-    parser.add_argument("--num-layers", type=int, default=1, help="LSTM layer count")
-    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate for embedding/head (and LSTM inter-layer when num_layers>1)")
+    parser.add_argument("--embed-dim", type=int, default=256)
+    parser.add_argument("--hidden-dim", type=int, default=512)
+    parser.add_argument("--num-layers", type=int, default=2, help="LSTM layer count")
+    parser.add_argument("--dropout", type=float, default=0.15, help="Dropout rate for embedding/head (and LSTM inter-layer when num_layers>1)")
+    parser.add_argument("--phase-feature", action=argparse.BooleanOptionalAction, default=True, help="Concat phase embedding to classifier head")
+    parser.add_argument("--phase-embed-dim", type=int, default=8, help="Phase embedding dim when --phase-feature is enabled")
+    parser.add_argument("--side-to-move-feature", action=argparse.BooleanOptionalAction, default=True, help="Concat side-to-move embedding to classifier head")
+    parser.add_argument("--side-to-move-embed-dim", type=int, default=4, help="Side-to-move embedding dim when --side-to-move-feature is enabled")
     parser.add_argument("--winner-weight", type=float, default=1.2)
     parser.add_argument("--phase-weight-opening", type=float, default=1.0)
     parser.add_argument("--phase-weight-middlegame", type=float, default=1.0)
@@ -68,6 +72,40 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Restore best validation checkpoint (lowest val_loss) before saving when validation rows exist",
+    )
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=["none", "plateau"],
+        default="plateau",
+        help="Learning-rate scheduler strategy (plateau watches validation metric)",
+    )
+    parser.add_argument(
+        "--lr-scheduler-metric",
+        choices=["val_loss", "top1"],
+        default="val_loss",
+        help="Validation metric to drive ReduceLROnPlateau",
+    )
+    parser.add_argument("--lr-plateau-factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
+    parser.add_argument("--lr-plateau-patience", type=int, default=3, help="Epochs without improvement before LR reduction")
+    parser.add_argument("--lr-plateau-threshold", type=float, default=1e-4, help="Absolute improvement threshold for plateau detection")
+    parser.add_argument("--lr-plateau-min-lr", type=float, default=0.0, help="Lower bound for scheduler-adjusted LR")
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Stop after N non-improving validation epochs (0 disables)",
+    )
+    parser.add_argument(
+        "--early-stopping-metric",
+        choices=["val_loss", "top1"],
+        default="val_loss",
+        help="Validation metric used for early stopping",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum metric improvement required to reset early-stopping patience",
     )
     parser.add_argument(
         "--verbose",
@@ -114,6 +152,10 @@ def main() -> None:
                     "hidden_dim": args.hidden_dim,
                     "num_layers": args.num_layers,
                     "dropout": args.dropout,
+                    "phase_feature": args.phase_feature,
+                    "phase_embed_dim": args.phase_embed_dim,
+                    "side_to_move_feature": args.side_to_move_feature,
+                    "side_to_move_embed_dim": args.side_to_move_embed_dim,
                     "winner_weight": args.winner_weight,
                     "phase_weights": {
                         "unknown": args.phase_weight_unknown,
@@ -127,6 +169,15 @@ def main() -> None:
                     "pin_memory_requested": args.pin_memory,
                     "amp_requested": args.amp,
                     "restore_best": args.restore_best,
+                    "lr_scheduler": args.lr_scheduler,
+                    "lr_scheduler_metric": args.lr_scheduler_metric,
+                    "lr_plateau_factor": args.lr_plateau_factor,
+                    "lr_plateau_patience": args.lr_plateau_patience,
+                    "lr_plateau_threshold": args.lr_plateau_threshold,
+                    "lr_plateau_min_lr": args.lr_plateau_min_lr,
+                    "early_stopping_patience": args.early_stopping_patience,
+                    "early_stopping_metric": args.early_stopping_metric,
+                    "early_stopping_min_delta": args.early_stopping_min_delta,
                     "verbose": args.verbose,
                     "progress": args.progress,
                 }
@@ -156,6 +207,10 @@ def main() -> None:
         num_layers=args.num_layers,
         dropout=args.dropout,
         winner_weight=args.winner_weight,
+        use_phase_feature=args.phase_feature,
+        phase_embed_dim=args.phase_embed_dim,
+        use_side_to_move_feature=args.side_to_move_feature,
+        side_to_move_embed_dim=args.side_to_move_embed_dim,
         phase_weights={
             "unknown": args.phase_weight_unknown,
             "opening": args.phase_weight_opening,
@@ -168,6 +223,15 @@ def main() -> None:
         pin_memory=args.pin_memory,
         amp=args.amp,
         restore_best=args.restore_best,
+        lr_scheduler=args.lr_scheduler,
+        lr_scheduler_metric=args.lr_scheduler_metric,
+        lr_plateau_factor=args.lr_plateau_factor,
+        lr_plateau_patience=args.lr_plateau_patience,
+        lr_plateau_threshold=args.lr_plateau_threshold,
+        lr_plateau_min_lr=args.lr_plateau_min_lr,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_metric=args.early_stopping_metric,
+        early_stopping_min_delta=args.early_stopping_min_delta,
         verbose=args.verbose,
         show_progress=args.progress,
     )
@@ -207,6 +271,10 @@ def main() -> None:
         "model_path": args.output,
         "num_layers": args.num_layers,
         "dropout": args.dropout,
+        "phase_feature": args.phase_feature,
+        "phase_embed_dim": args.phase_embed_dim,
+        "side_to_move_feature": args.side_to_move_feature,
+        "side_to_move_embed_dim": args.side_to_move_embed_dim,
         "device_requested": args.device,
         "phase_weights": {
             "unknown": args.phase_weight_unknown,
@@ -218,9 +286,20 @@ def main() -> None:
         "pin_memory": args.pin_memory,
         "amp": args.amp,
         "restore_best": args.restore_best,
+        "lr_scheduler": args.lr_scheduler,
+        "lr_scheduler_metric": args.lr_scheduler_metric,
+        "lr_plateau_factor": args.lr_plateau_factor,
+        "lr_plateau_patience": args.lr_plateau_patience,
+        "lr_plateau_threshold": args.lr_plateau_threshold,
+        "lr_plateau_min_lr": args.lr_plateau_min_lr,
+        "early_stopping_patience": args.early_stopping_patience,
+        "early_stopping_metric": args.early_stopping_metric,
+        "early_stopping_min_delta": args.early_stopping_min_delta,
         "verbose": args.verbose,
         "progress": args.progress,
         "best_checkpoint": artifact.get("runtime", {}).get("best_checkpoint"),
+        "early_stopping": artifact.get("runtime", {}).get("early_stopping"),
+        "lr_scheduler_runtime": artifact.get("runtime", {}).get("lr_scheduler"),
     }
     write_json(args.metrics_out, summary)
     if args.verbose:

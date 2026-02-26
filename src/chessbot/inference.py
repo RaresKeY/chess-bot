@@ -3,7 +3,8 @@ from typing import Dict, List
 import chess
 import torch
 
-from src.chessbot.model import NextMoveLSTM, encode_tokens, winner_to_id
+from src.chessbot.model import NextMoveLSTM, encode_tokens, side_to_move_id_from_context_len, winner_to_id
+from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_id
 
 
 def parse_context(text: str) -> List[str]:
@@ -37,13 +38,19 @@ def infer_from_artifact(artifact: Dict, context: List[str], winner_side: str, to
     model.load_state_dict(artifact["state_dict"])
     model.eval()
 
+    original_context_len = len(context)
     context_ids = encode_tokens(context, vocab)
+    if not context_ids:
+        context_ids = [vocab.get("<UNK>", 1)]
     tokens = torch.tensor([context_ids], dtype=torch.long)
     lengths = torch.tensor([len(context_ids)], dtype=torch.long)
     winners = torch.tensor([winner_to_id(winner_side)], dtype=torch.long)
+    phase_name = str(classify_context_phase(context).get("phase", PHASE_UNKNOWN))
+    phases = torch.tensor([phase_to_id(phase_name)], dtype=torch.long)
+    side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long)
 
     with torch.no_grad():
-        logits = model(tokens, lengths, winners)
+        logits = model(tokens, lengths, winners, phases, side_to_moves)
         pred_ids = logits.topk(topk, dim=1).indices[0].tolist()
 
     topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]
@@ -68,13 +75,19 @@ def infer_from_artifact_on_device(
     model.load_state_dict(artifact["state_dict"])
     model.eval()
 
+    original_context_len = len(context)
     context_ids = encode_tokens(context, vocab)
+    if not context_ids:
+        context_ids = [vocab.get("<UNK>", 1)]
     tokens = torch.tensor([context_ids], dtype=torch.long, device=device)
     lengths = torch.tensor([len(context_ids)], dtype=torch.long, device=device)
     winners = torch.tensor([winner_to_id(winner_side)], dtype=torch.long, device=device)
+    phase_name = str(classify_context_phase(context).get("phase", PHASE_UNKNOWN))
+    phases = torch.tensor([phase_to_id(phase_name)], dtype=torch.long, device=device)
+    side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        logits = model(tokens, lengths, winners)
+        logits = model(tokens, lengths, winners, phases, side_to_moves)
         pred_ids = logits.topk(topk, dim=1).indices[0].detach().cpu().tolist()
 
     topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]

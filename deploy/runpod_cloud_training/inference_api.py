@@ -49,11 +49,16 @@ class InferenceRuntime:
     def __init__(self, repo_dir: Path, model_path: Path, device_str: str = "auto", verbose: bool = True) -> None:
         _resolve_repo_imports(repo_dir)
         from src.chessbot.inference import best_legal_from_topk
-        from src.chessbot.model import NextMoveLSTM, encode_tokens, winner_to_id
+        from src.chessbot.model import NextMoveLSTM, encode_tokens, side_to_move_id_from_context_len, winner_to_id
+        from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_id
 
         self.best_legal_from_topk = best_legal_from_topk
         self.encode_tokens = encode_tokens
+        self.side_to_move_id_from_context_len = side_to_move_id_from_context_len
         self.winner_to_id = winner_to_id
+        self.classify_context_phase = classify_context_phase
+        self.phase_to_id = phase_to_id
+        self.phase_unknown = PHASE_UNKNOWN
         self.model_cls = NextMoveLSTM
         self.repo_dir = repo_dir
         self.model_path = model_path
@@ -95,14 +100,20 @@ class InferenceRuntime:
     def infer(self, context: List[str], winner_side: str, topk: int) -> dict:
         if not isinstance(context, list) or not all(isinstance(x, str) for x in context):
             raise ValueError("context must be a list of UCI strings")
+        original_context_len = len(context)
         context_ids = self.encode_tokens(context, self.vocab)
         if not context_ids:
             context_ids = [self.unk_id]
         tokens = torch.tensor([context_ids], dtype=torch.long, device=self.device)
         lengths = torch.tensor([len(context_ids)], dtype=torch.long, device=self.device)
         winners = torch.tensor([self.winner_to_id(winner_side)], dtype=torch.long, device=self.device)
+        phase_name = str(self.classify_context_phase(context).get("phase", self.phase_unknown))
+        phases = torch.tensor([self.phase_to_id(phase_name)], dtype=torch.long, device=self.device)
+        side_to_moves = torch.tensor(
+            [self.side_to_move_id_from_context_len(original_context_len)], dtype=torch.long, device=self.device
+        )
         with torch.no_grad():
-            logits = self.model(tokens, lengths, winners)
+            logits = self.model(tokens, lengths, winners, phases, side_to_moves)
             k = max(1, min(int(topk), int(logits.shape[-1])))
             pred_ids = logits.topk(k, dim=1).indices[0].detach().cpu().tolist()
         topk_tokens = [self.inv_vocab.get(i, "") for i in pred_ids]

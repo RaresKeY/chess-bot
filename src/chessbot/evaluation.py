@@ -4,11 +4,19 @@ import chess
 import torch
 from torch.utils.data import DataLoader
 
-from src.chessbot.model import NextMoveLSTM, compute_topk, encode_tokens, winner_to_id
+from src.chessbot.model import (
+    NextMoveLSTM,
+    compute_topk,
+    encode_tokens,
+    side_to_move_id_from_context_len,
+    winner_to_id,
+)
 from src.chessbot.phase import (
+    PHASE_UNKNOWN,
     PHASE_RULE_VERSION,
     board_from_context,
     classify_board_phase,
+    phase_to_id,
     remaining_plies_bucket,
 )
 
@@ -19,10 +27,12 @@ def collate_eval(batch):
     tokens = torch.zeros((len(batch), max_len), dtype=torch.long)
     labels = torch.tensor([x["label"] for x in batch], dtype=torch.long)
     winners = torch.tensor([x["winner"] for x in batch], dtype=torch.long)
+    phases = torch.tensor([x["phase_id"] for x in batch], dtype=torch.long)
+    side_to_moves = torch.tensor([x["side_to_move_id"] for x in batch], dtype=torch.long)
     for i, row in enumerate(batch):
         ctx = row["context_ids"]
         tokens[i, : len(ctx)] = torch.tensor(ctx, dtype=torch.long)
-    return tokens, lengths, labels, winners, batch
+    return tokens, lengths, labels, winners, phases, side_to_moves, batch
 
 
 def _empty_bucket() -> Dict[str, float]:
@@ -114,6 +124,8 @@ def evaluate_artifact(artifact: Dict, rows: List[Dict], batch_size: int = 128, d
                 "context_ids": encode_tokens(row["context"], vocab),
                 "label": vocab.get(row["next_move"], unk),
                 "winner": winner_to_id(row.get("winner_side", "?")),
+                "phase_id": phase_to_id(str(row.get("phase", PHASE_UNKNOWN))),
+                "side_to_move_id": side_to_move_id_from_context_len(len(row.get("context", []))),
             }
         )
 
@@ -141,12 +153,14 @@ def evaluate_artifact(artifact: Dict, rows: List[Dict], batch_size: int = 128, d
     by_remaining: Dict[str, Dict[str, float]] = {}
 
     with torch.no_grad():
-        for tokens, lengths, labels, winners, batch_rows in loader:
+        for tokens, lengths, labels, winners, phases, side_to_moves, batch_rows in loader:
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
-            logits = model(tokens, lengths, winners)
+            phases = phases.to(device, non_blocking=True)
+            side_to_moves = side_to_moves.to(device, non_blocking=True)
+            logits = model(tokens, lengths, winners, phases, side_to_moves)
             metrics = compute_topk(logits, labels, (1, 5))
             bs = labels.size(0)
             n += bs

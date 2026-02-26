@@ -8,7 +8,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from src.chessbot.model import NextMoveLSTM, build_vocab, compute_topk, encode_tokens, winner_to_id
+from src.chessbot.model import (
+    NextMoveLSTM,
+    build_vocab,
+    compute_topk,
+    encode_tokens,
+    side_to_move_id_from_context_len,
+    winner_to_id,
+)
 from src.chessbot.phase import PHASE_MIDDLEGAME, PHASE_OPENING, PHASE_ENDGAME, PHASE_UNKNOWN, phase_to_id
 
 
@@ -26,7 +33,8 @@ class MoveDataset(Dataset):
         label = self.vocab.get(row["next_move"], self.vocab["<UNK>"])
         winner = winner_to_id(row.get("winner_side", "?"))
         phase = phase_to_id(row.get("phase", PHASE_UNKNOWN))
-        return context_ids, label, winner, phase
+        side_to_move = side_to_move_id_from_context_len(len(row.get("context", [])))
+        return context_ids, label, winner, phase, side_to_move
 
 
 class IndexedJsonlDataset(Dataset):
@@ -66,7 +74,8 @@ class IndexedJsonlDataset(Dataset):
         label = self.vocab.get(row["next_move"], self.vocab["<UNK>"])
         winner = winner_to_id(row.get("winner_side", "?"))
         phase = phase_to_id(row.get("phase", PHASE_UNKNOWN))
-        return context_ids, label, winner, phase
+        side_to_move = side_to_move_id_from_context_len(len(row.get("context", [])))
+        return context_ids, label, winner, phase, side_to_move
 
 
 def _build_vocab_and_count_rows_from_train_paths(train_paths: List[str]) -> Tuple[Dict[str, int], Dict[str, int], int]:
@@ -126,17 +135,18 @@ def _index_jsonl_paths(paths: List[str]) -> Tuple[List[str], List[int], List[int
     return path_strs, path_ids, offsets
 
 
-def collate_train(batch: List[Tuple[List[int], int, int, int]]):
+def collate_train(batch: List[Tuple[List[int], int, int, int, int]]):
     lengths = torch.tensor([len(x[0]) for x in batch], dtype=torch.long)
     max_len = int(lengths.max().item())
     tokens = torch.zeros((len(batch), max_len), dtype=torch.long)
     labels = torch.tensor([x[1] for x in batch], dtype=torch.long)
     winners = torch.tensor([x[2] for x in batch], dtype=torch.long)
     phases = torch.tensor([x[3] for x in batch], dtype=torch.long)
+    side_to_moves = torch.tensor([x[4] for x in batch], dtype=torch.long)
 
-    for i, (ctx, _, _, _) in enumerate(batch):
+    for i, (ctx, _, _, _, _) in enumerate(batch):
         tokens[i, : len(ctx)] = torch.tensor(ctx, dtype=torch.long)
-    return tokens, lengths, labels, winners, phases
+    return tokens, lengths, labels, winners, phases, side_to_moves
 
 
 def _build_phase_weight_vector(
@@ -179,6 +189,22 @@ def _example_loss_weights(
     return winner_weights * phase_weights
 
 
+def _metric_value(row: Dict, metric_name: str) -> float:
+    if metric_name not in ("val_loss", "top1"):
+        raise ValueError(f"Unsupported metric: {metric_name}")
+    return float(row.get(metric_name, 0.0))
+
+
+def _metric_improved(metric_name: str, current: float, best: Optional[float], min_delta: float = 0.0) -> bool:
+    if best is None:
+        return True
+    if metric_name == "val_loss":
+        return current < (best - float(min_delta))
+    if metric_name == "top1":
+        return current > (best + float(min_delta))
+    raise ValueError(f"Unsupported metric: {metric_name}")
+
+
 def evaluate_loader(
     model,
     loader,
@@ -195,13 +221,14 @@ def evaluate_loader(
     if phase_weight_vector is None:
         phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=None)
     with torch.no_grad():
-        for tokens, lengths, labels, winners, phases in loader:
+        for tokens, lengths, labels, winners, phases, side_to_moves in loader:
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
             phases = phases.to(device, non_blocking=True)
-            logits = model(tokens, lengths, winners)
+            side_to_moves = side_to_moves.to(device, non_blocking=True)
+            logits = model(tokens, lengths, winners, phases, side_to_moves)
             if criterion is not None:
                 losses = criterion(logits, labels)
                 weights = _example_loss_weights(
@@ -260,6 +287,19 @@ def train_next_move_model(
     pin_memory: bool = True,
     amp: bool = False,
     restore_best: bool = True,
+    use_phase_feature: bool = True,
+    phase_embed_dim: int = 8,
+    use_side_to_move_feature: bool = True,
+    side_to_move_embed_dim: int = 4,
+    lr_scheduler: str = "plateau",
+    lr_scheduler_metric: str = "val_loss",
+    lr_plateau_factor: float = 0.5,
+    lr_plateau_patience: int = 3,
+    lr_plateau_threshold: float = 1e-4,
+    lr_plateau_min_lr: float = 0.0,
+    early_stopping_patience: int = 0,
+    early_stopping_metric: str = "val_loss",
+    early_stopping_min_delta: float = 0.0,
     verbose: bool = True,
     show_progress: bool = True,
 ):
@@ -308,18 +348,55 @@ def train_next_move_model(
         num_layers=num_layers,
         dropout=dropout,
         use_winner=use_winner,
+        use_phase=use_phase_feature,
+        phase_embed_dim=phase_embed_dim,
+        use_side_to_move=use_side_to_move_feature,
+        side_to_move_embed_dim=side_to_move_embed_dim,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    has_val_rows = len(val_rows) > 0
+    scheduler_kind = str(lr_scheduler or "none").strip().lower()
+    scheduler_metric = str(lr_scheduler_metric or "val_loss").strip().lower()
+    scheduler = None
+    if scheduler_kind not in ("none", "plateau"):
+        raise ValueError(f"Unsupported lr_scheduler: {lr_scheduler}")
+    if scheduler_metric not in ("val_loss", "top1"):
+        raise ValueError(f"Unsupported lr_scheduler_metric: {lr_scheduler_metric}")
+    if scheduler_kind == "plateau" and has_val_rows:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=("min" if scheduler_metric == "val_loss" else "max"),
+            factor=float(lr_plateau_factor),
+            patience=max(0, int(lr_plateau_patience)),
+            threshold=float(lr_plateau_threshold),
+            threshold_mode="abs",
+            min_lr=float(lr_plateau_min_lr),
+        )
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
-    has_val_rows = len(val_rows) > 0
     best_state_dict = None
     best_epoch = None
     best_val_loss = None
     best_top1 = None
+    early_stop_metric_name = str(early_stopping_metric or "val_loss").strip().lower()
+    if early_stop_metric_name not in ("val_loss", "top1"):
+        raise ValueError(f"Unsupported early_stopping_metric: {early_stopping_metric}")
+    early_stop_enabled = bool(int(early_stopping_patience) > 0 and has_val_rows)
+    early_stop_best_metric = None
+    early_stop_bad_epochs = 0
+    early_stop_info = {
+        "enabled": bool(int(early_stopping_patience) > 0),
+        "used": False,
+        "metric": early_stop_metric_name,
+        "patience": int(max(0, int(early_stopping_patience))),
+        "min_delta": float(early_stopping_min_delta),
+        "stopped_epoch": None,
+        "best_metric": None,
+        "bad_epochs": 0,
+    }
     if verbose:
         print(
             {
@@ -342,10 +419,29 @@ def train_next_move_model(
                         "endgame": float(phase_weight_vector[3].item()),
                     },
                     "use_winner": use_winner,
+                    "use_phase_feature": bool(use_phase_feature),
+                    "phase_embed_dim": int(phase_embed_dim),
+                    "use_side_to_move_feature": bool(use_side_to_move_feature),
+                    "side_to_move_embed_dim": int(side_to_move_embed_dim),
                     "num_layers": num_layers,
                     "dropout": dropout,
                     "restore_best": bool(restore_best),
                     "restore_best_has_val": bool(has_val_rows),
+                    "lr_scheduler": {
+                        "kind": scheduler_kind,
+                        "metric": scheduler_metric,
+                        "enabled": bool(scheduler is not None),
+                        "factor": float(lr_plateau_factor),
+                        "patience": int(max(0, int(lr_plateau_patience))),
+                        "threshold": float(lr_plateau_threshold),
+                        "min_lr": float(lr_plateau_min_lr),
+                    },
+                    "early_stopping": {
+                        "enabled": early_stop_enabled,
+                        "metric": early_stop_metric_name,
+                        "patience": int(max(0, int(early_stopping_patience))),
+                        "min_delta": float(early_stopping_min_delta),
+                    },
                 }
             }
         )
@@ -358,15 +454,16 @@ def train_next_move_model(
         running_loss = 0.0
         seen = 0
         total_batches = len(train_loader)
-        for batch_idx, (tokens, lengths, labels, winners, phases) in enumerate(train_loader, start=1):
+        for batch_idx, (tokens, lengths, labels, winners, phases, side_to_moves) in enumerate(train_loader, start=1):
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
             phases = phases.to(device, non_blocking=True)
+            side_to_moves = side_to_moves.to(device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model(tokens, lengths, winners)
+                logits = model(tokens, lengths, winners, phases, side_to_moves)
                 losses = criterion(logits, labels)
                 weights = _example_loss_weights(
                     winners=winners,
@@ -400,7 +497,14 @@ def train_next_move_model(
             winner_weight=winner_weight,
             phase_weight_vector=phase_weight_vector,
         )
-        row = {"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics}
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "device": str(device),
+            "amp": use_amp,
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            **val_metrics,
+        }
         history.append(row)
         if verbose:
             print(
@@ -412,6 +516,24 @@ def train_next_move_model(
                     "top5": round(float(row.get("top5", 0.0)), 6),
                 }
             )
+
+        if scheduler is not None:
+            before_lr = float(optimizer.param_groups[0]["lr"])
+            sched_value = _metric_value(row, scheduler_metric)
+            scheduler.step(sched_value)
+            after_lr = float(optimizer.param_groups[0]["lr"])
+            if verbose and after_lr != before_lr:
+                print(
+                    {
+                        "lr_scheduler_step": {
+                            "epoch": epoch,
+                            "metric": scheduler_metric,
+                            "metric_value": round(sched_value, 6),
+                            "lr_before": before_lr,
+                            "lr_after": after_lr,
+                        }
+                    }
+                )
 
         if restore_best and has_val_rows:
             cur_val_loss = float(row.get("val_loss", 0.0))
@@ -436,6 +558,39 @@ def train_next_move_model(
                             }
                         }
                     )
+
+        if early_stop_enabled:
+            cur_metric = _metric_value(row, early_stop_metric_name)
+            if _metric_improved(
+                early_stop_metric_name,
+                cur_metric,
+                early_stop_best_metric,
+                min_delta=float(early_stopping_min_delta),
+            ):
+                early_stop_best_metric = cur_metric
+                early_stop_bad_epochs = 0
+            else:
+                early_stop_bad_epochs += 1
+                if early_stop_bad_epochs >= int(early_stopping_patience):
+                    early_stop_info.update(
+                        {
+                            "used": True,
+                            "stopped_epoch": int(epoch),
+                            "best_metric": float(early_stop_best_metric) if early_stop_best_metric is not None else None,
+                            "bad_epochs": int(early_stop_bad_epochs),
+                        }
+                    )
+                    if verbose:
+                        print({"early_stopping_triggered": early_stop_info})
+                    break
+
+    if early_stop_enabled and not early_stop_info["used"]:
+        early_stop_info.update(
+            {
+                "best_metric": float(early_stop_best_metric) if early_stop_best_metric is not None else None,
+                "bad_epochs": int(early_stop_bad_epochs),
+            }
+        )
 
     best_checkpoint_info = {
         "enabled": bool(restore_best),
@@ -467,11 +622,26 @@ def train_next_move_model(
             "num_layers": num_layers,
             "dropout": dropout,
             "use_winner": use_winner,
+            "use_phase": bool(use_phase_feature),
+            "phase_embed_dim": int(phase_embed_dim),
+            "use_side_to_move": bool(use_side_to_move_feature),
+            "side_to_move_embed_dim": int(side_to_move_embed_dim),
         },
         "runtime": {
             "device": str(device),
             "amp": use_amp,
             "best_checkpoint": best_checkpoint_info,
+            "early_stopping": early_stop_info,
+            "lr_scheduler": {
+                "kind": scheduler_kind,
+                "metric": scheduler_metric,
+                "enabled": bool(scheduler is not None),
+                "factor": float(lr_plateau_factor),
+                "patience": int(max(0, int(lr_plateau_patience))),
+                "threshold": float(lr_plateau_threshold),
+                "min_lr": float(lr_plateau_min_lr),
+                "final_lr": float(optimizer.param_groups[0]["lr"]),
+            },
             "phase_weights": {
                 "unknown": float(phase_weight_vector[0].item()),
                 "opening": float(phase_weight_vector[1].item()),
@@ -503,6 +673,19 @@ def train_next_move_model_from_jsonl_paths(
     pin_memory: bool = True,
     amp: bool = False,
     restore_best: bool = True,
+    use_phase_feature: bool = True,
+    phase_embed_dim: int = 8,
+    use_side_to_move_feature: bool = True,
+    side_to_move_embed_dim: int = 4,
+    lr_scheduler: str = "plateau",
+    lr_scheduler_metric: str = "val_loss",
+    lr_plateau_factor: float = 0.5,
+    lr_plateau_patience: int = 3,
+    lr_plateau_threshold: float = 1e-4,
+    lr_plateau_min_lr: float = 0.0,
+    early_stopping_patience: int = 0,
+    early_stopping_metric: str = "val_loss",
+    early_stopping_min_delta: float = 0.0,
     verbose: bool = True,
     show_progress: bool = True,
 ):
@@ -559,18 +742,55 @@ def train_next_move_model_from_jsonl_paths(
         num_layers=num_layers,
         dropout=dropout,
         use_winner=use_winner,
+        use_phase=use_phase_feature,
+        phase_embed_dim=phase_embed_dim,
+        use_side_to_move=use_side_to_move_feature,
+        side_to_move_embed_dim=side_to_move_embed_dim,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    has_val_rows = len(val_ds) > 0
+    scheduler_kind = str(lr_scheduler or "none").strip().lower()
+    scheduler_metric = str(lr_scheduler_metric or "val_loss").strip().lower()
+    scheduler = None
+    if scheduler_kind not in ("none", "plateau"):
+        raise ValueError(f"Unsupported lr_scheduler: {lr_scheduler}")
+    if scheduler_metric not in ("val_loss", "top1"):
+        raise ValueError(f"Unsupported lr_scheduler_metric: {lr_scheduler_metric}")
+    if scheduler_kind == "plateau" and has_val_rows:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=("min" if scheduler_metric == "val_loss" else "max"),
+            factor=float(lr_plateau_factor),
+            patience=max(0, int(lr_plateau_patience)),
+            threshold=float(lr_plateau_threshold),
+            threshold_mode="abs",
+            min_lr=float(lr_plateau_min_lr),
+        )
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
-    has_val_rows = len(val_ds) > 0
     best_state_dict = None
     best_epoch = None
     best_val_loss = None
     best_top1 = None
+    early_stop_metric_name = str(early_stopping_metric or "val_loss").strip().lower()
+    if early_stop_metric_name not in ("val_loss", "top1"):
+        raise ValueError(f"Unsupported early_stopping_metric: {early_stopping_metric}")
+    early_stop_enabled = bool(int(early_stopping_patience) > 0 and has_val_rows)
+    early_stop_best_metric = None
+    early_stop_bad_epochs = 0
+    early_stop_info = {
+        "enabled": bool(int(early_stopping_patience) > 0),
+        "used": False,
+        "metric": early_stop_metric_name,
+        "patience": int(max(0, int(early_stopping_patience))),
+        "min_delta": float(early_stopping_min_delta),
+        "stopped_epoch": None,
+        "best_metric": None,
+        "bad_epochs": 0,
+    }
     if verbose:
         print(
             {
@@ -593,10 +813,29 @@ def train_next_move_model_from_jsonl_paths(
                         "endgame": float(phase_weight_vector[3].item()),
                     },
                     "use_winner": use_winner,
+                    "use_phase_feature": bool(use_phase_feature),
+                    "phase_embed_dim": int(phase_embed_dim),
+                    "use_side_to_move_feature": bool(use_side_to_move_feature),
+                    "side_to_move_embed_dim": int(side_to_move_embed_dim),
                     "num_layers": num_layers,
                     "dropout": dropout,
                     "restore_best": bool(restore_best),
                     "restore_best_has_val": bool(has_val_rows),
+                    "lr_scheduler": {
+                        "kind": scheduler_kind,
+                        "metric": scheduler_metric,
+                        "enabled": bool(scheduler is not None),
+                        "factor": float(lr_plateau_factor),
+                        "patience": int(max(0, int(lr_plateau_patience))),
+                        "threshold": float(lr_plateau_threshold),
+                        "min_lr": float(lr_plateau_min_lr),
+                    },
+                    "early_stopping": {
+                        "enabled": early_stop_enabled,
+                        "metric": early_stop_metric_name,
+                        "patience": int(max(0, int(early_stopping_patience))),
+                        "min_delta": float(early_stopping_min_delta),
+                    },
                     "data_loading": "indexed_jsonl_on_demand",
                 }
             }
@@ -610,15 +849,16 @@ def train_next_move_model_from_jsonl_paths(
         running_loss = 0.0
         seen = 0
         total_batches = len(train_loader)
-        for batch_idx, (tokens, lengths, labels, winners, phases) in enumerate(train_loader, start=1):
+        for batch_idx, (tokens, lengths, labels, winners, phases, side_to_moves) in enumerate(train_loader, start=1):
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             winners = winners.to(device, non_blocking=True)
             phases = phases.to(device, non_blocking=True)
+            side_to_moves = side_to_moves.to(device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model(tokens, lengths, winners)
+                logits = model(tokens, lengths, winners, phases, side_to_moves)
                 losses = criterion(logits, labels)
                 weights = _example_loss_weights(
                     winners=winners,
@@ -652,7 +892,14 @@ def train_next_move_model_from_jsonl_paths(
             winner_weight=winner_weight,
             phase_weight_vector=phase_weight_vector,
         )
-        row = {"epoch": epoch, "train_loss": train_loss, "device": str(device), "amp": use_amp, **val_metrics}
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "device": str(device),
+            "amp": use_amp,
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            **val_metrics,
+        }
         history.append(row)
         if verbose:
             print(
@@ -664,6 +911,24 @@ def train_next_move_model_from_jsonl_paths(
                     "top5": round(float(row.get("top5", 0.0)), 6),
                 }
             )
+
+        if scheduler is not None:
+            before_lr = float(optimizer.param_groups[0]["lr"])
+            sched_value = _metric_value(row, scheduler_metric)
+            scheduler.step(sched_value)
+            after_lr = float(optimizer.param_groups[0]["lr"])
+            if verbose and after_lr != before_lr:
+                print(
+                    {
+                        "lr_scheduler_step": {
+                            "epoch": epoch,
+                            "metric": scheduler_metric,
+                            "metric_value": round(sched_value, 6),
+                            "lr_before": before_lr,
+                            "lr_after": after_lr,
+                        }
+                    }
+                )
 
         if restore_best and has_val_rows:
             cur_val_loss = float(row.get("val_loss", 0.0))
@@ -688,6 +953,39 @@ def train_next_move_model_from_jsonl_paths(
                             }
                         }
                     )
+
+        if early_stop_enabled:
+            cur_metric = _metric_value(row, early_stop_metric_name)
+            if _metric_improved(
+                early_stop_metric_name,
+                cur_metric,
+                early_stop_best_metric,
+                min_delta=float(early_stopping_min_delta),
+            ):
+                early_stop_best_metric = cur_metric
+                early_stop_bad_epochs = 0
+            else:
+                early_stop_bad_epochs += 1
+                if early_stop_bad_epochs >= int(early_stopping_patience):
+                    early_stop_info.update(
+                        {
+                            "used": True,
+                            "stopped_epoch": int(epoch),
+                            "best_metric": float(early_stop_best_metric) if early_stop_best_metric is not None else None,
+                            "bad_epochs": int(early_stop_bad_epochs),
+                        }
+                    )
+                    if verbose:
+                        print({"early_stopping_triggered": early_stop_info})
+                    break
+
+    if early_stop_enabled and not early_stop_info["used"]:
+        early_stop_info.update(
+            {
+                "best_metric": float(early_stop_best_metric) if early_stop_best_metric is not None else None,
+                "bad_epochs": int(early_stop_bad_epochs),
+            }
+        )
 
     best_checkpoint_info = {
         "enabled": bool(restore_best),
@@ -719,11 +1017,26 @@ def train_next_move_model_from_jsonl_paths(
             "num_layers": num_layers,
             "dropout": dropout,
             "use_winner": use_winner,
+            "use_phase": bool(use_phase_feature),
+            "phase_embed_dim": int(phase_embed_dim),
+            "use_side_to_move": bool(use_side_to_move_feature),
+            "side_to_move_embed_dim": int(side_to_move_embed_dim),
         },
         "runtime": {
             "device": str(device),
             "amp": use_amp,
             "best_checkpoint": best_checkpoint_info,
+            "early_stopping": early_stop_info,
+            "lr_scheduler": {
+                "kind": scheduler_kind,
+                "metric": scheduler_metric,
+                "enabled": bool(scheduler is not None),
+                "factor": float(lr_plateau_factor),
+                "patience": int(max(0, int(lr_plateau_patience))),
+                "threshold": float(lr_plateau_threshold),
+                "min_lr": float(lr_plateau_min_lr),
+                "final_lr": float(optimizer.param_groups[0]["lr"]),
+            },
             "phase_weights": {
                 "unknown": float(phase_weight_vector[0].item()),
                 "opening": float(phase_weight_vector[1].item()),
