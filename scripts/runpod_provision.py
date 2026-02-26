@@ -17,6 +17,39 @@ DEFAULT_KEYRING_SERVICE = "runpod"
 DEFAULT_KEYRING_USERNAME = "RUNPOD_API_KEY"
 
 
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read()
+    except Exception:
+        return ""
+    if not body:
+        return ""
+    try:
+        return body.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _raise_graphql_access_error(exc: urllib.error.HTTPError, *, operation: str) -> None:
+    body = _read_http_error_body(exc).strip()
+    if exc.code == 403:
+        msg = (
+            f"RunPod GraphQL request was denied (HTTP 403) during {operation}. "
+            "This helper uses GraphQL for GPU discovery (`gpuTypes`) and your API key appears to lack GraphQL access/scopes, "
+            "or GraphQL access is restricted for this key/account. "
+            "REST auth may still work (for example `template-list`). "
+            "Fix options: use a RunPod API key with GraphQL access, launch from the RunPod UI template, "
+            "or use `provision --gpu-type-id <gpuTypeId>` to bypass GPU discovery in this helper."
+        )
+        if body:
+            msg += f" Response body: {body}"
+        raise SystemExit(msg)
+    detail = f"RunPod GraphQL request failed (HTTP {exc.code}) during {operation}"
+    if body:
+        detail += f": {body}"
+    raise SystemExit(detail)
+
+
 def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
     parser.add_argument(
         f"--{name}",
@@ -62,8 +95,15 @@ def _http_json(
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, method=method, headers=headers, data=data)
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        payload = resp.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = _read_http_error_body(exc).strip()
+        detail = f"HTTP {exc.code} for {method} {url}"
+        if body:
+            detail += f": {body}"
+        raise SystemExit(detail)
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
@@ -174,7 +214,10 @@ def _gpu_types(api_key: str, *, graphql_endpoint: str = GRAPHQL_BASE) -> List[Di
       }
     }
     """
-    payload = _graphql_json(graphql_endpoint, api_key=api_key, query=query)
+    try:
+        payload = _graphql_json(graphql_endpoint, api_key=api_key, query=query)
+    except urllib.error.HTTPError as exc:
+        _raise_graphql_access_error(exc, operation="gpu-search")
     items = ((payload.get("data") or {}).get("gpuTypes") or [])
     return [x for x in items if isinstance(x, dict)]
 
@@ -326,21 +369,52 @@ def cmd_provision(args: argparse.Namespace) -> int:
     if not api_key:
         raise SystemExit("Missing RunPod API key (use --api-key, env RUNPOD_API_KEY, or keyring)")
 
-    gpu_rows = _gpu_types(api_key, graphql_endpoint=args.graphql_endpoint)
-    ranked_gpus = _rank_gpu_rows(
-        gpu_rows,
-        cloud_type=args.cloud_type,
-        min_memory_gb=args.min_memory_gb,
-        max_hourly_price=args.max_hourly_price,
-    )
-    if args.gpu_type_id:
-        chosen_gpu = next((g for g in ranked_gpus if g["id"] == args.gpu_type_id or g["display_name"] == args.gpu_type_id), None)
+    chosen_gpu: Optional[Dict[str, Any]] = None
+    try:
+        gpu_rows = _gpu_types(api_key, graphql_endpoint=args.graphql_endpoint)
+        ranked_gpus = _rank_gpu_rows(
+            gpu_rows,
+            cloud_type=args.cloud_type,
+            min_memory_gb=args.min_memory_gb,
+            max_hourly_price=args.max_hourly_price,
+        )
+        if args.gpu_type_id:
+            chosen_gpu = next(
+                (g for g in ranked_gpus if g["id"] == args.gpu_type_id or g["display_name"] == args.gpu_type_id),
+                None,
+            )
+            if chosen_gpu is None:
+                raise SystemExit(f"Requested GPU not found in filtered list: {args.gpu_type_id}")
+        else:
+            chosen_gpu = next((g for g in ranked_gpus if g.get("max_gpu_count", 0) >= int(args.gpu_count)), None)
         if chosen_gpu is None:
-            raise SystemExit(f"Requested GPU not found in filtered list: {args.gpu_type_id}")
-    else:
-        chosen_gpu = next((g for g in ranked_gpus if g.get("max_gpu_count", 0) >= int(args.gpu_count)), None)
-    if chosen_gpu is None:
-        raise SystemExit("No GPU candidates available after filters")
+            raise SystemExit("No GPU candidates available after filters")
+    except SystemExit as exc:
+        if args.gpu_type_id and "GraphQL request was denied" in str(exc):
+            chosen_gpu = {
+                "id": str(args.gpu_type_id),
+                "display_name": str(args.gpu_type_id),
+                "memory_gb": None,
+                "cloud_type": str(args.cloud_type).upper(),
+                "max_gpu_count": None,
+                "price_per_hr": None,
+                "spot_price_per_hr": None,
+                "graphql_lookup_skipped": True,
+            }
+            print(
+                json.dumps(
+                    {
+                        "warning": {
+                            "message": "GraphQL GPU discovery unavailable; proceeding with explicit --gpu-type-id without validation",
+                            "gpu_type_id": str(args.gpu_type_id),
+                        }
+                    },
+                    ensure_ascii=True,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            raise
 
     templates = _list_templates(
         api_key,
@@ -473,7 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     _bool_arg(
         p_prov,
         "use-runpod-training-preset-env",
-        True,
+        False,
         "Inject common defaults for this repo's RunPod training/inference services",
     )
     _bool_arg(

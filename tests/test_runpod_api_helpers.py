@@ -1,10 +1,12 @@
 import io
 import json
+import argparse
+import urllib.error
 import unittest
 from unittest import mock
 
 from deploy.runpod_cloud_training.idle_watchdog import _stop_runpod_pod
-from scripts.runpod_provision import _choose_template, _graphql_json, _rank_gpu_rows
+from scripts.runpod_provision import _choose_template, _gpu_types, _graphql_json, _rank_gpu_rows, build_parser, cmd_provision
 
 
 class _BytesResponse:
@@ -67,6 +69,72 @@ class RunpodApiHelperTests(unittest.TestCase):
         ]
         chosen = _choose_template(templates, template_name="chess bot")
         self.assertEqual(chosen["id"], "t2")
+
+    def test_gpu_types_403_raises_actionable_message(self):
+        err = urllib.error.HTTPError(
+            url="https://api.runpod.io/graphql",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"forbidden"}'),
+        )
+        with mock.patch("scripts.runpod_provision._graphql_json", side_effect=err):
+            with self.assertRaises(SystemExit) as ctx:
+                _gpu_types("SECRET")
+        msg = str(ctx.exception)
+        self.assertIn("GraphQL request was denied", msg)
+        self.assertIn("provision --gpu-type-id", msg)
+
+    def test_provision_can_fallback_with_explicit_gpu_type_id_when_graphql_denied(self):
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            rest_base="https://rest.runpod.io/v1",
+            graphql_endpoint="https://api.runpod.io/graphql",
+            verbose=False,
+            name="test-pod",
+            cloud_type="SECURE",
+            gpu_count=1,
+            gpu_type_id="gpu_explicit_123",
+            min_memory_gb=24,
+            max_hourly_price=3.0,
+            template_id="",
+            template_name="chess-bot-training",
+            include_runpod_templates=True,
+            include_public_templates=True,
+            ports=[],
+            volume_mount_path="/workspace",
+            volume_in_gb=40,
+            container_disk_in_gb=15,
+            env=[],
+            use_runpod_training_preset_env=False,
+            support_public_ip_auto=True,
+            wait_ready=False,
+            wait_timeout_seconds=30,
+            wait_poll_seconds=5,
+        )
+        with mock.patch("scripts.runpod_provision._resolve_api_key", return_value="SECRET"), mock.patch(
+            "scripts.runpod_provision._gpu_types",
+            side_effect=SystemExit("RunPod GraphQL request was denied (HTTP 403) during gpu-search"),
+        ), mock.patch(
+            "scripts.runpod_provision._list_templates",
+            return_value=[{"id": "tpl1", "name": "chess-bot-training", "imageName": "ghcr.io/x/y:latest"}],
+        ), mock.patch(
+            "scripts.runpod_provision._create_pod",
+            return_value={"id": "pod_123"},
+        ) as create_mock, mock.patch(
+            "scripts.runpod_provision._print_json"
+        ):
+            rc = cmd_provision(args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(create_mock.call_args.kwargs["gpu_type_ids"], ["gpu_explicit_123"])
+
+    def test_provision_preset_env_injection_is_opt_in_by_default(self):
+        parser = build_parser()
+        args = parser.parse_args(["provision"])
+        self.assertFalse(args.use_runpod_training_preset_env)
 
 
 if __name__ == "__main__":

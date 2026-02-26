@@ -40,6 +40,9 @@ if [[ -z "${IMAGE_REPO}" ]]; then
   exit 1
 fi
 
+IMAGE_REPO_ORIG="${IMAGE_REPO}"
+IMAGE_REPO="${IMAGE_REPO,,}"
+
 if [[ ! -f "${DOCKERFILE}" ]]; then
   echo "[runpod-image] Dockerfile not found: ${DOCKERFILE}" >&2
   exit 1
@@ -56,6 +59,9 @@ fi
 TAG1="${IMAGE_REPO}:${IMAGE_TAG}"
 TAG2="${IMAGE_REPO}:${IMAGE_LATEST_TAG}"
 
+if [[ "${IMAGE_REPO}" != "${IMAGE_REPO_ORIG}" ]]; then
+  echo "[runpod-image] normalized IMAGE_REPO to lowercase: ${IMAGE_REPO_ORIG} -> ${IMAGE_REPO}"
+fi
 echo "[runpod-image] repo=${IMAGE_REPO}"
 echo "[runpod-image] tags=${TAG1}, ${TAG2}"
 echo "[runpod-image] dockerfile=${DOCKERFILE}"
