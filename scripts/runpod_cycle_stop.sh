@@ -15,8 +15,8 @@ runpod_cycle_require_cmd curl
 
 POD_ID="${RUNPOD_POD_ID:-$(runpod_cycle_pod_id "${PROVISION_JSON}")}"
 GRAPHQL_ENDPOINT="${RUNPOD_GRAPHQL_ENDPOINT:-https://api.runpod.io/graphql}"
-TOKEN="$(runpod_cycle_keyring_token "${PY_BIN}")"
-[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-stop] missing RunPod API token in keyring" >&2; exit 1; }
+TOKEN="$(runpod_cycle_api_token "${PY_BIN}")"
+[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-stop] missing RunPod API token (set RUNPOD_API_KEY or keyring runpod/RUNPOD_API_KEY)" >&2; exit 1; }
 [[ -n "${POD_ID}" ]] || { echo "[runpod-cycle-stop] missing pod id (set RUNPOD_POD_ID or provide provision json)" >&2; exit 1; }
 
 mkdir -p "${CYCLE_DIR}"

@@ -13,11 +13,15 @@ mkdir -p "${LOGS_DIR}"
 
 runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd rsync
+runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
 SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
 SSH_KEY="$(runpod_cycle_ssh_key)"
 SSH_USER="$(runpod_cycle_ssh_user)"
+SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
+SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
+SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
 
 REMOTE_REPO_DIR="${RUNPOD_REMOTE_REPO_DIR:-$(runpod_cycle_remote_repo_dir "${PROVISION_JSON}")}"
 REMOTE_RUN_DIR="${REMOTE_REPO_DIR}/artifacts/runpod_cycles/${RUN_ID}"
@@ -28,7 +32,8 @@ RSYNC_TIMING_LOG="${LOGS_DIR}/collect_rsync_timing.log"
 
 mkdir -p "${LOCAL_COLLECT_DIR}"
 
-RSYNC_SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/runpod_known_hosts"
+printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
+  "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
 
 {
   printf '[runpod-cycle-collect] ssh=%s@%s:%s\n' "${SSH_USER}" "${SSH_HOST}" "${SSH_PORT}"

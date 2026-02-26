@@ -18,6 +18,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_stop.sh`
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
 - `scripts/runpod_cycle_full_smoke.sh`
+- `scripts/runpod_cycle_watch_progress.sh`
+- `scripts/runpod_cycle_full_train_hf.sh`
+- `scripts/runpod_cycle_summarize_gpu_observations.py`
+- `scripts/runpod_full_train_easy.sh`
 - `scripts/hf_dataset_publish.py`
 - `scripts/hf_dataset_fetch.py`
 - Runtime pod interfaces used by operators:
@@ -138,16 +142,37 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - runs local CPU inference (`scripts/infer_move.py`) on the collected `.pt` artifact and saves output
   - exports local `PYTHONPATH=${REPO_ROOT}` before invoking `scripts/infer_move.py` so direct script execution resolves `src.*` imports reliably on the host
 - `scripts/runpod_cycle_stop.sh`
-  - cleanly requests pod stop via RunPod GraphQL `podStop` using keyring-backed token and saved `pod_id`
+  - cleanly requests pod stop via RunPod GraphQL `podStop` using RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), plus saved `pod_id`
   - stop mutation payload now requests object subfields (`id`, `desiredStatus`) to match the current GraphQL schema and avoid validation failures
   - appends a `STOPPED` record to the tracked pod registry for operator bookkeeping
   - note: `stop` halts compute but does not delete the pod; storage charges can still apply until termination
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
   - safe cleanup utility to terminate (delete) all pods tracked by our scripts whose latest tracked state is not `TERMINATED`
   - requires explicit confirmation (`--yes` or `RUNPOD_CONFIRM_TERMINATE_ALL=YES`)
-  - uses RunPod REST `DELETE /pods/<id>` and appends `TERMINATED` registry records on success
+  - uses RunPod REST `DELETE /pods/<id>` with RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), and appends `TERMINATED` registry records on success
+  - treats RunPod REST `404` responses that clearly indicate `pod not found to terminate` as an "already gone" reconciliation case (records local `TERMINATED` instead of failing the whole cleanup)
 - `scripts/runpod_cycle_full_smoke.sh`
   - orchestration wrapper that composes the modular scripts in order (start -> push -> train -> collect -> local-validate -> stop)
+- `scripts/runpod_cycle_watch_progress.sh`
+  - keeps a single SSH session open to stream remote JSONL progress snapshots and renders a local epoch progress bar using machine-readable events from `scripts/train_baseline.py --progress-jsonl-out`
+  - watches a remote `train_exit_code.txt` sentinel and exits with the same code
+  - scans snapshot tails for the latest valid JSON progress event (avoids getting stuck when the newest tailed line is partial/non-JSON)
+  - supports manual PTY allocation via `RUNPOD_SSH_FORCE_TTY=1` when a host environment requires it
+  - handles `Ctrl-C`/`SIGTERM` by restoring TTY state and stopping local child watcher processes to reduce terminal corruption/noisy leftover streams
+- `scripts/runpod_cycle_full_train_hf.sh`
+  - sequential host-side orchestration for a full HF-backed training run: GPU selection (`gpu-search` with fallback), start pod, remote HF fetch, remote context probe/spec suggestions, async remote training, local progress watch, collect artifacts, stop pod
+  - runs a remote GPU sampler during training and writes per-run pre-train and post-run GPU/dataset/parameter observation artifacts for tuning future runs
+  - writes a quick local play-test command (`.venv/bin/python main.py --model <collected model>`) into the run directory after collection
+  - remote training launcher now prefers the repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over the image-baked `/opt/...` copy to avoid stale image-script behavior
+  - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
+  - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
+- `scripts/runpod_cycle_summarize_gpu_observations.py`
+  - aggregates `gpu_full_training_observation_*.json` artifacts across runs, groups by GPU SKU, and emits heuristic next-run override suggestions (batch size / workers)
+  - supports JSON and Markdown summary outputs for operator notes/spec updates
+- `scripts/runpod_full_train_easy.sh`
+  - one-command opinionated wrapper around `runpod_cycle_full_train_hf.sh`
+  - auto-generates a temporary no-passphrase SSH key under `/tmp`, injects it for provisioning, and sets default HF repo / 100-epoch / GPU settings so the operator can run without export-heavy setup
+  - tightens temp-key handling by forcing `0600` permissions on the generated private key
 
 ## Tracked Pod Registry
 - Default file: `config/runpod_tracked_pods.jsonl`
@@ -161,15 +186,15 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 
 ## Running Pod Control (CLI)
 - SSH into the pod using RunPod-provided connection info (port `22/tcp`)
-- RunPod SSH gateway command (for example `ssh <podid>-<route>@ssh.runpod.io -i ~/.ssh/id_ed25519`) can work even when direct `runner@<public-ip>:<mapped-port>` auth fails due template `AUTHORIZED_KEYS` mismatch or formatting issues
-- Modular cycle scripts support SSH gateway overrides via:
-  - `RUNPOD_SSH_USER` (for example `<podid>-<route>`)
-  - `RUNPOD_SSH_HOST` (for example `ssh.runpod.io`)
-  - `RUNPOD_SSH_PORT` (default `22` for gateway)
+- For direct mapped SSH on this image, use `runner@<public-ip>:<mapped-port>` (not `root@...`): `sshd` is configured with `PermitRootLogin no` and `AllowUsers runner`
+- SSH client security defaults for lifecycle scripts:
+  - host key checking now defaults to `StrictHostKeyChecking=accept-new` (override with `RUNPOD_SSH_HOST_KEY_CHECKING=yes|no|accept-new`)
+  - known hosts are persisted in `config/runpod_known_hosts` by default (override with `RUNPOD_SSH_KNOWN_HOSTS_FILE`)
+  - this replaces the older `/tmp/runpod_known_hosts` + `StrictHostKeyChecking=no` behavior
 - Jupyter is exposed on HTTP port `8888`
 - Inference API is exposed on HTTP port `8000`
 - Common operator commands after connect:
-  - `bash /opt/runpod_cloud_training/train_baseline_preset.sh`
+  - `bash "$REPO_DIR/deploy/runpod_cloud_training/train_baseline_preset.sh"` (preferred; repo copy can be newer than image-baked `/opt/...` script)
   - `curl http://127.0.0.1:8000/healthz`
   - `tail -f /workspace/chess-bot/artifacts/timings/runpod_phase_times.jsonl`
 - Data/artifact transfer options:
@@ -184,12 +209,21 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `bash scripts/runpod_cycle_full_smoke.sh`
   - ends with `stop` only (compute halt), not termination/deletion
   - current smoke defaults intentionally disable optional pod services (Jupyter/inference/HF-watchdog/idle-watchdog) unless explicitly overridden, to prevent `entrypoint.sh` `wait -n` child-exit cleanup from killing `sshd` during the CLI smoke
+- Full sequential HF training cycle (100-epoch-oriented wrapper with local progress bar):
+  - `export RUNPOD_HF_DATASET_REPO_ID='LogicLark-QuantumQuill/chess-bot-datasets'`
+  - optional GPU/cost overrides: `RUNPOD_GPU_TYPE_ID`, `RUNPOD_GPU_MIN_MEMORY_GB`, `RUNPOD_GPU_MAX_HOURLY_PRICE`
+  - `bash scripts/runpod_cycle_full_train_hf.sh`
+  - wrapper currently fetches HF datasets first, writes remote context/spec-suggestion artifacts (dataset rows/size + GPU/VRAM snapshot + suggested params), runs async training with progress JSONL + GPU sampling, collects artifacts, and stops the pod
+- One-command "just run it" wrapper (same full flow, opinionated defaults):
+  - `bash scripts/runpod_full_train_easy.sh`
+  - defaults:
+    - HF repo `LogicLark-QuantumQuill/chess-bot-datasets`
+    - `RUNPOD_FULL_TRAIN_EPOCHS=100`
+    - community GPU with explicit default `NVIDIA RTX 6000 Ada Generation`
+    - temporary no-passphrase SSH key under `/tmp/chessbot_runpod_temp_id_ed25519`
+  - operator can still override by env, but no flags/params are required for the default path
 - For larger/reused validated datasets, prefer publishing once to a HF dataset repo and fetching into the pod/volume cache, instead of repeated host->pod `rsync` uploads
 - Stepwise modular flow:
-  - If using the RunPod SSH gateway, export gateway overrides before steps 2-4:
-    - `export RUNPOD_SSH_USER='<podid>-<route>'`
-    - `export RUNPOD_SSH_HOST='ssh.runpod.io'`
-    - `export RUNPOD_SSH_PORT=22`
   1. `bash scripts/runpod_cycle_start.sh`
   2. `bash scripts/runpod_cycle_push_dataset.sh`
   3. `bash scripts/runpod_cycle_train.sh`
@@ -209,10 +243,46 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `artifacts/runpod_cycles/<run_id>/logs/*` (persisted command/transfer logs for cycle steps)
   - `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/*`
   - `artifacts/runpod_cycles/<run_id>/local_validation/infer_move_output.txt`
+  - `artifacts/runpod_cycles/<run_id>/quick_play_command.txt` (written by `runpod_cycle_full_train_hf.sh`)
+  - `artifacts/runpod_cycles/<run_id>/spec_suggestions/*.json|*.md` (post-run local summaries for GPU/dataset/VRAM/param tuning)
   - examples under `logs/`:
     - `push_dataset_ready_check.log`, `push_dataset_rsync.log`
     - `train_ready_check.log`, `train_remote_ssh.log`
     - `collect_rsync_run_artifacts.log`, `collect_rsync_timing.log`
+    - `gpu_search.log`, `hf_fetch_remote.log`, `context_probe_remote.log`, `train_launch_remote.log`, `train_progress_watch.log` (sequential HF full-training flow)
+
+## Sequential HF Full-Training Artifact Contract (new wrapper)
+- Remote artifacts under `${REPO_DIR}/artifacts/runpod_cycles/<run_id>/` (collected into `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/`):
+  - `hf_dataset_fetch_manifest.json` (aggregate HF fetch manifest reused for training)
+  - `context_probe_<run_id>.json` (pre-train dataset size/row counts + GPU/VRAM + torch runtime context)
+  - `spec_suggestions_gpu_training_<run_id>.json|.md` (pre-train GPU-specific parameter suggestions for future spec tuning)
+  - `train_progress_<run_id>.jsonl` (epoch-level machine-readable progress events)
+  - `gpu_usage_samples_<run_id>.csv` (timestamped GPU util + memory samples collected during training)
+  - `train_stdout_<run_id>.log`, `train_exit_code.txt`, `train_pid.txt`
+  - `model_<run_id>.pt`, `metrics_<run_id>.json`
+- Local post-run observation artifacts (generated after collect):
+  - `artifacts/runpod_cycles/<run_id>/spec_suggestions/gpu_full_training_observation_<run_id>.json|.md`
+  - summarize dataset size/rows, peak GPU memory/util observed, training epochs/metrics, and next-run tuning notes
+- Cross-run follow-up summarization:
+  - `python scripts/runpod_cycle_summarize_gpu_observations.py --output-json artifacts/reports/runpod_gpu_observation_summary.json --output-md artifacts/reports/runpod_gpu_observation_summary.md`
+  - use the grouped GPU recommendations to set future `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` / `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE`
+- Intended operator workflow:
+  - use pre-train `spec_suggestions_gpu_training_*` to choose initial batch size/workers for the run
+  - use post-run `gpu_full_training_observation_*` to refine future per-GPU defaults (especially batch size vs peak VRAM)
+
+## Observed Real Training Run Tuning (2026-02-26, RTX 6000 Ada)
+- Pods successfully provisioned on `NVIDIA RTX 6000 Ada Generation` using the current template/image, but direct mapped SSH (`runner@<public-ip>:<mapped-port>`) repeatedly reset during key exchange across multiple fresh pods.
+- During a real HF aggregate training run (`elite_2025-10_cap4` + `elite_2025-11_cap4`; ~1,511,216 train rows / 188,811 val rows):
+  - `batch_size=2048`, `num_workers=6` showed low VRAM usage (~14 GB / 48 GB) with high-but-variable GPU utilization
+  - rerun with `batch_size=8192`, `num_workers=12` increased VRAM usage to ~34 GB / 48 GB and sustained ~99% GPU utilization (better hardware saturation)
+- Practical tuning implication (current observed-good starting point for this GPU + dataset scale):
+  - prefer `TRAIN_BATCH_SIZE=8192`, `TRAIN_NUM_WORKERS=12` (or `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE=8192`, `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE=12`) and then refine from collected run telemetry
+
+## Current Working Operator Path (2026-02-26)
+- Most reliable manual flow on the observed host:
+  - connect via direct mapped SSH (`runner@<public-ip>:<mapped-port>`)
+  - start training inside the pod using the repo preset (`$REPO_DIR/deploy/runpod_cloud_training/train_baseline_preset.sh`)
+  - run host-side watcher/collect/stop scripts with the same direct SSH mapping
 
 ## Provisioning Helper Defaults (2026-02-26 update)
 - `provision --use-runpod-training-preset-env` is now **opt-in** (default disabled)
@@ -236,12 +306,6 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 
 ## Observed SSH Access Recovery (2026-02-26)
 - Direct SSH to mapped pod port reached auth but failed with `Permission denied (publickey)` (template-side `AUTHORIZED_KEYS` issue suspected)
-- RunPod-provided SSH gateway command succeeded:
-  - `ssh 4rgfwq4u8cbodn-64410e24@ssh.runpod.io -i ~/.ssh/id_ed25519`
-- Resulting shell landed as `root` inside the container (`root@...:/#`)
-- Practical implication:
-  - operators can continue the lifecycle via gateway SSH while fixing template `AUTHORIZED_KEYS`
-  - for lifecycle scripts, set `RUNPOD_SSH_USER/HOST/PORT` to the gateway endpoint
 - Additional root cause found during follow-up debugging:
   - even with correct `/home/runner/.ssh/authorized_keys`, direct mapped `runner@<ip>:<port>` can still be denied when the `runner` account is locked by default (`useradd` on Ubuntu)
   - deployment flow now fixes this automatically by unlocking `runner` at image build/startup while keeping `PasswordAuthentication no`
@@ -252,7 +316,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - Direct mapped SSH still failed with `Permission denied (publickey)` on newly provisioned pods even when the provision payload showed the expected public key in `AUTHORIZED_KEYS`/`PUBLIC_KEY`.
 - Practical implication:
   - full CLI smoke could not progress past `runpod_cycle_push_dataset.sh` without a working SSH path
-  - operator should use the RunPod UI SSH gateway command (`ssh <podid>-<route>@ssh.runpod.io`) and export `RUNPOD_SSH_USER/HOST/PORT` to continue modular cycle steps, or update the template/image to a build that unlocks `runner`
+  - operator should use a template/image build with working direct SSH (`runner`) to continue modular cycle steps
   - after failed runs, issue `stop` first to halt compute, then use the tracked terminate script when you want deletion cleanup
 - Additional API diagnostic from the same date:
   - `scripts/runpod_cli_doctor.sh` reported GraphQL denial, but direct `curl` GraphQL probes (`myself`, `gpuTypes`) succeeded with the same key

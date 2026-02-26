@@ -73,8 +73,8 @@ if [[ "${CONFIRM}" != "YES" ]]; then
   exit 2
 fi
 
-TOKEN="$(runpod_cycle_keyring_token "${PY_BIN}")"
-[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-terminate-all] missing RunPod API token in keyring" >&2; exit 1; }
+TOKEN="$(runpod_cycle_api_token "${PY_BIN}")"
+[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-terminate-all] missing RunPod API token (set RUNPOD_API_KEY or keyring runpod/RUNPOD_API_KEY)" >&2; exit 1; }
 
 LOG_DIR="${REPO_ROOT}/artifacts/reports"
 mkdir -p "${LOG_DIR}"
@@ -83,6 +83,17 @@ LOG_JSONL="${LOG_DIR}/runpod_terminate_all_tracked_${RUN_TS}.jsonl"
 
 failures=0
 terminated=0
+reconciled_already_gone=0
+
+is_already_gone_terminate_404() {
+  local http_code="$1"
+  local resp_body="$2"
+  [[ "${http_code}" == "404" ]] || return 1
+  [[ -n "${resp_body}" ]] || return 1
+  local body_lc
+  body_lc="$(printf '%s' "${resp_body}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${body_lc}" == *"pod"* && "${body_lc}" == *"not found"* && "${body_lc}" == *"terminate"* ]]
+}
 
 for line in "${CANDIDATE_LINES[@]}"; do
   IFS=$'\t' read -r pod_id state pod_name run_id ts_utc <<<"${line}"
@@ -126,6 +137,21 @@ for line in "${CANDIDATE_LINES[@]}"; do
       "" \
       "" \
       "Deleted via REST DELETE /pods/{id}; log=${LOG_JSONL}"
+  elif is_already_gone_terminate_404 "${http_code}" "${resp_body}"; then
+    reconciled_already_gone=$((reconciled_already_gone + 1))
+    runpod_cycle_registry_record \
+      "${REPO_ROOT}" \
+      "runpod_cycle_terminate_all_tracked.sh" \
+      "terminate_reconcile" \
+      "TERMINATED" \
+      "${pod_id}" \
+      "${run_id}" \
+      "${pod_name}" \
+      "" \
+      "" \
+      "" \
+      "DELETE returned 404 pod not found; treated as already terminated and reconciled locally; log=${LOG_JSONL}"
+    echo "[runpod-cycle-terminate-all] pod_id=${pod_id} already absent on RunPod (404); reconciled local state"
   else
     failures=$((failures + 1))
     runpod_cycle_registry_record \
@@ -144,7 +170,7 @@ for line in "${CANDIDATE_LINES[@]}"; do
   fi
 done
 
-echo "[runpod-cycle-terminate-all] terminated=${terminated} failures=${failures} log=${LOG_JSONL}"
+echo "[runpod-cycle-terminate-all] terminated=${terminated} reconciled_already_gone=${reconciled_already_gone} failures=${failures} log=${LOG_JSONL}"
 if [[ "${failures}" -gt 0 ]]; then
   exit 1
 fi

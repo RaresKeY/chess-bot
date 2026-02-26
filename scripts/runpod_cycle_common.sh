@@ -63,6 +63,15 @@ print((keyring.get_password("runpod", "RUNPOD_API_KEY") or "").strip())
 PY
 }
 
+runpod_cycle_api_token() {
+  local py_bin="$1"
+  if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
+    printf '%s\n' "${RUNPOD_API_KEY}"
+    return 0
+  fi
+  runpod_cycle_keyring_token "${py_bin}"
+}
+
 runpod_cycle_pod_field() {
   local pod_json="$1"
   local jq_expr="$2"
@@ -115,19 +124,49 @@ runpod_cycle_ssh_key() {
   printf '%s\n' "${RUNPOD_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 }
 
+runpod_cycle_ssh_host_key_checking() {
+  local mode="${RUNPOD_SSH_HOST_KEY_CHECKING:-accept-new}"
+  case "${mode}" in
+    yes|no|accept-new) ;;
+    *)
+      echo "[runpod-cycle] invalid RUNPOD_SSH_HOST_KEY_CHECKING='${mode}' (expected yes|no|accept-new)" >&2
+      exit 1
+      ;;
+  esac
+  printf '%s\n' "${mode}"
+}
+
+runpod_cycle_ssh_known_hosts_file() {
+  local repo_root="$1"
+  printf '%s\n' "${RUNPOD_SSH_KNOWN_HOSTS_FILE:-${repo_root}/config/runpod_known_hosts}"
+}
+
+runpod_cycle_prepare_ssh_client_files() {
+  local repo_root="$1"
+  local known_hosts
+  known_hosts="$(runpod_cycle_ssh_known_hosts_file "${repo_root}")"
+  mkdir -p "$(dirname "${known_hosts}")"
+  touch "${known_hosts}"
+  chmod 600 "${known_hosts}" 2>/dev/null || true
+}
+
 runpod_cycle_ssh_base_args() {
-  local pod_json="$1"
+  local repo_root="$1"
+  local pod_json="$2"
   local host port key user
   host="$(runpod_cycle_ssh_host "${pod_json}")"
   port="$(runpod_cycle_ssh_port "${pod_json}")"
   user="$(runpod_cycle_ssh_user)"
   key="$(runpod_cycle_ssh_key)"
+  local host_key_checking known_hosts
+  host_key_checking="$(runpod_cycle_ssh_host_key_checking)"
+  known_hosts="$(runpod_cycle_ssh_known_hosts_file "${repo_root}")"
   printf '%q ' \
     ssh \
     -i "${key}" \
     -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/tmp/runpod_known_hosts \
+    -o "StrictHostKeyChecking=${host_key_checking}" \
+    -o "UserKnownHostsFile=${known_hosts}" \
     -p "${port}" \
     "${user}@${host}"
 }

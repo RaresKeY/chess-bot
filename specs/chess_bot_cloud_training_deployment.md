@@ -32,8 +32,9 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - FastAPI/uvicorn inference endpoint (`/healthz`, `/infer`)
 - Optional Hugging Face artifact auto-sync watcher
 - Optional idle watchdog for autostop behavior
-- Operators may also access the running pod through the RunPod SSH gateway command (`ssh <podid>-<route>@ssh.runpod.io`) instead of direct mapped `22/tcp`
+- Host-side cycle scripts now default to safer SSH client behavior (`StrictHostKeyChecking=accept-new` with persistent `config/runpod_known_hosts`) instead of the older insecure `/tmp` + host-key-checking-disabled pattern; overrides remain available via `RUNPOD_SSH_HOST_KEY_CHECKING` and `RUNPOD_SSH_KNOWN_HOSTS_FILE`
 - Entrypoint now explicitly unlocks the `runner` account (while keeping password auth disabled) so Ubuntu/Debian `sshd` accepts public-key auth for direct mapped SSH
+- Direct mapped SSH is intended for the `runner` user; `entrypoint.sh` configures `PermitRootLogin no` and `AllowUsers runner`, so `root@<public-ip>:<mapped-port>` public-key login is expected to fail
 - Entrypoint uses `wait -n` to supervise services; if any enabled child process exits, cleanup can stop the remaining services (including `sshd`)
 
 ## Repo Bootstrap Behavior
@@ -79,20 +80,22 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Entry-point startup now skips launching the inference API (with a log message) when `torch` is not installed in the image/runtime venv, avoiding a full container restart loop during smoke/provisioning scenarios
 
 ## RunPod Training Preset Launcher
-- `train_baseline_preset.sh` provides a one-command training path inside the container (`bash /opt/runpod_cloud_training/train_baseline_preset.sh`)
+- `train_baseline_preset.sh` provides a one-command training path inside the container (image-baked path: `bash /opt/runpod_cloud_training/train_baseline_preset.sh`)
+- In active RunPod pod workflows, prefer the repo copy when available (`bash "$REPO_DIR/deploy/runpod_cloud_training/train_baseline_preset.sh"`) because the repo clone can be newer than the image-baked `/opt/...` script (avoids stale feature behavior)
 - Auto-detects latest dataset dir under `data/dataset/` containing `train.jsonl` + `val.jsonl` when `TRAIN_DATASET_DIR` / `TRAIN_PATH` / `VAL_PATH` are not set
 - Supports optional HF dataset bootstrap mode for reusable datasets:
   - `HF_FETCH_LATEST_ALL_DATASETS=1` fetches the latest published version of every dataset under `HF_DATASET_REPO_ID` + `HF_DATASET_PATH_PREFIX`
   - fetched datasets are extracted under `HF_DATASET_CACHE_DIR`
   - the preset aggregates all discovered `train.jsonl` and `val.jsonl` files and passes them to `scripts/train_baseline.py` via repeated `--train` / `--val` flags
   - fetch summary manifest is written to `HF_DATASET_FETCH_MANIFEST`
+  - `HF_USE_EXISTING_FETCH_MANIFEST=1` lets the preset reuse a previously-created aggregate fetch manifest (skip a second HF fetch and train from the cached dataset set)
   - "latest" selection is lexicographic on the version path segment, so sortable version labels (for example timestamp-prefixed `validated-YYYYMMDDTHHMMSSZ`) are recommended
 - Uses current repo baseline architecture/training defaults:
   - `embed_dim=256`, `hidden_dim=512`, `num_layers=2`, `dropout=0.15`
   - `epochs=40`, `lr=2e-4`
   - phase + side-to-move features enabled
   - `ReduceLROnPlateau` + early stopping enabled (preset patience/min-delta values)
-- Supports env overrides for dataset paths, output paths, batch size/worker count, endgame phase weight, and arbitrary extra train flags (`TRAIN_EXTRA_ARGS`)
+- Supports env overrides for dataset paths, output paths, batch size/worker count, endgame phase weight, optional progress event stream path (`TRAIN_PROGRESS_JSONL_OUT`), and arbitrary extra train flags (`TRAIN_EXTRA_ARGS`)
 - Emits timing records to the shared phase timing JSONL (`resolve_dataset_paths`, `train_baseline`) with `source=runpod_train_preset`
 
 ## Phase Timing Logging Convention
@@ -110,6 +113,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - `train_baseline_preset.sh` logs dataset resolution + training command runtime
 - `scripts/runpod_local_smoke_test.sh` logs host-side phases (`prepare_smoke_dataset`, `docker_run_smoke_training`) and passes the same `run_id` into the container
 - `scripts/runpod_local_smoke_test.sh` now pre-creates/chmods the shared timing log file before `docker run` to improve append compatibility for local rootless Docker bind mounts (and logs `prepare_timing_log_file`)
+- `scripts/runpod_local_smoke_test.sh` supports optional `SMOKE_PROGRESS_JSONL_OUT` passthrough to set `TRAIN_PROGRESS_JSONL_OUT` in the container for progress-event producer smoke checks
 
 ## Local Timing Sample (2026-02-25)
 - Timing log path: `artifacts/timings/runpod_phase_times.jsonl`
@@ -175,6 +179,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - For host-side smoke/lifecycle validation, disabling optional services (Jupyter/inference/HF-watchdog/idle-watchdog) can improve SSH stability because a single child-process exit otherwise tears down `sshd`
 - First local Docker smoke run can be slow when `SYNC_REQUIREMENTS_ON_START=1` because the image venv intentionally installs repo `requirements.txt` (including `torch`) at startup when the repo requirements hash is not yet stamped
 - If `START_INFERENCE_API=1` and `torch` is missing from the deployment venv, the inference API itself remains unavailable until repo requirement sync installs `torch`; entrypoint now degrades by skipping API start instead of crashing the container
+- Image-vs-repo script version skew is possible for `train_baseline_preset.sh` if the image was built before newer HF/progress features landed in the repo; operator flows should prefer the repo copy for the latest behavior
 
 ## Observed RunPod Failure + Fix (2026-02-26)
 - Observed on a community GPU smoke pod (`NVIDIA GeForce RTX 4090`) provisioned from template `chess-bot-training`

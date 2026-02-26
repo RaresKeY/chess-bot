@@ -12,12 +12,16 @@ mkdir -p "${LOGS_DIR}"
 
 runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd ssh
+runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
 SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
 SSH_KEY="$(runpod_cycle_ssh_key)"
 SSH_USER="$(runpod_cycle_ssh_user)"
-SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/runpod_known_hosts)
+SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
+SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
+SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
+SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
 
 REMOTE_REPO_DIR="${RUNPOD_REMOTE_REPO_DIR:-$(runpod_cycle_remote_repo_dir "${PROVISION_JSON}")}"
 REMOTE_DATASET_NAME="${RUNPOD_REMOTE_DATASET_NAME:-_smoke_runpod_${RUN_ID}}"

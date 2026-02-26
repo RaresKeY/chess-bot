@@ -12,6 +12,7 @@ mkdir -p "${LOGS_DIR}"
 
 runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd rsync
+runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 LOCAL_DATASET_DIR="${RUNPOD_LOCAL_DATASET_DIR:-${REPO_ROOT}/data/dataset/_smoke_runpod}"
 REMOTE_REPO_DIR="${RUNPOD_REMOTE_REPO_DIR:-$(runpod_cycle_remote_repo_dir "${PROVISION_JSON}")}"
@@ -25,13 +26,18 @@ SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
 SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
 SSH_KEY="$(runpod_cycle_ssh_key)"
 SSH_USER="$(runpod_cycle_ssh_user)"
-SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/runpod_known_hosts)
+SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
+SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
+SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
+SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
 
 REMOTE_READY_TIMEOUT_SECONDS="${RUNPOD_REMOTE_READY_TIMEOUT_SECONDS:-300}"
 REMOTE_READY_POLL_SECONDS="${RUNPOD_REMOTE_READY_POLL_SECONDS:-5}"
 remote_ready_deadline=$(( $(date +%s) + REMOTE_READY_TIMEOUT_SECONDS ))
 READY_CHECK_LOG="${LOGS_DIR}/push_dataset_ready_check.log"
 RSYNC_LOG="${LOGS_DIR}/push_dataset_rsync.log"
+printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
+  "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
 
 while true; do
   if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
@@ -56,7 +62,7 @@ done
 } > "${RSYNC_LOG}"
 
 rsync -az --info=stats1 --progress \
-  -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/runpod_known_hosts" \
+  -e "${RSYNC_SSH}" \
   "${LOCAL_DATASET_DIR}/" "${SSH_USER}@${SSH_HOST}:${REMOTE_DATASET_DIR}/" \
   2>&1 | tee -a "${RSYNC_LOG}"
 
