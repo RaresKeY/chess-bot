@@ -45,9 +45,11 @@ For each valid game and splice index `i`:
 - Per-game sample capping (`--max-samples-per-game`) is applied within each game during streaming.
 - Pass-2 stats now also record `split_phase_counts` and `split_remaining_bucket_counts` in `stats.json` based on written sample rows.
 - Optional concurrency for pass 2: `--workers N --batch-size M`
-  - Uses threaded batch processing for per-game sample generation while preserving single-writer output files
-  - `--workers 0` (default) uses all available CPU cores for pass-2 threaded batches
-  - Split assignment remains deterministic and leakage-safe (computed before threaded pass 2)
+  - Uses parallel batch processing for per-game sample generation while preserving single-writer output files
+  - `--worker-backend auto` (default) prefers `process` when `workers > 1` because splicing is CPU-bound Python work (better CPU utilization than threads)
+  - `--worker-backend thread` remains available as an override
+  - `--workers 0` (default) uses all available CPU cores for pass-2 parallel batches
+  - Split assignment remains deterministic and leakage-safe (computed before parallel pass 2)
 - Progress visibility:
   - `--progress-every N` prints pass-1 and pass-2 counters while the dataset build streams through input games
   - available in both single-threaded and threaded pass-2 modes

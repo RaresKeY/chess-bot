@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Dict, Iterable, Iterator, List, Tuple
 
 # Allow direct script execution without requiring PYTHONPATH=. from repo root.
@@ -21,6 +21,9 @@ from src.chessbot.splicing import (
     iter_game_splice_samples,
     split_game_ids,
 )
+
+_WORKER_CFG = None
+_WORKER_SPLIT = None
 
 
 def _looks_like_live_bot_archive_row(row: Dict) -> bool:
@@ -95,6 +98,18 @@ def _process_game_to_lines(
     return split_name, gid, lines, bool(lines), dict(phase_counts), dict(remaining_bucket_counts)
 
 
+def _init_process_worker(cfg: SpliceConfig, split: Dict[str, set]) -> None:
+    global _WORKER_CFG, _WORKER_SPLIT
+    _WORKER_CFG = cfg
+    _WORKER_SPLIT = split
+
+
+def _process_game_to_lines_worker(game: Dict) -> Tuple[str, str, List[str], bool, Dict[str, int], Dict[str, int]]:
+    if _WORKER_CFG is None or _WORKER_SPLIT is None:
+        raise RuntimeError("splice worker not initialized")
+    return _process_game_to_lines(game, _WORKER_CFG, _WORKER_SPLIT)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build splice dataset from validated games")
     parser.add_argument("--input", required=True, help="Path to valid_games.jsonl")
@@ -112,7 +127,13 @@ def main() -> None:
         "--workers",
         type=int,
         default=0,
-        help="Threads for batch sample generation in pass 2 (0 uses all CPU cores)",
+        help="Pass-2 worker count (0 uses all CPU cores)",
+    )
+    parser.add_argument(
+        "--worker-backend",
+        choices=["auto", "process", "thread"],
+        default="auto",
+        help="Pass-2 parallel backend; auto prefers process for CPU-bound splicing when workers>1",
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Games per pass-2 processing batch")
     parser.add_argument(
@@ -130,6 +151,9 @@ def main() -> None:
     args = parser.parse_args()
     _guard_live_bot_archive_input(args.input, allow_live_bot_games=bool(args.allow_live_bot_games))
     worker_count = (os.cpu_count() or 1) if args.workers <= 0 else args.workers
+    worker_backend = args.worker_backend
+    if worker_backend == "auto":
+        worker_backend = "process" if worker_count > 1 else "thread"
 
     decisive_only = args.decisive_only and not args.allow_draws
     cfg = SpliceConfig(
@@ -158,7 +182,7 @@ def main() -> None:
             print(
                 f"[splice pass1] processed={input_games_total} "
                 f"eligible={filtered_games_total} spliceable={len(spliceable_game_ids)}"
-            )
+            , flush=True)
 
     split = split_game_ids(spliceable_game_ids, cfg)
 
@@ -209,12 +233,22 @@ def main() -> None:
                         f"{split_sample_counts['train']}/{split_sample_counts['val']}/{split_sample_counts['test']}"
                     )
         else:
-            with ThreadPoolExecutor(max_workers=worker_count) as ex:
+            if worker_backend == "thread":
+                executor = ThreadPoolExecutor(max_workers=worker_count)
+                ex_map = lambda ex_obj, batch_rows: ex_obj.map(
+                    lambda g: _process_game_to_lines(g, cfg, split), batch_rows
+                )
+            else:
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    initializer=_init_process_worker,
+                    initargs=(cfg, split),
+                )
+                ex_map = lambda ex_obj, batch_rows: ex_obj.map(_process_game_to_lines_worker, batch_rows)
+            with executor as ex:
                 for batch in _iter_batches(read_jsonl(args.input), args.batch_size):
                     pass2_games += len(batch)
-                    for split_name, gid, lines, wrote_any, phase_counts, remaining_bucket_counts in ex.map(
-                        lambda g: _process_game_to_lines(g, cfg, split), batch
-                    ):
+                    for split_name, gid, lines, wrote_any, phase_counts, remaining_bucket_counts in ex_map(ex, batch):
                         if not split_name:
                             continue
                         out_f = train_f if split_name == "train" else val_f if split_name == "val" else test_f
@@ -227,10 +261,10 @@ def main() -> None:
                             routed_games_seen[split_name].add(gid)
                     if args.progress_every > 0 and pass2_games % args.progress_every < len(batch):
                         print(
-                            f"[splice pass2 threaded] processed={pass2_games} "
+                            f"[splice pass2 {worker_backend}] processed={pass2_games} "
                             f"samples(train/val/test)="
                             f"{split_sample_counts['train']}/{split_sample_counts['val']}/{split_sample_counts['test']}"
-                        )
+                        , flush=True)
 
     stats = {
         "input_games_total": input_games_total,
@@ -280,14 +314,14 @@ def main() -> None:
     }
     write_json(stats_path, stats)
 
-    print(f"Input games total/after_filters/spliceable: {input_games_total}/{filtered_games_total}/{len(spliceable_game_ids)}")
+    print(f"Input games total/after_filters/spliceable: {input_games_total}/{filtered_games_total}/{len(spliceable_game_ids)}", flush=True)
     print(
         "Samples train/val/test: "
         f"{split_sample_counts['train']}/{split_sample_counts['val']}/{split_sample_counts['test']}"
-    )
+    , flush=True)
     if worker_count > 1:
-        print(f"Workers: {worker_count} (threaded pass-2 batches of {args.batch_size})")
-    print(f"Stats: {stats_path}")
+        print(f"Workers: {worker_count} (backend={worker_backend}, pass-2 batches of {args.batch_size})", flush=True)
+    print(f"Stats: {stats_path}", flush=True)
 
 
 if __name__ == "__main__":
