@@ -14,7 +14,7 @@ runpod_cycle_require_cmd jq
 LOCAL_COLLECT_DIR="${RUNPOD_LOCAL_COLLECT_DIR:-${CYCLE_DIR}/collected}"
 MODEL_PATH="${RUNPOD_LOCAL_MODEL_PATH:-}"
 if [[ -z "${MODEL_PATH}" ]]; then
-  MODEL_PATH="$(find "${LOCAL_COLLECT_DIR}/run_artifacts" -maxdepth 1 -type f -name '*.pt' | sort | tail -n 1)"
+  MODEL_PATH="$(runpod_cycle_find_model_artifact "${LOCAL_COLLECT_DIR}/run_artifacts" "${RUN_ID}")"
 fi
 if [[ -z "${MODEL_PATH}" || ! -f "${MODEL_PATH}" ]]; then
   echo "[runpod-cycle-local-validate] model not found under ${LOCAL_COLLECT_DIR}/run_artifacts" >&2

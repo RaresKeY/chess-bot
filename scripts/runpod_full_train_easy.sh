@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Opinionated defaults for "just run it" usage. Override via env only when needed.
 export RUNPOD_HF_DATASET_REPO_ID="${RUNPOD_HF_DATASET_REPO_ID:-LogicLark-QuantumQuill/chess-bot-datasets}"
 export RUNPOD_HF_DATASET_PATH_PREFIX="${RUNPOD_HF_DATASET_PATH_PREFIX:-validated_datasets}"
+export RUNPOD_HF_DATASET_SCHEMA_FILTER="${RUNPOD_HF_DATASET_SCHEMA_FILTER:-auto}"
 export RUNPOD_FULL_TRAIN_EPOCHS="${RUNPOD_FULL_TRAIN_EPOCHS:-100}"
 export RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-COMMUNITY}"
 export RUNPOD_GPU_MIN_MEMORY_GB="${RUNPOD_GPU_MIN_MEMORY_GB:-24}"
@@ -25,11 +26,14 @@ export RUNPOD_SSH_PUBKEY_PATH="${RUNPOD_SSH_PUBKEY_PATH:-${TEMP_KEY_BASE}.pub}"
 cat <<EOF
 [runpod-full-train-easy] starting full RunPod flow
 [runpod-full-train-easy] hf_repo=${RUNPOD_HF_DATASET_REPO_ID}
+[runpod-full-train-easy] hf_prefix=${RUNPOD_HF_DATASET_PATH_PREFIX}
+[runpod-full-train-easy] hf_schema_filter=${RUNPOD_HF_DATASET_SCHEMA_FILTER}
 [runpod-full-train-easy] epochs=${RUNPOD_FULL_TRAIN_EPOCHS}
 [runpod-full-train-easy] gpu=${RUNPOD_GPU_TYPE_ID}
 [runpod-full-train-easy] temp_ssh_key=${RUNPOD_SSH_KEY}
 [runpod-full-train-easy] batch_size_override=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}
 [runpod-full-train-easy] num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}
+[runpod-full-train-easy] runtime_max_samples_per_game=${RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-<unset>}
 EOF
 
 exec bash "${REPO_ROOT}/scripts/runpod_cycle_full_train_hf.sh"

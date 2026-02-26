@@ -182,6 +182,20 @@ runpod_cycle_append_report() {
   } >> "${report_path}"
 }
 
+runpod_cycle_find_model_artifact() {
+  local artifacts_dir="$1"
+  local run_id="${2:-}"
+  local exact=""
+  if [[ -n "${run_id}" && -f "${artifacts_dir}/model_${run_id}.pt" ]]; then
+    exact="${artifacts_dir}/model_${run_id}.pt"
+  fi
+  if [[ -n "${exact}" ]]; then
+    printf '%s\n' "${exact}"
+    return 0
+  fi
+  find "${artifacts_dir}" -maxdepth 1 -type f -name '*.pt' 2>/dev/null | sort | tail -n 1
+}
+
 runpod_cycle_registry_record() {
   local repo_root="$1"
   local source_script="$2"

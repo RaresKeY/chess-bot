@@ -13,6 +13,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional host-side quick launch wrapper: `scripts/runpod_quick_launch.sh`
 - Optional host-side modular RunPod lifecycle scripts: `scripts/runpod_cycle_*.sh`
 - Optional host-side HF dataset publish/fetch helpers: `scripts/hf_dataset_publish.py`, `scripts/hf_dataset_fetch.py`
+- Optional host-side RunPod full-cycle artifact verifier: `scripts/runpod_cycle_verify_full_hf_run.py`, `src/chessbot/runpod_cycle_verify.py`
 - Container image build: `deploy/runpod_cloud_training/Dockerfile`
 - Startup orchestration: `deploy/runpod_cloud_training/entrypoint.sh`
 - Inference HTTP service: `deploy/runpod_cloud_training/inference_api.py`
@@ -137,6 +138,10 @@ Provide a modular containerized deployment package for running this repo on GPU 
 ## Validated Dataset HF Publish/Fetch Flow (host-side)
 - `scripts/hf_dataset_publish.py` publishes reusable validated datasets to a HF **dataset** repo with versioned paths:
   - `validated_datasets/<dataset_name>/<version>/`
+- HF repo UI expectation (important):
+  - the published dataset folder typically shows a compressed `*.tar.gz` payload plus `manifest.json` and `checksums.sha256`
+  - this is intentional (default archive mode), not a missing-file bug
+  - `scripts/hf_dataset_fetch.py` extracts the archive back into a local `dataset/` directory containing `train.jsonl`, `val.jsonl`, `test.jsonl` (if present), and `stats.json` (if present)
 - Publish script behavior:
   - validates required `train.jsonl`/`val.jsonl` by default
   - generates `manifest.json` and `checksums.sha256`
@@ -148,10 +153,33 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - supports `--dry-run` to inspect repo path/versioning without network upload
 - `scripts/hf_dataset_fetch.py` fetches a published dataset version from the HF dataset repo and extracts the archive into a local destination by default
 - `scripts/hf_dataset_fetch.py --all-latest` can fetch the latest version for every dataset under a repo prefix and emit an aggregate manifest containing all extracted `train.jsonl` / `val.jsonl` paths plus `aggregate_by_format` buckets keyed by dataset manifest `dataset_format` (used by the RunPod train preset HF mode)
+- Compact dataset manifest/fetch expectations (current):
+  - compact game-level datasets publish `dataset_format=game_jsonl_runtime_splice_v1`
+  - aggregate fetch manifests should expose that format under `aggregate_by_format.game_jsonl_runtime_splice_v1`
+  - RunPod preset schema filtering (`HF_DATASET_SCHEMA_FILTER`) should select this bucket for runtime-splice training flows
 - Recommended workflow for RunPod:
   - publish validated dataset once from host
   - fetch into pod persistent volume/cache on demand
   - point training to the fetched dataset path (`TRAIN_DATASET_DIR` / `TRAIN_PATH` / `VAL_PATH`) or enable `HF_FETCH_LATEST_ALL_DATASETS=1` to train over all latest published datasets automatically
+
+## Easy Full-HF Smoke Flow (host-side, current)
+- `scripts/runpod_full_train_easy_smoke_test.sh` runs the same easy/full-HF flow as `scripts/runpod_full_train_easy.sh` but with smoke overrides (for example 1 epoch, compact month prefix, runtime-splice sample cap)
+- Typical smoke overrides:
+  - `RUNPOD_HF_DATASET_PATH_PREFIX='validated_datasets'`
+  - `RUNPOD_HF_DATASET_NAME='elite_2025-11_game'` (single-dataset fetch, avoids `--all-latest` pulling every month)
+  - `RUNPOD_HF_DATASET_SCHEMA_FILTER='game_jsonl_runtime_splice_v1'`
+  - `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=1`
+  - lower batch/worker overrides for cost/speed
+- After the run completes and artifacts are collected, the wrapper:
+  - verifies local outputs with `scripts/runpod_cycle_verify_full_hf_run.py` (model, metrics, logs, progress JSONL, GPU samples, HF fetch manifest, stop response)
+  - terminates the pod via `scripts/runpod_cycle_terminate.sh`
+  - verifies termination markers again (`terminate_response.json`)
+
+## Full-HF Wrapper Dataset Selection Controls (current)
+- `scripts/runpod_cycle_full_train_hf.sh` supports two remote HF fetch modes before training:
+  - aggregate mode (default): `--all-latest` under `HF_DATASET_PATH_PREFIX`
+  - single-dataset mode: set `RUNPOD_HF_DATASET_NAME` (and optional `RUNPOD_HF_DATASET_VERSION`) to fetch one published dataset version while keeping the rest of the full-HF flow unchanged
+- This is primarily used by `scripts/runpod_full_train_easy_smoke_test.sh` to keep smoke runs cheap and fast while still exercising the real full-HF orchestration path.
 
 ## Idle Watchdog Behavior
 - Polls GPU utilization/memory (`nvidia-smi`) and connection/process activity

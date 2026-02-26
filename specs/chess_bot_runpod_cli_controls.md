@@ -122,10 +122,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - writes `manifest.json` + `checksums.sha256` and uploads either:
     - a compressed `*.tar.gz` archive (default, faster for JSONL uploads), or
     - raw copied files (`--archive-format none`)
+  - HF web UI showing only `manifest.json`, `checksums.sha256`, and the `*.tar.gz` payload inside a version folder is expected for the default archive mode (the actual `train.jsonl` / `val.jsonl` / `stats.json` are inside the archive)
   - supports `--dry-run` to validate repo path/versioning without network upload
 - `scripts/hf_dataset_fetch.py`
   - fetches a versioned dataset package from a Hugging Face dataset repo and extracts the uploaded archive by default
-  - supports `--all-latest` to fetch the latest version for every dataset under the repo prefix and emit an aggregate manifest of extracted `train.jsonl` / `val.jsonl` paths
+  - supports `--all-latest` to fetch the latest version for every dataset under the repo prefix and emit an aggregate manifest of extracted `train.jsonl` / `val.jsonl` paths plus `aggregate_by_format` buckets (when manifests expose `dataset_format`)
   - supports `--dry-run` to print the planned repo path and snapshot patterns without downloading
 - `scripts/runpod_cycle_train.sh`
   - runs `train_baseline_preset.sh` on the pod with explicit output/metrics paths under `artifacts/runpod_cycles/<run_id>/`
@@ -146,6 +147,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - stop mutation payload now requests object subfields (`id`, `desiredStatus`) to match the current GraphQL schema and avoid validation failures
   - appends a `STOPPED` record to the tracked pod registry for operator bookkeeping
   - note: `stop` halts compute but does not delete the pod; storage charges can still apply until termination
+- `scripts/runpod_cycle_terminate.sh`
+  - terminates the current cycle pod via RunPod REST `DELETE /pods/<id>` using the saved `pod_id` from `provision.json` (or env override)
+  - writes `artifacts/runpod_cycles/<run_id>/terminate_response.json` with HTTP status + response body
+  - appends a `TERMINATED` record to the tracked pod registry on success (and treats `404 pod not found` as already-terminated reconciliation)
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
   - safe cleanup utility to terminate (delete) all pods tracked by our scripts whose latest tracked state is not `TERMINATED`
   - requires explicit confirmation (`--yes` or `RUNPOD_CONFIRM_TERMINATE_ALL=YES`)
@@ -163,8 +168,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - sequential host-side orchestration for a full HF-backed training run: GPU selection (`gpu-search` with fallback), start pod, remote HF fetch, remote context probe/spec suggestions, async remote training, local progress watch, collect artifacts, stop pod
   - runs a remote GPU sampler during training and writes per-run pre-train and post-run GPU/dataset/parameter observation artifacts for tuning future runs
   - writes a quick local play-test command (`.venv/bin/python main.py --model <collected model>`) into the run directory after collection
+  - forwards `RUNPOD_HF_DATASET_SCHEMA_FILTER` to the remote preset and direct fallback path so compact game datasets (`game_jsonl_runtime_splice_v1`) can be selected explicitly from mixed HF repos
+  - supports single-dataset remote HF fetch for smoke/targeted runs via `RUNPOD_HF_DATASET_NAME` and optional `RUNPOD_HF_DATASET_VERSION` (otherwise defaults to `--all-latest` under `RUNPOD_HF_DATASET_PATH_PREFIX`)
+  - forwards runtime-splice smoke throttles (`RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT`, `RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET`, `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME`) into the remote preset/direct fallback for compact `*_game` dataset smoke runs
   - remote training launcher now prefers the repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over the image-baked `/opt/...` copy to avoid stale image-script behavior
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
+  - local quick-play command/model retrieval now uses robust collected-artifact lookup (prefers `model_<run_id>.pt`, falls back to latest `.pt`) to tolerate naming variations while preserving run-id preference
   - default remote `num_workers` now uses the pod's available CPU threads minus one (`max(nproc-1, 1)`) unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
   - operational caveat: if the local watcher step fails after remote training has started/completed, the wrapper's error trap can stop the pod before `collect`; this does not mutate/delete the source HF dataset repo, and remote run artifacts typically remain on the pod volume until the pod is terminated (restart the same pod and run `scripts/runpod_cycle_collect.sh` for the same `RUNPOD_CYCLE_RUN_ID`)
@@ -175,6 +184,14 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - one-command opinionated wrapper around `runpod_cycle_full_train_hf.sh`
   - auto-generates a temporary no-passphrase SSH key under `/tmp`, injects it for provisioning, and sets default HF repo / 100-epoch / GPU settings so the operator can run without export-heavy setup
   - tightens temp-key handling by forcing `0600` permissions on the generated private key
+  - logs effective HF prefix/schema filter and runtime-splice smoke throttle overrides when provided
+- `scripts/runpod_full_train_easy_smoke_test.sh`
+  - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, runtime-splice sample cap)
+  - verifies local collected artifacts with `scripts/runpod_cycle_verify_full_hf_run.py`
+  - terminates the pod after verification and re-verifies termination markers
+- `scripts/runpod_cycle_verify_full_hf_run.py` / `src/chessbot/runpod_cycle_verify.py`
+  - verifies full-HF cycle local artifacts (`provision.json`, `stop_response.json`, collected model/metrics/logs/progress/GPU samples/HF fetch manifest/context probe)
+  - optional `--require-terminated` also checks `terminate_response.json`
 
 ## Tracked Pod Registry
 - Default file: `config/runpod_tracked_pods.jsonl`
@@ -227,6 +244,18 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - temporary no-passphrase SSH key under `/tmp/chessbot_runpod_temp_id_ed25519`
     - remote training `num_workers` defaults to `max(nproc-1, 1)` on the pod when no override is set
   - operator can still override by env, but no flags/params are required for the default path
+  - compact-dataset / runtime-splice-friendly env overrides (useful for smoke runs):
+    - `RUNPOD_HF_DATASET_PATH_PREFIX` (for example `validated_datasets/elite_2025-11_game`)
+    - `RUNPOD_HF_DATASET_NAME` (for example `elite_2025-11_game`, single-dataset fetch mode)
+    - `RUNPOD_HF_DATASET_VERSION` (optional explicit version in single-dataset mode)
+    - `RUNPOD_HF_DATASET_SCHEMA_FILTER` (for example `game_jsonl_runtime_splice_v1`)
+    - `RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT`
+    - `RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET`
+    - `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME`
+  - helper smoke wrapper:
+    - `bash scripts/runpod_full_train_easy_smoke_test.sh`
+    - uses the same easy/full-HF path, then verifies local artifacts + stop response + termination response
+    - defaults to a single compact month fetch (`RUNPOD_HF_DATASET_NAME=elite_2025-11_game`) instead of aggregate `--all-latest` to reduce smoke runtime/cost
 - For larger/reused validated datasets, prefer publishing once to a HF dataset repo and fetching into the pod/volume cache, instead of repeated host->pod `rsync` uploads
 - Stepwise modular flow:
   1. `bash scripts/runpod_cycle_start.sh`
@@ -249,6 +278,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/*`
   - `artifacts/runpod_cycles/<run_id>/local_validation/infer_move_output.txt`
   - `artifacts/runpod_cycles/<run_id>/quick_play_command.txt` (written by `runpod_cycle_full_train_hf.sh`)
+  - `artifacts/runpod_cycles/<run_id>/terminate_response.json` (when `runpod_cycle_terminate.sh` is used)
   - `artifacts/runpod_cycles/<run_id>/spec_suggestions/*.json|*.md` (post-run local summaries for GPU/dataset/VRAM/param tuning)
   - examples under `logs/`:
     - `push_dataset_ready_check.log`, `push_dataset_rsync.log`

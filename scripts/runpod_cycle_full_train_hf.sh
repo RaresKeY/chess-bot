@@ -17,6 +17,9 @@ runpod_cycle_require_cmd ssh
 
 HF_DATASET_REPO_ID="${RUNPOD_HF_DATASET_REPO_ID:-${HF_DATASET_REPO_ID:-}}"
 HF_DATASET_PATH_PREFIX="${RUNPOD_HF_DATASET_PATH_PREFIX:-${HF_DATASET_PATH_PREFIX:-validated_datasets}}"
+HF_DATASET_SCHEMA_FILTER="${RUNPOD_HF_DATASET_SCHEMA_FILTER:-${HF_DATASET_SCHEMA_FILTER:-auto}}"
+HF_DATASET_NAME="${RUNPOD_HF_DATASET_NAME:-${HF_DATASET_NAME:-}}"
+HF_DATASET_VERSION="${RUNPOD_HF_DATASET_VERSION:-${HF_DATASET_VERSION:-}}"
 [[ -n "${HF_DATASET_REPO_ID}" ]] || { echo "[runpod-cycle-full-train-hf] missing RUNPOD_HF_DATASET_REPO_ID/HF_DATASET_REPO_ID" >&2; exit 1; }
 
 FLOW_EPOCHS="${RUNPOD_FULL_TRAIN_EPOCHS:-100}"
@@ -25,6 +28,10 @@ FLOW_MIN_MEMORY_GB="${RUNPOD_GPU_MIN_MEMORY_GB:-24}"
 FLOW_MAX_HOURLY_PRICE="${RUNPOD_GPU_MAX_HOURLY_PRICE:-0}"
 FLOW_GPU_SAMPLE_SECONDS="${RUNPOD_GPU_SAMPLE_SECONDS:-5}"
 FLOW_AUTO_STOP_ON_FAILURE="${RUNPOD_STOP_ON_FAILURE:-1}"
+FLOW_SKIP_START="${RUNPOD_CYCLE_SKIP_START:-0}"
+FLOW_RUNTIME_MIN_CONTEXT="${RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT:-${TRAIN_RUNTIME_MIN_CONTEXT:-8}}"
+FLOW_RUNTIME_MIN_TARGET="${RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET:-${TRAIN_RUNTIME_MIN_TARGET:-1}}"
+FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-0}}"
 
 GPU_SEARCH_JSON="${CYCLE_DIR}/gpu_search.json"
 GPU_SELECTION_JSON="${CYCLE_DIR}/gpu_selection.json"
@@ -180,17 +187,29 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Requested epochs: \`${FLOW_EPOCHS}\`" \
   "- HF dataset repo: \`${HF_DATASET_REPO_ID}\`" \
   "- HF dataset path prefix: \`${HF_DATASET_PATH_PREFIX}\`" \
+  "- HF dataset name override: \`${HF_DATASET_NAME:-<all-latest under prefix>}\`" \
+  "- HF dataset version override: \`${HF_DATASET_VERSION:-<latest>}\`" \
+  "- HF dataset schema filter: \`${HF_DATASET_SCHEMA_FILTER}\`" \
   "- GPU selection source: \`$(jq -r '.selection_source // "unknown"' "${GPU_SELECTION_JSON}")\`" \
   "- Selected GPU type: \`${SELECTED_GPU_DISPLAY_NAME:-$SELECTED_GPU_TYPE_ID}\`" \
   "- GPU search JSON: \`${GPU_SEARCH_JSON}\`" \
   "- GPU selection JSON: \`${GPU_SELECTION_JSON}\`" \
   ""
 
-RUNPOD_GPU_TYPE_ID="${SELECTED_GPU_TYPE_ID}" \
-RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
-RUNPOD_SET_SMOKE_SERVICE_ENVS="${RUNPOD_SET_SMOKE_SERVICE_ENVS:-1}" \
-bash "${REPO_ROOT}/scripts/runpod_cycle_start.sh"
-POD_STARTED=1
+if [[ "${FLOW_SKIP_START}" == "1" ]]; then
+  if [[ ! -f "${PROVISION_JSON}" ]]; then
+    echo "[runpod-cycle-full-train-hf] RUNPOD_CYCLE_SKIP_START=1 but provision.json not found: ${PROVISION_JSON}" >&2
+    exit 1
+  fi
+  echo "[runpod-cycle-full-train-hf] skipping pod start; reusing existing provision.json for run_id=${RUN_ID}"
+  POD_STARTED=1
+else
+  RUNPOD_GPU_TYPE_ID="${SELECTED_GPU_TYPE_ID}" \
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
+  RUNPOD_SET_SMOKE_SERVICE_ENVS="${RUNPOD_SET_SMOKE_SERVICE_ENVS:-1}" \
+  bash "${REPO_ROOT}/scripts/runpod_cycle_start.sh"
+  POD_STARTED=1
+fi
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
@@ -220,12 +239,24 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "bash -s" <<EOF 2>&1 | tee "${REM
 set -Eeuo pipefail
 mkdir -p '${REMOTE_RUN_DIR}'
 export PYTHONPATH='${REMOTE_REPO_DIR}'
-'/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' \
-  --repo-id '${HF_DATASET_REPO_ID}' \
-  --repo-path-prefix '${HF_DATASET_PATH_PREFIX}' \
-  --dest-dir '${REMOTE_REPO_DIR}/data/hf_datasets' \
-  --all-latest \
+hf_fetch_cmd=( '/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py'
+  --repo-id '${HF_DATASET_REPO_ID}'
+  --repo-path-prefix '${HF_DATASET_PATH_PREFIX}'
+  --dest-dir '${REMOTE_REPO_DIR}/data/hf_datasets'
   --output-manifest '${REMOTE_HF_FETCH_MANIFEST}'
+)
+if [[ -n '${HF_DATASET_NAME}' ]]; then
+  hf_fetch_cmd+=( --dataset-name '${HF_DATASET_NAME}' )
+  if [[ -n '${HF_DATASET_VERSION}' ]]; then
+    hf_fetch_cmd+=( --version '${HF_DATASET_VERSION}' )
+  fi
+else
+  hf_fetch_cmd+=( --all-latest )
+fi
+printf '[runpod-cycle-full-train-hf] remote_hf_fetch_exec:' >&2
+printf ' %q' "${hf_fetch_cmd[@]}" >&2
+printf '\n' >&2
+"${hf_fetch_cmd[@]}"
 EOF
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
@@ -400,7 +431,7 @@ PY
 EOF
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-  "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
+  "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' HF_DATASET_SCHEMA_FILTER='${HF_DATASET_SCHEMA_FILTER}' HF_DATASET_NAME='${HF_DATASET_NAME}' HF_DATASET_VERSION='${HF_DATASET_VERSION}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' FLOW_RUNTIME_MIN_CONTEXT='${FLOW_RUNTIME_MIN_CONTEXT}' FLOW_RUNTIME_MIN_TARGET='${FLOW_RUNTIME_MIN_TARGET}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
   <<'EOF' 2>&1 | tee "${REMOTE_TRAIN_LAUNCH_LOG}"
 set -Eeuo pipefail
 mkdir -p "${REMOTE_RUN_DIR}"
@@ -466,8 +497,12 @@ export HF_FETCH_LATEST_ALL_DATASETS=1
 export HF_USE_EXISTING_FETCH_MANIFEST=1
 export HF_DATASET_REPO_ID="${HF_DATASET_REPO_ID}"
 export HF_DATASET_PATH_PREFIX="${HF_DATASET_PATH_PREFIX}"
+export HF_DATASET_SCHEMA_FILTER="${HF_DATASET_SCHEMA_FILTER}"
 export HF_DATASET_FETCH_MANIFEST="${REMOTE_HF_FETCH_MANIFEST}"
 export HF_DATASET_CACHE_DIR="${REMOTE_REPO_DIR}/data/hf_datasets"
+export TRAIN_RUNTIME_MIN_CONTEXT="${FLOW_RUNTIME_MIN_CONTEXT}"
+export TRAIN_RUNTIME_MIN_TARGET="${FLOW_RUNTIME_MIN_TARGET}"
+export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
 export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0 --no-progress"
 TRAIN_PRESET_IMAGE="/opt/runpod_cloud_training/train_baseline_preset.sh"
 TRAIN_PRESET_REPO="${REMOTE_REPO_DIR}/deploy/runpod_cloud_training/train_baseline_preset.sh"
@@ -488,6 +523,8 @@ fi
   echo "[runpod-cycle-full-train-hf] override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>} override_num_workers=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}"
   echo "[runpod-cycle-full-train-hf] cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers} vram_suggested_num_workers=${suggested[1]:-6}"
   echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers=${TRAIN_NUM_WORKERS} epochs=${FLOW_EPOCHS}"
+  echo "[runpod-cycle-full-train-hf] hf_dataset_schema_filter=${HF_DATASET_SCHEMA_FILTER}"
+  echo "[runpod-cycle-full-train-hf] runtime_min_context=${TRAIN_RUNTIME_MIN_CONTEXT} runtime_min_target=${TRAIN_RUNTIME_MIN_TARGET} runtime_max_samples_per_game=${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"
   echo "[runpod-cycle-full-train-hf] progress_jsonl=${REMOTE_PROGRESS_JSONL}"
   echo "[runpod-cycle-full-train-hf] hf_manifest=${REMOTE_HF_FETCH_MANIFEST}"
   echo "[runpod-cycle-full-train-hf] train_preset_script=${TRAIN_PRESET_SCRIPT}"
@@ -502,22 +539,61 @@ if [[ "${preset_has_hf}" == "1" ]]; then
   bash "${TRAIN_PRESET_SCRIPT}" >> "${REMOTE_TRAIN_LOG}" 2>&1 || rc=$?
 else
   echo "[runpod-cycle-full-train-hf] preset lacks HF aggregate support; using direct train_baseline.py fallback" >> "${REMOTE_TRAIN_LOG}"
-  mapfile -t hf_train_paths < <('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" <<'PY'
+  mapfile -t hf_train_paths < <('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-for p in data.get("aggregate", {}).get("train_paths", []):
+schema_filter = (sys.argv[2] or "auto").strip()
+agg = data.get("aggregate", {}) or {}
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+def chosen():
+    if schema_filter and schema_filter not in {"", "auto"}:
+        return schema_filter
+    for cand in ("game_jsonl_runtime_splice_v1", "splice_rows_legacy"):
+        if cand in agg_by_format:
+            return cand
+    return ""
+fmt = chosen()
+paths = agg_by_format.get(fmt, {}).get("train_paths", []) if fmt else agg.get("train_paths", [])
+for p in paths:
     if p:
         print(p)
 PY
 )
-  mapfile -t hf_val_paths < <('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" <<'PY'
+  mapfile -t hf_val_paths < <('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-for p in data.get("aggregate", {}).get("val_paths", []):
+schema_filter = (sys.argv[2] or "auto").strip()
+agg = data.get("aggregate", {}) or {}
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+def chosen():
+    if schema_filter and schema_filter not in {"", "auto"}:
+        return schema_filter
+    for cand in ("game_jsonl_runtime_splice_v1", "splice_rows_legacy"):
+        if cand in agg_by_format:
+            return cand
+    return ""
+fmt = chosen()
+paths = agg_by_format.get(fmt, {}).get("val_paths", []) if fmt else agg.get("val_paths", [])
+for p in paths:
     if p:
         print(p)
 PY
 )
+  selected_schema="$('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+schema_filter = (sys.argv[2] or "auto").strip()
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+if schema_filter and schema_filter not in {"", "auto"}:
+    print(schema_filter)
+elif "game_jsonl_runtime_splice_v1" in agg_by_format:
+    print("game_jsonl_runtime_splice_v1")
+elif "splice_rows_legacy" in agg_by_format:
+    print("splice_rows_legacy")
+else:
+    print("")
+PY
+)"
   if (( ${#hf_train_paths[@]} == 0 || ${#hf_val_paths[@]} == 0 )); then
     echo "[runpod-cycle-full-train-hf] no train/val paths found in HF fetch manifest: ${REMOTE_HF_FETCH_MANIFEST}" >> "${REMOTE_TRAIN_LOG}"
     rc=1
@@ -556,6 +632,9 @@ PY
     for p in "${hf_val_paths[@]}"; do
       direct_cmd+=( --val "${p}" )
     done
+    if [[ "${selected_schema}" == "game_jsonl_runtime_splice_v1" ]]; then
+      direct_cmd+=( --runtime-min-context "${TRAIN_RUNTIME_MIN_CONTEXT}" --runtime-min-target "${TRAIN_RUNTIME_MIN_TARGET}" --runtime-max-samples-per-game "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}" )
+    fi
     {
       printf '[runpod-cycle-full-train-hf] direct_fallback_exec:'
       printf ' %q' "${direct_cmd[@]}"
@@ -688,7 +767,11 @@ md_lines = [
 out_md.write_text("\n".join(md_lines), encoding="utf-8")
 PY
 
-MODEL_PATH_LOCAL="$(find "${LOCAL_COLLECT_DIR}" -maxdepth 1 -type f -name 'model_*.pt' | sort | tail -n 1)"
+MODEL_PATH_LOCAL="$(runpod_cycle_find_model_artifact "${LOCAL_COLLECT_DIR}" "${RUN_ID}")"
+if [[ -z "${MODEL_PATH_LOCAL}" || ! -f "${MODEL_PATH_LOCAL}" ]]; then
+  echo "[runpod-cycle-full-train-hf] no collected model artifact found under ${LOCAL_COLLECT_DIR}" >&2
+  exit 1
+fi
 {
   printf '.venv/bin/python main.py --model %q\n' "${MODEL_PATH_LOCAL}"
 } > "${PLAY_CMD_TXT}"
