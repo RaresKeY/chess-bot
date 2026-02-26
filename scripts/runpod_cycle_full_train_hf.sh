@@ -447,7 +447,15 @@ else:
 PY
 )
 TRAIN_BATCH_SIZE="${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-${suggested[0]:-2048}}"
-TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${suggested[1]:-6}}"
+cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+if ! [[ "${cpu_threads}" =~ ^[0-9]+$ ]]; then
+  cpu_threads=0
+fi
+auto_num_workers=1
+if (( cpu_threads > 1 )); then
+  auto_num_workers=$((cpu_threads - 1))
+fi
+TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"
 export REPO_DIR="${REMOTE_REPO_DIR}"
 export OUTPUT_PATH="${REMOTE_RUN_DIR}/model_${RUN_ID}.pt"
 export METRICS_OUT="${REMOTE_RUN_DIR}/metrics_${RUN_ID}.json"
@@ -478,6 +486,7 @@ fi
 {
   echo "[runpod-cycle-full-train-hf] training launch"
   echo "[runpod-cycle-full-train-hf] override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>} override_num_workers=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}"
+  echo "[runpod-cycle-full-train-hf] cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers} vram_suggested_num_workers=${suggested[1]:-6}"
   echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers=${TRAIN_NUM_WORKERS} epochs=${FLOW_EPOCHS}"
   echo "[runpod-cycle-full-train-hf] progress_jsonl=${REMOTE_PROGRESS_JSONL}"
   echo "[runpod-cycle-full-train-hf] hf_manifest=${REMOTE_HF_FETCH_MANIFEST}"

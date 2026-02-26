@@ -165,6 +165,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - writes a quick local play-test command (`.venv/bin/python main.py --model <collected model>`) into the run directory after collection
   - remote training launcher now prefers the repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over the image-baked `/opt/...` copy to avoid stale image-script behavior
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
+  - default remote `num_workers` now uses the pod's available CPU threads minus one (`max(nproc-1, 1)`) unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
   - aggregates `gpu_full_training_observation_*.json` artifacts across runs, groups by GPU SKU, and emits heuristic next-run override suggestions (batch size / workers)
@@ -221,6 +222,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_FULL_TRAIN_EPOCHS=100`
     - community GPU with explicit default `NVIDIA RTX 6000 Ada Generation`
     - temporary no-passphrase SSH key under `/tmp/chessbot_runpod_temp_id_ed25519`
+    - remote training `num_workers` defaults to `max(nproc-1, 1)` on the pod when no override is set
   - operator can still override by env, but no flags/params are required for the default path
 - For larger/reused validated datasets, prefer publishing once to a HF dataset repo and fetching into the pod/volume cache, instead of repeated host->pod `rsync` uploads
 - Stepwise modular flow:

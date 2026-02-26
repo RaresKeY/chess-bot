@@ -244,6 +244,9 @@ OUT
         self.assertIn("'/opt/venvs/chessbot/bin/python' - <<'PY'", text)
         self.assertIn('rm -f "${REMOTE_PROGRESS_JSONL}" "${REMOTE_GPU_SAMPLES_CSV}" "${REMOTE_TRAIN_PID_FILE}" "${REMOTE_TRAIN_LOG}"', text)
         self.assertIn("override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
+        self.assertIn('cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"', text)
+        self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"', text)
+        self.assertIn("cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers}", text)
 
     def test_terminate_all_reconciles_pod_not_found_404_as_terminated(self):
         with tempfile.TemporaryDirectory() as td:

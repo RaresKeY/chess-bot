@@ -101,12 +101,20 @@ render_bar() {
 }
 
 print_status() {
+  local display_done="${completed_epoch}"
+  if [[ -n "${started_epoch}" && "${started_epoch}" =~ ^[0-9]+$ ]]; then
+    local started_epoch_num="${started_epoch}"
+    if (( started_epoch_num > display_done )); then
+      display_done=$(( started_epoch_num - 1 ))
+    fi
+  fi
+  (( display_done < 0 )) && display_done=0
   local pct="0"
   if (( total_epochs > 0 )); then
-    pct=$(( completed_epoch * 100 / total_epochs ))
+    pct=$(( display_done * 100 / total_epochs ))
   fi
   local bar
-  bar="$(render_bar "${completed_epoch}" "${total_epochs:-1}" "${BAR_WIDTH}")"
+  bar="$(render_bar "${display_done}" "${total_epochs:-1}" "${BAR_WIDTH}")"
   local line
   line="[runpod-cycle-watch] [${bar}] ${pct}% epoch=${completed_epoch}/${total_epochs:-0}"
   if [[ -n "${started_epoch}" && "${started_epoch}" != "${completed_epoch}" ]]; then
