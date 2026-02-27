@@ -29,6 +29,9 @@ Define the current preferred end-to-end RunPod training flow, including exact op
   - optional explicit split caps: `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`, `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`
 - GPU default:
   - `RUNPOD_GPU_TYPE_ID` default in easy flow is `NVIDIA GeForce RTX 5090`
+  - `RUNPOD_GPU_COUNT` default in easy flow is `2`
+  - `RUNPOD_FULL_TRAIN_NPROC_PER_NODE` defaults to `${RUNPOD_GPU_COUNT}` in easy flow (multi-process train launch)
+  - set `RUNPOD_GPU_COUNT=1` and/or `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=1` to keep single-GPU single-process behavior
 - SSH handling:
   - managed temp key auto-generated on host at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
   - no personal-key passphrase prompt path in preferred flow
@@ -75,6 +78,9 @@ export RUNPOD_FULL_TRAIN_EPOCHS="20"
 # Leave these unset for auto behavior:
 unset RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE
 unset RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE
+# Optional single-GPU override:
+# export RUNPOD_GPU_COUNT="1"
+# export RUNPOD_FULL_TRAIN_NPROC_PER_NODE="1"
 
 bash scripts/runpod_full_train_easy.sh
 ```

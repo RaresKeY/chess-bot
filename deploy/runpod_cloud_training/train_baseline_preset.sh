@@ -32,6 +32,7 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-6}"
 TRAIN_PHASE_WEIGHT_ENDGAME="${TRAIN_PHASE_WEIGHT_ENDGAME:-2.0}"
 TRAIN_PROGRESS_JSONL_OUT="${TRAIN_PROGRESS_JSONL_OUT:-}"
+TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-1}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
 RUNPOD_PHASE_TIMING_ENABLED="${RUNPOD_PHASE_TIMING_ENABLED:-1}"
 RUNPOD_PHASE_TIMING_LOG="${RUNPOD_PHASE_TIMING_LOG:-${REPO_DIR}/artifacts/timings/runpod_phase_times.jsonl}"
@@ -277,8 +278,8 @@ if [[ -n "${DETECTED_DATASET_FORMAT}" ]]; then
   echo "[runpod-train] detected_dataset_format=${DETECTED_DATASET_FORMAT}"
 fi
 
-cmd=(
-  "${PY_BIN}" "${TRAIN_SCRIPT}"
+train_args=(
+  "${TRAIN_SCRIPT}"
   --output "${OUTPUT_PATH}"
   --metrics-out "${METRICS_OUT}"
   --epochs 40
@@ -304,7 +305,7 @@ cmd=(
 )
 
 if [[ "${DETECTED_DATASET_SCHEMA}" == "game" ]]; then
-  cmd+=(
+  train_args+=(
     --runtime-min-context "${TRAIN_RUNTIME_MIN_CONTEXT}"
     --runtime-min-target "${TRAIN_RUNTIME_MIN_TARGET}"
     --runtime-max-samples-per-game "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"
@@ -312,48 +313,58 @@ if [[ "${DETECTED_DATASET_SCHEMA}" == "game" ]]; then
 fi
 
 if [[ "${TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE}" == "1" ]]; then
-  cmd+=( --require-runtime-splice-cache )
+  train_args+=( --require-runtime-splice-cache )
 fi
 
 if [[ "${TRAIN_MAX_TRAIN_ROWS}" != "0" ]]; then
-  cmd+=( --max-train-rows "${TRAIN_MAX_TRAIN_ROWS}" )
+  train_args+=( --max-train-rows "${TRAIN_MAX_TRAIN_ROWS}" )
 fi
 if [[ "${TRAIN_MAX_VAL_ROWS}" != "0" ]]; then
-  cmd+=( --max-val-rows "${TRAIN_MAX_VAL_ROWS}" )
+  train_args+=( --max-val-rows "${TRAIN_MAX_VAL_ROWS}" )
 fi
 if [[ "${TRAIN_MAX_TOTAL_ROWS}" != "0" ]]; then
-  cmd+=( --max-total-rows "${TRAIN_MAX_TOTAL_ROWS}" )
+  train_args+=( --max-total-rows "${TRAIN_MAX_TOTAL_ROWS}" )
 fi
 if [[ -n "${TRAIN_BEST_CHECKPOINT_OUT}" ]]; then
-  cmd+=( --best-checkpoint-out "${TRAIN_BEST_CHECKPOINT_OUT}" )
+  train_args+=( --best-checkpoint-out "${TRAIN_BEST_CHECKPOINT_OUT}" )
 fi
 if [[ -n "${TRAIN_EPOCH_CHECKPOINT_DIR}" ]]; then
-  cmd+=( --epoch-checkpoint-dir "${TRAIN_EPOCH_CHECKPOINT_DIR}" )
+  train_args+=( --epoch-checkpoint-dir "${TRAIN_EPOCH_CHECKPOINT_DIR}" )
 fi
 
 if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then
-  cmd+=( --progress-jsonl-out "${TRAIN_PROGRESS_JSONL_OUT}" )
+  train_args+=( --progress-jsonl-out "${TRAIN_PROGRESS_JSONL_OUT}" )
 fi
 
 if [[ "${HF_FETCH_LATEST_ALL_DATASETS}" == "1" && ${#HF_ALL_TRAIN_PATHS[@]} -gt 0 && ${#HF_ALL_VAL_PATHS[@]} -gt 0 ]]; then
   for p in "${HF_ALL_TRAIN_PATHS[@]}"; do
-    cmd+=( --train "${p}" )
+    train_args+=( --train "${p}" )
   done
   for p in "${HF_ALL_VAL_PATHS[@]}"; do
-    cmd+=( --val "${p}" )
+    train_args+=( --val "${p}" )
   done
   echo "[runpod-train] using_hf_latest_all_datasets=1 train_files=${#HF_ALL_TRAIN_PATHS[@]} val_files=${#HF_ALL_VAL_PATHS[@]}"
   if [[ -n "${HF_SELECTED_SCHEMA:-}" ]]; then
     echo "[runpod-train] using_hf_schema=${HF_SELECTED_SCHEMA}"
   fi
 else
-  cmd+=( --train "${TRAIN_PATH}" --val "${VAL_PATH}" )
+  train_args+=( --train "${TRAIN_PATH}" --val "${VAL_PATH}" )
 fi
 
 if [[ -n "${TRAIN_EXTRA_ARGS}" ]]; then
   # shellcheck disable=SC2206
   extra=( ${TRAIN_EXTRA_ARGS} )
-  cmd+=( "${extra[@]}" )
+  train_args+=( "${extra[@]}" )
+fi
+
+cmd=()
+if ! [[ "${TRAIN_NPROC_PER_NODE}" =~ ^[0-9]+$ ]] || (( TRAIN_NPROC_PER_NODE < 1 )); then
+  TRAIN_NPROC_PER_NODE=1
+fi
+if (( TRAIN_NPROC_PER_NODE > 1 )); then
+  cmd=( "${VENV_DIR}/bin/torchrun" --standalone --nnodes=1 --nproc-per-node "${TRAIN_NPROC_PER_NODE}" "${train_args[@]}" )
+else
+  cmd=( "${PY_BIN}" "${train_args[@]}" )
 fi
 
 printf '[runpod-train] exec:'

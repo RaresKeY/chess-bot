@@ -243,8 +243,12 @@ OUT
         self.assertIn("RUNPOD_HF_DATASET_REPO_ID", text)
         self.assertIn("RUNPOD_FULL_TRAIN_EPOCHS", text)
         self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 5090", text)
+        self.assertIn("RUNPOD_GPU_COUNT:-2", text)
+        self.assertIn("RUNPOD_FULL_TRAIN_NPROC_PER_NODE", text)
         self.assertIn("runpod_cycle_prepare_ssh_client_files", text)
         self.assertIn("temp_ssh_key=$(runpod_cycle_ssh_key)", text)
+        self.assertIn("gpu_count=${RUNPOD_GPU_COUNT}", text)
+        self.assertIn("train_nproc_per_node=${RUNPOD_FULL_TRAIN_NPROC_PER_NODE}", text)
         self.assertIn("batch_size_override=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn("num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}", text)
         self.assertIn("max_total_rows=${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-<unset>}", text)
@@ -279,6 +283,8 @@ OUT
 
     def test_full_train_hf_context_probe_uses_quoted_heredoc(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
+        self.assertIn('FLOW_GPU_COUNT="${RUNPOD_GPU_COUNT:-1}"', text)
+        self.assertIn('FLOW_TRAIN_NPROC_PER_NODE="${RUNPOD_FULL_TRAIN_NPROC_PER_NODE:-${FLOW_GPU_COUNT}}"', text)
         self.assertIn("<<'EOF' 2>&1 | tee \"${REMOTE_CONTEXT_LOG}\"", text)
         self.assertIn("CONTEXT_JSON='${REMOTE_CONTEXT_JSON}'", text)
         self.assertIn("'/opt/venvs/chessbot/bin/python' - <<'PY'", text)
@@ -286,6 +292,8 @@ OUT
         self.assertIn("override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn('cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"', text)
         self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"', text)
+        self.assertIn('TRAIN_NPROC_PER_NODE="${FLOW_TRAIN_NPROC_PER_NODE:-1}"', text)
+        self.assertIn('export TRAIN_NPROC_PER_NODE', text)
         self.assertIn('export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0"', text)
         self.assertNotIn("--no-progress", text)
         self.assertIn('if [[ "${gpu_name_for_batch}" == *"RTX 5090"* ]]; then', text)
@@ -295,6 +303,11 @@ OUT
         self.assertIn('export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"', text)
         self.assertIn('RUNPOD_REMOTE_BEST_CHECKPOINT="${REMOTE_BEST_CHECKPOINT}"', text)
         self.assertIn("cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers}", text)
+
+    def test_train_preset_supports_torchrun_nproc(self):
+        text = Path("deploy/runpod_cloud_training/train_baseline_preset.sh").read_text(encoding="utf-8")
+        self.assertIn('TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-1}"', text)
+        self.assertIn('cmd=( "${VENV_DIR}/bin/torchrun" --standalone --nnodes=1 --nproc-per-node "${TRAIN_NPROC_PER_NODE}" "${train_args[@]}" )', text)
 
     def test_watch_progress_syncs_remote_checkpoints_and_writes_epoch_eta_report(self):
         text = Path("scripts/runpod_cycle_watch_progress.sh").read_text(encoding="utf-8")

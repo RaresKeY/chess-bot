@@ -210,6 +210,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - one-command opinionated wrapper around `runpod_cycle_full_train_hf.sh`
   - uses the shared RunPod managed-key path from `runpod_cycle_common.sh`: temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` with private key mode `0600`
   - injects that managed key for provisioning and SSH commands so host passphrase prompts are avoided by default
+  - defaults to multi-GPU provisioning and launch:
+    - `RUNPOD_GPU_COUNT=2`
+    - `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=${RUNPOD_GPU_COUNT}` (effective remote train process count)
+  - single-GPU compatibility remains via explicit env override (`RUNPOD_GPU_COUNT=1`, `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=1`)
   - logs effective HF prefix/schema filter and runtime-splice smoke throttle overrides when provided
 - `scripts/runpod_full_train_easy_smoke_test.sh`
   - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, runtime-splice sample cap)
@@ -267,6 +271,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - HF repo `LogicLark-QuantumQuill/chess-bot-datasets`
     - `RUNPOD_FULL_TRAIN_EPOCHS=100`
     - community GPU with explicit default `NVIDIA GeForce RTX 5090`
+    - `RUNPOD_GPU_COUNT=2` and `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=2` (default multi-process train launch)
     - temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
     - progress output enabled by default (plus JSONL progress stream for watcher)
     - remote training `num_workers` defaults to `max(nproc-1, 1)` on the pod when no override is set
