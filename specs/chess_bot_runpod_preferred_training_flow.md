@@ -69,6 +69,8 @@ export RUNPOD_HF_DATASET_REPO_ID="LogicLark-QuantumQuill/chess-bot-datasets"
 export RUNPOD_HF_DATASET_PATH_PREFIX="validated_datasets"
 export RUNPOD_HF_DATASET_SCHEMA_FILTER="game_jsonl_runtime_splice_v1"
 export RUNPOD_FULL_TRAIN_EPOCHS="20"
+# Optional: preconfigured local sync root for epoch checkpoints + ETA reports
+# export RUNPOD_LOCAL_SYNC_DIR="/absolute/path/for/runpod_sync"
 
 # Leave these unset for auto behavior:
 unset RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE

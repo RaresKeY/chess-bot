@@ -175,6 +175,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - watches a remote `train_exit_code.txt` sentinel and exits with the same code
   - on `epoch_end`, attempts to pull remote best/epoch checkpoints into local `artifacts/runpod_cycles/<run_id>/live_checkpoints/`
   - appends per-epoch ETA/data snapshots to `artifacts/runpod_cycles/<run_id>/reports/epoch_eta_report_<run_id>.jsonl`
+  - optional override: set `RUNPOD_LOCAL_SYNC_DIR=<preconfigured_local_dir>` to sync checkpoints/reports under `<preconfigured_local_dir>/<run_id>/...`
   - scans snapshot tails for the latest valid JSON progress event (avoids getting stuck when the newest tailed line is partial/non-JSON)
   - supports manual PTY allocation via `RUNPOD_SSH_FORCE_TTY=1` when a host environment requires it
   - handles `Ctrl-C`/`SIGTERM` by restoring TTY state and stopping local child watcher processes to reduce terminal corruption/noisy leftover streams

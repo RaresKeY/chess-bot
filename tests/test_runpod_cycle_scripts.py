@@ -298,6 +298,8 @@ OUT
         text = Path("scripts/runpod_cycle_watch_progress.sh").read_text(encoding="utf-8")
         self.assertIn('REMOTE_BEST_CHECKPOINT="${RUNPOD_REMOTE_BEST_CHECKPOINT:-${REMOTE_RUN_DIR}/model_best_${RUN_ID}.pt}"', text)
         self.assertIn('REMOTE_EPOCH_CHECKPOINT_DIR="${RUNPOD_REMOTE_EPOCH_CHECKPOINT_DIR:-${REMOTE_RUN_DIR}/epoch_checkpoints}"', text)
+        self.assertIn('LOCAL_SYNC_BASE_DIR="${RUNPOD_LOCAL_SYNC_DIR:-${LOCAL_CYCLE_DIR}}"', text)
+        self.assertIn('LOCAL_SYNC_RUN_DIR="${LOCAL_SYNC_BASE_DIR}/${RUN_ID}"', text)
         self.assertIn("EPOCH_ETA_REPORT_JSONL", text)
         self.assertIn("sync_epoch_artifacts()", text)
         self.assertIn("append_epoch_eta_report()", text)

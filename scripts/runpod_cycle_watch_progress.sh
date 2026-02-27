@@ -41,8 +41,10 @@ BAR_WIDTH="${RUNPOD_PROGRESS_BAR_WIDTH:-32}"
 WATCH_LOG="${LOGS_DIR}/train_progress_watch.log"
 WATCH_DEBUG="${RUNPOD_WATCH_DEBUG:-0}"
 LOCAL_CYCLE_DIR="$(runpod_cycle_dir "${REPO_ROOT}" "${RUN_ID}")"
-LOCAL_REPORT_DIR="${LOCAL_CYCLE_DIR}/reports"
-LOCAL_LIVE_CKPT_DIR="${LOCAL_CYCLE_DIR}/live_checkpoints"
+LOCAL_SYNC_BASE_DIR="${RUNPOD_LOCAL_SYNC_DIR:-${LOCAL_CYCLE_DIR}}"
+LOCAL_SYNC_RUN_DIR="${LOCAL_SYNC_BASE_DIR}/${RUN_ID}"
+LOCAL_REPORT_DIR="${LOCAL_SYNC_RUN_DIR}/reports"
+LOCAL_LIVE_CKPT_DIR="${LOCAL_SYNC_RUN_DIR}/live_checkpoints"
 EPOCH_ETA_REPORT_JSONL="${LOCAL_REPORT_DIR}/epoch_eta_report_${RUN_ID}.jsonl"
 TTY_STATE_ORIG="$(stty -g 2>/dev/null || true)"
 mkdir -p "${LOCAL_REPORT_DIR}" "${LOCAL_LIVE_CKPT_DIR}"
@@ -462,7 +464,7 @@ while IFS= read -r snapshot_line || [[ -n "${snapshot_line}" ]]; do
       ;;
   esac
 done < <(
-  watch_debug "start run_id=${RUN_ID} ssh=${SSH_USER}@${SSH_HOST}:${SSH_PORT} progress_jsonl=${REMOTE_PROGRESS_JSONL} exit_code_file=${REMOTE_EXIT_CODE_FILE} train_log=${REMOTE_TRAIN_LOG} poll_seconds=${POLL_SECONDS}"
+  watch_debug "start run_id=${RUN_ID} ssh=${SSH_USER}@${SSH_HOST}:${SSH_PORT} progress_jsonl=${REMOTE_PROGRESS_JSONL} exit_code_file=${REMOTE_EXIT_CODE_FILE} train_log=${REMOTE_TRAIN_LOG} poll_seconds=${POLL_SECONDS} local_sync_base=${LOCAL_SYNC_BASE_DIR}"
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
     "RUNPOD_PROGRESS_POLL_SECONDS='${POLL_SECONDS}' RUNPOD_REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' RUNPOD_REMOTE_EXIT_CODE_FILE='${REMOTE_EXIT_CODE_FILE}' RUNPOD_REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' bash -s" <<'EOF' 2>/dev/null
 set -Eeuo pipefail
