@@ -53,6 +53,13 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 ## Runtime / Device Controls
 - `scripts/train_baseline.py` supports explicit `--device` (`auto`, `cpu`, `cuda`, `cuda:N`)
 - CUDA request fails fast if `torch.cuda.is_available()` is false
+- Distributed mode is available for path-based training (`train_next_move_model_from_jsonl_paths`) using `torchrun` + DDP:
+  - `--distributed {auto,off,on}` (`auto` enables when `WORLD_SIZE>1`)
+  - `--distributed-backend` (default `nccl`)
+  - `--distributed-timeout-sec` (default `1800`)
+  - in distributed mode, `scripts/train_baseline.py` maps rank to `cuda:LOCAL_RANK` when `--device auto|cuda`
+  - train DataLoader uses `DistributedSampler`; sampler epoch is advanced each training epoch
+  - non-primary ranks suppress progress JSONL/log chatter and skip writing final model/metrics files
 - CUDA-oriented controls:
   - `--num-workers` (DataLoader workers)
   - `--pin-memory/--no-pin-memory` (auto-disabled on CPU)
@@ -104,6 +111,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - `vocab`
 - `config` (`embed_dim`, `hidden_dim`, `num_layers`, `dropout`, `use_winner`, `use_phase`, `phase_embed_dim`, `use_side_to_move`, `side_to_move_embed_dim`)
 - `runtime` (`device`, `amp`, `best_checkpoint`, `early_stopping`, `lr_scheduler`) from the training run
+- `runtime.distributed` for path-based runs (`enabled`, `world_size`, `rank`)
 - `runtime.training_objective` and, in multistep mode, rollout settings (`rollout_horizon`, `closeness_horizon`, `rollout_loss_decay`, resolved `rollout_loss_weights`)
 - `runtime.phase_weights` (resolved per-phase multipliers used during training)
 
@@ -113,6 +121,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - train/val input file lists and row counts per input file (when provided)
 - `data_loading` mode metadata (currently `indexed_jsonl_on_demand`)
 - `dataset_schema` metadata (`spliced` or `game`)
+- `distributed` metadata (`enabled`, `world_size`, `rank`) for path-based runs
 - in compact game-level mode, metrics also include game counts (`train_games`, `val_games`) and `runtime_splice` settings used during indexing
 - in compact game-level mode, metrics include `cache_load_reason_by_split` with per-split cache status (`hit`) or fallback reason string (for example `cache_config_mismatch`, `cache_file_missing:...`)
 - epoch history (train_loss, val_loss, top1, top5)
@@ -151,6 +160,11 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - tiny game-dataset training path that confirms cache-backed data loading mode is used when cache is present
   - per-split cache-load reason reporting (`cache_load_reason_by_split`) in dataset metrics/progress setup events for game datasets (hit vs fallback reason)
   - multistep file-backed training path emits rollout metrics/progress fields and multistep runtime metadata
+  - distributed-path training regression checks with mocked DDP/sampler:
+    - non-primary rank suppresses progress callback events
+    - primary rank emits progress callback events and distributed metadata
+- `tests/test_train_baseline_telemetry.py` covers distributed-context parsing helpers for `auto/off/on` CLI mode behavior
+- `tests/test_train_baseline_checkpoint_flags.py` verifies distributed CLI flags are exposed by `scripts/train_baseline.py`
 - `tests/test_game_dataset_architecture.py` covers:
   - compact game-dataset builder CLI output schema (`moves`, no duplicated splice rows)
   - single-step training from compact game-level JSONL via runtime splicing

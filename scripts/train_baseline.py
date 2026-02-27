@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from datetime import timedelta
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch
+import torch.distributed as dist
 
 from src.chessbot.io_utils import ensure_parent, write_json
 from src.chessbot.training import train_next_move_model_from_jsonl_paths
@@ -114,6 +116,36 @@ def _summarize_telemetry_samples(samples: List[Dict[str, Any]]) -> Dict[str, Any
         "last_ts_ms": last_ts,
         "duration_seconds": ((last_ts - first_ts) / 1000.0) if (isinstance(first_ts, int) and isinstance(last_ts, int)) else None,
         "metrics": metrics,
+    }
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, str(default))).strip())
+    except Exception:
+        return int(default)
+
+
+def _resolve_distributed_context(mode: str) -> Dict[str, int | bool]:
+    normalized = str(mode or "auto").strip().lower()
+    if normalized not in {"auto", "off", "on"}:
+        raise ValueError(f"Unsupported distributed mode: {mode}")
+    world_size = max(1, _env_int("WORLD_SIZE", 1))
+    rank = max(0, _env_int("RANK", 0))
+    local_rank = max(0, _env_int("LOCAL_RANK", 0))
+    if normalized == "off":
+        enabled = False
+    elif normalized == "on":
+        enabled = world_size > 1
+        if not enabled:
+            raise RuntimeError("Distributed mode 'on' requires torchrun-style WORLD_SIZE>1 environment")
+    else:
+        enabled = world_size > 1
+    return {
+        "enabled": bool(enabled),
+        "world_size": int(world_size),
+        "rank": int(rank),
+        "local_rank": int(local_rank),
     }
 
 
@@ -339,6 +371,23 @@ def main() -> None:
         default="auto",
         help="Torch device to use (default: auto, e.g. cuda, cuda:0, cpu)",
     )
+    parser.add_argument(
+        "--distributed",
+        choices=["auto", "off", "on"],
+        default="auto",
+        help="Distributed mode: auto (enable under torchrun), off, or on (requires WORLD_SIZE>1).",
+    )
+    parser.add_argument(
+        "--distributed-backend",
+        default="nccl",
+        help="torch.distributed backend when distributed mode is enabled",
+    )
+    parser.add_argument(
+        "--distributed-timeout-sec",
+        type=int,
+        default=1800,
+        help="Process-group init timeout in seconds when distributed mode is enabled",
+    )
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
     parser.add_argument(
         "--pin-memory",
@@ -424,6 +473,28 @@ def main() -> None:
         help="Base directory for per-run telemetry logs (gitignored local folder)",
     )
     args = parser.parse_args()
+    dist_ctx = _resolve_distributed_context(args.distributed)
+    distributed_enabled = bool(dist_ctx["enabled"])
+    distributed_rank = int(dist_ctx["rank"])
+    distributed_world_size = int(dist_ctx["world_size"])
+    distributed_local_rank = int(dist_ctx["local_rank"])
+    is_primary_rank = (not distributed_enabled) or distributed_rank == 0
+    distributed_initialized = False
+    device_request = str(args.device)
+    if distributed_enabled:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed GPU training requires CUDA, but torch.cuda.is_available() is False")
+        torch.cuda.set_device(distributed_local_rank)
+        if device_request in {"auto", "cuda"}:
+            device_request = f"cuda:{distributed_local_rank}"
+        if not dist.is_initialized():
+            timeout = timedelta(seconds=max(1, int(args.distributed_timeout_sec)))
+            dist.init_process_group(
+                backend=str(args.distributed_backend),
+                init_method="env://",
+                timeout=timeout,
+            )
+            distributed_initialized = True
     train_paths = [Path(p).resolve() for p in args.train]
     val_paths = [Path(p).resolve() for p in args.val]
     train_path = train_paths[0]
@@ -439,10 +510,10 @@ def main() -> None:
 
     progress_fh = None
     telemetry = _TrainingTelemetryLogger(
-        enabled=bool(args.telemetry),
+        enabled=bool(args.telemetry and is_primary_rank),
         run_dir=telemetry_run_dir,
         interval_sec=float(args.telemetry_interval_sec),
-        requested_device=str(args.device),
+        requested_device=str(device_request),
     )
 
     telemetry.init_run(
@@ -456,7 +527,14 @@ def main() -> None:
             "metrics_out": str(metrics_path),
             "train_paths": [str(p) for p in train_paths],
             "val_paths": [str(p) for p in val_paths],
-            "requested_device": str(args.device),
+            "requested_device": str(device_request),
+            "distributed": {
+                "enabled": bool(distributed_enabled),
+                "rank": int(distributed_rank),
+                "world_size": int(distributed_world_size),
+                "local_rank": int(distributed_local_rank),
+                "backend": str(args.distributed_backend),
+            },
             "telemetry_interval_sec": float(args.telemetry_interval_sec),
             "model_request": {
                 "embed_dim": int(args.embed_dim),
@@ -489,6 +567,8 @@ def main() -> None:
 
     def emit_progress(event: dict) -> None:
         nonlocal progress_fh
+        if not is_primary_rank:
+            return
         telemetry.update_from_progress_event(event)
         if progress_jsonl_path is None:
             return
@@ -499,14 +579,21 @@ def main() -> None:
         progress_fh.write(json.dumps(row, ensure_ascii=True) + "\n")
         progress_fh.flush()
 
-    if args.verbose:
+    if args.verbose and is_primary_rank:
         print(
             {
                 "torch_version": torch.__version__,
                 "cuda_is_available": torch.cuda.is_available(),
                 "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
                 "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-                "requested_device": args.device,
+                "requested_device": device_request,
+                "distributed": {
+                    "enabled": bool(distributed_enabled),
+                    "rank": int(distributed_rank),
+                    "world_size": int(distributed_world_size),
+                    "local_rank": int(distributed_local_rank),
+                    "backend": str(args.distributed_backend),
+                },
             }
         )
         print(
@@ -536,7 +623,7 @@ def main() -> None:
                         "endgame": args.phase_weight_endgame,
                     },
                     "use_winner": not args.no_winner_feature,
-                    "device_requested": args.device,
+            "device_requested": device_request,
                     "num_workers": args.num_workers,
                     "pin_memory_requested": args.pin_memory,
                     "amp_requested": args.amp,
@@ -581,7 +668,7 @@ def main() -> None:
             "val_paths": [str(p) for p in val_paths],
             "output_path": str(output_path),
             "metrics_out": str(metrics_path),
-            "device_requested": str(args.device),
+            "device_requested": str(device_request),
             "batch_size": int(args.batch_size),
             "num_workers": int(args.num_workers),
             "amp_requested": bool(args.amp),
@@ -592,6 +679,12 @@ def main() -> None:
             "runtime_min_target": int(args.runtime_min_target),
             "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),
             "require_runtime_splice_cache": bool(args.require_runtime_splice_cache),
+            "distributed": {
+                "enabled": bool(distributed_enabled),
+                "rank": int(distributed_rank),
+                "world_size": int(distributed_world_size),
+                "local_rank": int(distributed_local_rank),
+            },
         }
     )
 
@@ -623,7 +716,7 @@ def main() -> None:
                 "endgame": args.phase_weight_endgame,
             },
             use_winner=not args.no_winner_feature,
-            device_str=args.device,
+            device_str=device_request,
             num_workers=args.num_workers,
             pin_memory=args.pin_memory,
             amp=args.amp,
@@ -652,6 +745,9 @@ def main() -> None:
             max_total_rows=args.max_total_rows,
             best_checkpoint_out=args.best_checkpoint_out,
             epoch_checkpoint_dir=args.epoch_checkpoint_dir,
+            distributed_enabled=distributed_enabled,
+            distributed_rank=distributed_rank,
+            distributed_world_size=distributed_world_size,
         )
     except Exception as exc:
         emit_progress({"event": "script_error", "error_type": type(exc).__name__, "message": str(exc)})
@@ -670,11 +766,13 @@ def main() -> None:
                 "runtime_seconds": float(time.monotonic() - train_started_monotonic),
             }
         )
+        if distributed_initialized and dist.is_initialized():
+            dist.destroy_process_group()
         raise
 
     train_rows_by_file = dataset_info["train_rows_by_file"]
     val_rows_by_file = dataset_info["val_rows_by_file"]
-    if args.verbose:
+    if args.verbose and is_primary_rank:
         print(
             {
                 "dataset_loaded": {
@@ -692,8 +790,25 @@ def main() -> None:
             }
         )
 
-    if args.verbose:
+    if args.verbose and is_primary_rank:
         print({"training_complete": {"epochs_ran": len(history), "last_epoch": (history[-1]["epoch"] if history else None)}})
+
+    if not is_primary_rank:
+        telemetry.stop()
+        telemetry.write_final_summary(
+            {
+                "status": "ok",
+                "runtime_seconds": float(time.monotonic() - train_started_monotonic),
+                "epochs_completed": int(len(history)),
+                "dataset_schema": dataset_info.get("dataset_schema"),
+                "data_loading": dataset_info.get("data_loading"),
+                "distributed_rank": int(distributed_rank),
+                "distributed_world_size": int(distributed_world_size),
+            }
+        )
+        if distributed_initialized and dist.is_initialized():
+            dist.destroy_process_group()
+        return
 
     ensure_parent(args.output)
     torch.save(artifact, args.output)
@@ -726,7 +841,14 @@ def main() -> None:
         "phase_embed_dim": args.phase_embed_dim,
         "side_to_move_feature": args.side_to_move_feature,
         "side_to_move_embed_dim": args.side_to_move_embed_dim,
-        "device_requested": args.device,
+        "device_requested": device_request,
+        "distributed": {
+            "enabled": bool(distributed_enabled),
+            "rank": int(distributed_rank),
+            "world_size": int(distributed_world_size),
+            "local_rank": int(distributed_local_rank),
+            "backend": str(args.distributed_backend),
+        },
         "phase_weights": {
             "unknown": args.phase_weight_unknown,
             "opening": args.phase_weight_opening,
@@ -801,11 +923,11 @@ def main() -> None:
             "early_stopping": summary.get("early_stopping"),
         }
     )
-    if args.verbose:
+    if args.verbose and is_primary_rank:
         print({"best_checkpoint": summary.get("best_checkpoint")})
     print(f"Saved model: {args.output}")
     print(f"Saved metrics: {args.metrics_out}")
-    if args.telemetry:
+    if args.telemetry and is_primary_rank:
         print(f"Saved telemetry logs: {telemetry_run_dir}")
     telemetry.stop()
     telemetry.write_final_summary(
@@ -821,6 +943,8 @@ def main() -> None:
     )
     if progress_fh is not None:
         progress_fh.close()
+    if distributed_initialized and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

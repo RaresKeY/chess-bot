@@ -1,6 +1,8 @@
 import importlib.util
+import os
 import pathlib
 import unittest
+from unittest import mock
 
 
 def _load_train_baseline_module():
@@ -42,7 +44,25 @@ class TrainBaselineTelemetryTests(unittest.TestCase):
         self.assertEqual(gpu_util["max"], 30.0)
         self.assertAlmostEqual(gpu_util["mean"], 20.0)
 
+    def test_resolve_distributed_context_auto(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2", "RANK": "1", "LOCAL_RANK": "1"}, clear=False):
+            ctx = self.mod._resolve_distributed_context("auto")
+        self.assertTrue(ctx["enabled"])
+        self.assertEqual(ctx["world_size"], 2)
+        self.assertEqual(ctx["rank"], 1)
+        self.assertEqual(ctx["local_rank"], 1)
+
+    def test_resolve_distributed_context_off(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "4", "RANK": "3", "LOCAL_RANK": "1"}, clear=False):
+            ctx = self.mod._resolve_distributed_context("off")
+        self.assertFalse(ctx["enabled"])
+        self.assertEqual(ctx["world_size"], 4)
+
+    def test_resolve_distributed_context_on_requires_torchrun_env(self):
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "1", "RANK": "0", "LOCAL_RANK": "0"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                self.mod._resolve_distributed_context("on")
+
 
 if __name__ == "__main__":
     unittest.main()
-

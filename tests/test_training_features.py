@@ -826,6 +826,163 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertIn("rollout_step4_acc", epoch_end["metrics"])
         self.assertIn("rollout_weighted_continuation_score", epoch_end["metrics"])
 
+    def test_distributed_non_primary_suppresses_progress_events(self):
+        class _DummyDDP(torch.nn.Module):
+            def __init__(self, module, **_kwargs):
+                super().__init__()
+                self.module = module
+
+            def forward(self, *args, **kwargs):
+                return self.module(*args, **kwargs)
+
+        class _DummyDistributedSampler(torch.utils.data.Sampler):
+            def __init__(self, data_source, **_kwargs):
+                self._n = len(data_source)
+
+            def __iter__(self):
+                return iter(range(self._n))
+
+            def __len__(self):
+                return self._n
+
+            def set_epoch(self, _epoch):
+                return None
+
+        rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = Path(tmp) / "train.jsonl"
+            val_path = Path(tmp) / "val.jsonl"
+            for path in (train_path, val_path):
+                with path.open("w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row) + "\n")
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            with mock.patch("src.chessbot.training.DDP", _DummyDDP), mock.patch(
+                "src.chessbot.training.DistributedSampler", _DummyDistributedSampler
+            ):
+                artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                    train_paths=[str(train_path)],
+                    val_paths=[str(val_path)],
+                    epochs=1,
+                    batch_size=2,
+                    lr=1e-3,
+                    seed=7,
+                    embed_dim=8,
+                    hidden_dim=16,
+                    num_layers=1,
+                    dropout=0.0,
+                    winner_weight=1.0,
+                    use_winner=True,
+                    device_str="cpu",
+                    num_workers=0,
+                    pin_memory=False,
+                    amp=False,
+                    restore_best=True,
+                    use_phase_feature=True,
+                    use_side_to_move_feature=True,
+                    lr_scheduler="none",
+                    early_stopping_patience=0,
+                    verbose=False,
+                    show_progress=False,
+                    progress_callback=on_progress,
+                    distributed_enabled=True,
+                    distributed_rank=1,
+                    distributed_world_size=2,
+                )
+        self.assertEqual(events, [])
+        self.assertEqual(len(history), 1)
+        self.assertTrue(dataset_info["distributed"]["enabled"])
+        self.assertEqual(dataset_info["distributed"]["rank"], 1)
+        self.assertEqual(artifact["runtime"]["distributed"]["world_size"], 2)
+
+    def test_distributed_primary_emits_progress_and_metadata(self):
+        class _DummyDDP(torch.nn.Module):
+            def __init__(self, module, **_kwargs):
+                super().__init__()
+                self.module = module
+
+            def forward(self, *args, **kwargs):
+                return self.module(*args, **kwargs)
+
+        class _DummyDistributedSampler(torch.utils.data.Sampler):
+            def __init__(self, data_source, **_kwargs):
+                self._n = len(data_source)
+
+            def __iter__(self):
+                return iter(range(self._n))
+
+            def __len__(self):
+                return self._n
+
+            def set_epoch(self, _epoch):
+                return None
+
+        rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = Path(tmp) / "train.jsonl"
+            val_path = Path(tmp) / "val.jsonl"
+            for path in (train_path, val_path):
+                with path.open("w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row) + "\n")
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            with mock.patch("src.chessbot.training.DDP", _DummyDDP), mock.patch(
+                "src.chessbot.training.DistributedSampler", _DummyDistributedSampler
+            ):
+                artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                    train_paths=[str(train_path)],
+                    val_paths=[str(val_path)],
+                    epochs=1,
+                    batch_size=2,
+                    lr=1e-3,
+                    seed=7,
+                    embed_dim=8,
+                    hidden_dim=16,
+                    num_layers=1,
+                    dropout=0.0,
+                    winner_weight=1.0,
+                    use_winner=True,
+                    device_str="cpu",
+                    num_workers=0,
+                    pin_memory=False,
+                    amp=False,
+                    restore_best=True,
+                    use_phase_feature=True,
+                    use_side_to_move_feature=True,
+                    lr_scheduler="none",
+                    early_stopping_patience=0,
+                    verbose=False,
+                    show_progress=False,
+                    progress_callback=on_progress,
+                    distributed_enabled=True,
+                    distributed_rank=0,
+                    distributed_world_size=2,
+                )
+        self.assertEqual(len(history), 1)
+        event_names = [e.get("event") for e in events]
+        self.assertIn("train_setup", event_names)
+        self.assertIn("train_complete", event_names)
+        setup = [e for e in events if e.get("event") == "train_setup"][0]
+        self.assertEqual(setup["distributed"]["rank"], 0)
+        self.assertEqual(setup["distributed"]["world_size"], 2)
+        self.assertEqual(dataset_info["distributed"]["rank"], 0)
+        self.assertTrue(artifact["runtime"]["distributed"]["enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

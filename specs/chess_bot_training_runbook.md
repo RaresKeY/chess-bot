@@ -79,6 +79,30 @@ Run from repo root:
   --no-progress
 ```
 
+## Multi-GPU (Single Node, Torchrun/DDP)
+
+```bash
+torchrun --standalone --nproc-per-node=2 scripts/train_baseline.py \
+  --train data/dataset/elite_2025-11_game/train.jsonl \
+  --val data/dataset/elite_2025-11_game/val.jsonl \
+  --output artifacts/model_full_elite_2025-11_game_ddp.pt \
+  --metrics-out artifacts/train_metrics_full_elite_2025-11_game_ddp.json \
+  --progress-jsonl-out artifacts/train_progress_full_elite_2025-11_game_ddp.jsonl \
+  --distributed auto \
+  --device auto \
+  --epochs 20 \
+  --batch-size 512 \
+  --num-workers 8 \
+  --amp \
+  --runtime-min-context 8 \
+  --runtime-min-target 1 \
+  --runtime-max-samples-per-game 0
+```
+
+Notes:
+- Keep `--distributed auto` for backward compatibility; the same command still works in single-process mode when not launched with `torchrun`.
+- Only rank 0 writes final model/metrics/progress files.
+
 ## Dataset Expectations
 - Input format: compact game dataset (`game_jsonl_runtime_splice_v1`)
 - Required files:

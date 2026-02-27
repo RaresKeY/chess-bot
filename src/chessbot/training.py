@@ -9,8 +9,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import chess
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 from src.chessbot.model import (
     NextMoveLSTM,
@@ -546,6 +549,19 @@ def _cache_load_reason_label(*, used_cache: bool, reason: str) -> str:
     if bool(used_cache):
         return "hit"
     return str(reason or "runtime_index_fallback")
+
+
+def _is_primary_process(*, distributed_enabled: bool, distributed_rank: int) -> bool:
+    return (not bool(distributed_enabled)) or int(distributed_rank) == 0
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, DDP) else model
+
+
+def _cpu_cloned_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+    base = _unwrap_model(model)
+    return {k: v.detach().cpu().clone() for k, v in base.state_dict().items()}
 
 
 class IndexedJsonlGameSpliceDataset(Dataset):
@@ -1220,14 +1236,9 @@ def train_next_move_model(
         "pin_memory": pin_memory,
     }
     if num_workers > 0:
-        # Keep prefetch small to limit host RAM growth from queued batches.
         train_loader_kwargs["prefetch_factor"] = 1
-        # Avoid persistent workers; they retain Python/Torch allocator caches across epochs.
         train_loader_kwargs["persistent_workers"] = False
     train_loader = DataLoader(train_ds, shuffle=True, **train_loader_kwargs)
-
-    # Validation is infrequent and not throughput-critical; keeping it single-process
-    # avoids a second worker pool and substantially reduces host RAM pressure.
     val_loader = DataLoader(
         val_ds,
         shuffle=False,
@@ -1236,6 +1247,7 @@ def train_next_move_model(
         num_workers=0,
         pin_memory=pin_memory,
     )
+
     model = NextMoveLSTM(
         vocab_size=len(vocab),
         embed_dim=embed_dim,
@@ -1549,7 +1561,6 @@ def train_next_move_model(
             "training_objective": "single_step_next_move",
         },
     }
-
     return artifact, history
 
 
@@ -1595,7 +1606,11 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
     require_runtime_splice_cache: bool = False,
+    distributed_enabled: bool = False,
+    distributed_rank: int = 0,
+    distributed_world_size: int = 1,
 ):
+    is_primary = _is_primary_process(distributed_enabled=distributed_enabled, distributed_rank=distributed_rank)
     random.seed(seed)
     torch.manual_seed(seed)
     train_paths = [os.fspath(p) for p in train_paths]
@@ -1698,7 +1713,18 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     if device.type == "cuda" and not use_cuda:
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
 
+    if bool(distributed_enabled) and int(distributed_world_size) <= 1:
+        raise RuntimeError("distributed_enabled requires distributed_world_size > 1")
     pin_memory = bool(pin_memory and device.type == "cuda")
+    train_sampler = None
+    if bool(distributed_enabled):
+        train_sampler = DistributedSampler(
+            train_ds,
+            num_replicas=int(distributed_world_size),
+            rank=int(distributed_rank),
+            shuffle=True,
+            seed=int(seed),
+        )
     train_loader_kwargs = {
         "batch_size": batch_size,
         "collate_fn": collate_train_rollout,
@@ -1708,7 +1734,12 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = 1
         train_loader_kwargs["persistent_workers"] = False
-    train_loader = DataLoader(train_ds, shuffle=True, **train_loader_kwargs)
+    train_loader = DataLoader(
+        train_ds,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        **train_loader_kwargs,
+    )
     val_loader = DataLoader(
         val_ds,
         shuffle=False,
@@ -1730,6 +1761,13 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         use_side_to_move=use_side_to_move_feature,
         side_to_move_embed_dim=side_to_move_embed_dim,
     ).to(device)
+    train_model: nn.Module = model
+    if bool(distributed_enabled):
+        ddp_kwargs: Dict[str, Any] = {}
+        if device.type == "cuda":
+            ddp_kwargs["device_ids"] = [int(device.index) if device.index is not None else 0]
+            ddp_kwargs["output_device"] = int(device.index) if device.index is not None else 0
+        train_model = DDP(model, **ddp_kwargs)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     has_val_rows = len(val_ds) > 0
     scheduler_kind = str(lr_scheduler or "none").strip().lower()
@@ -1773,7 +1811,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         "best_metric": None,
         "bad_epochs": 0,
     }
-    if verbose:
+    if verbose and is_primary:
         print(
             {
                 "train_setup": {
@@ -1826,10 +1864,15 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                     "closeness_horizon": int(closeness_horizon),
                     "rollout_loss_decay": float(rollout_loss_decay),
                     "rollout_loss_weights": [float(x) for x in rollout_step_weights],
+                    "distributed": {
+                        "enabled": bool(distributed_enabled),
+                        "world_size": int(distributed_world_size),
+                        "rank": int(distributed_rank),
+                    },
                 }
             }
         )
-    if progress_callback is not None:
+    if progress_callback is not None and is_primary:
         progress_callback(
             {
                 "event": "train_setup",
@@ -1847,14 +1890,21 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 "training_objective": "multistep_teacher_forced_recursive",
                 "rollout_horizon": int(rollout_horizon),
                 "closeness_horizon": int(closeness_horizon),
+                "distributed": {
+                    "enabled": bool(distributed_enabled),
+                    "world_size": int(distributed_world_size),
+                    "rank": int(distributed_rank),
+                },
             }
         )
 
     history: List[Dict] = []
     for epoch in range(1, epochs + 1):
-        if verbose:
+        if train_sampler is not None:
+            train_sampler.set_epoch(int(epoch))
+        if verbose and is_primary:
             print(f"[train] epoch {epoch}/{epochs} start")
-        if progress_callback is not None:
+        if progress_callback is not None and is_primary:
             progress_callback(
                 {
                     "event": "epoch_start",
@@ -1864,7 +1914,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 }
             )
 
-        model.train()
+        train_model.train()
         running_loss = 0.0
         running_weight = 0.0
         total_batches = len(train_loader)
@@ -1901,7 +1951,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             total_batch_weight = None
             with torch.amp.autocast("cuda", enabled=use_amp):
                 for step_idx in range(rollout_horizon):
-                    logits = model(current_tokens, current_lengths, winners, phases, side_to_moves)
+                    logits = train_model(current_tokens, current_lengths, winners, phases, side_to_moves)
                     losses = criterion(logits, rollout_targets[:, step_idx])
                     valid_step = rollout_mask[:, step_idx].float()
                     step_weight = float(rollout_step_weights[step_idx])
@@ -1931,16 +1981,16 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             batch_weight_val = float(total_batch_weight.item()) if total_batch_weight is not None else 0.0
             running_weight += batch_weight_val
             running_loss += float(loss.item()) * batch_weight_val
-            if verbose and show_progress:
+            if verbose and show_progress and is_primary:
                 # Reuse progress helper; "seen" is weighted effective count in multistep mode.
                 _print_epoch_progress(epoch, epochs, batch_idx, total_batches, running_loss, int(max(running_weight, 1)))
-        if verbose and show_progress and total_batches > 0:
+        if verbose and show_progress and total_batches > 0 and is_primary:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
         train_loss = running_loss / max(running_weight, 1e-12)
         val_metrics = evaluate_loader_multistep(
-            model=model,
+            model=train_model,
             loader=val_loader,
             device=device,
             criterion=criterion,
@@ -1960,7 +2010,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             **val_metrics,
         }
         history.append(row)
-        if progress_callback is not None:
+        if progress_callback is not None and is_primary:
             progress_callback(
                 {
                     "event": "epoch_end",
@@ -1983,7 +2033,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                     },
                 }
             )
-        if verbose:
+        if verbose and is_primary:
             print(
                 {
                     "epoch": epoch,
@@ -2005,7 +2055,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             sched_value = _metric_value(row, scheduler_metric)
             scheduler.step(sched_value)
             after_lr = float(optimizer.param_groups[0]["lr"])
-            if verbose and after_lr != before_lr:
+            if verbose and after_lr != before_lr and is_primary:
                 print(
                     {
                         "lr_scheduler_step": {
@@ -2030,8 +2080,8 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 best_val_loss = cur_val_loss
                 best_top1 = cur_top1
                 best_epoch = epoch
-                best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                if verbose:
+                best_state_dict = _cpu_cloned_state_dict(train_model)
+                if verbose and is_primary:
                     print(
                         {
                             "best_checkpoint_update": {
@@ -2063,9 +2113,9 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                             "bad_epochs": int(early_stop_bad_epochs),
                         }
                     )
-                    if verbose:
+                    if verbose and is_primary:
                         print({"early_stopping_triggered": early_stop_info})
-                    if progress_callback is not None:
+                    if progress_callback is not None and is_primary:
                         progress_callback(
                             {
                                 "event": "early_stopping_triggered",
@@ -2096,7 +2146,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         "best_val_loss": None,
     }
     if restore_best and has_val_rows and best_state_dict is not None:
-        model.load_state_dict(best_state_dict)
+        _unwrap_model(train_model).load_state_dict(best_state_dict)
         best_checkpoint_info.update(
             {
                 "used": True,
@@ -2104,16 +2154,16 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 "best_val_loss": float(best_val_loss),
             }
         )
-        if verbose:
+        if verbose and is_primary:
             print({"best_checkpoint_restored": best_checkpoint_info})
-    elif verbose:
+    elif verbose and is_primary:
         print({"best_checkpoint_restored": best_checkpoint_info})
 
     artifact = {
         "artifact_format_version": 2,
         "model_family": "next_move_lstm",
         "training_objective": "multistep_teacher_forced_recursive",
-        "state_dict": model.state_dict(),
+        "state_dict": _unwrap_model(train_model).state_dict(),
         "vocab": vocab,
         "config": {
             "embed_dim": embed_dim,
@@ -2152,6 +2202,11 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             "closeness_horizon": int(closeness_horizon),
             "rollout_loss_decay": float(rollout_loss_decay),
             "rollout_loss_weights": [float(x) for x in rollout_step_weights],
+            "distributed": {
+                "enabled": bool(distributed_enabled),
+                "world_size": int(distributed_world_size),
+                "rank": int(distributed_rank),
+            },
         },
     }
     dataset_info = {
@@ -2168,6 +2223,11 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         "rollout_horizon": int(rollout_horizon),
         "closeness_horizon": int(closeness_horizon),
         "rollout_loss_decay": float(rollout_loss_decay),
+        "distributed": {
+            "enabled": bool(distributed_enabled),
+            "world_size": int(distributed_world_size),
+            "rank": int(distributed_rank),
+        },
     }
     if schema_kind == "game":
         dataset_info.update(
@@ -2186,7 +2246,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 "runtime_splice_index_bytes_val": int(val_runtime_index_bytes or 0),
             }
         )
-    if progress_callback is not None:
+    if progress_callback is not None and is_primary:
         progress_callback(
             {
                 "event": "train_complete",
@@ -2249,6 +2309,9 @@ def train_next_move_model_from_jsonl_paths(
     max_total_rows: int = 0,
     best_checkpoint_out: str = "",
     epoch_checkpoint_dir: str = "",
+    distributed_enabled: bool = False,
+    distributed_rank: int = 0,
+    distributed_world_size: int = 1,
 ):
     if int(rollout_horizon) > 1:
         return _train_next_move_model_from_jsonl_paths_multistep(
@@ -2293,7 +2356,11 @@ def train_next_move_model_from_jsonl_paths(
             runtime_min_target=int(runtime_min_target),
             runtime_max_samples_per_game=int(runtime_max_samples_per_game),
             require_runtime_splice_cache=bool(require_runtime_splice_cache),
+            distributed_enabled=bool(distributed_enabled),
+            distributed_rank=int(distributed_rank),
+            distributed_world_size=int(distributed_world_size),
         )
+    is_primary = _is_primary_process(distributed_enabled=distributed_enabled, distributed_rank=distributed_rank)
     random.seed(seed)
     torch.manual_seed(seed)
 
@@ -2433,7 +2500,18 @@ def train_next_move_model_from_jsonl_paths(
     if device.type == "cuda" and not use_cuda:
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
 
+    if bool(distributed_enabled) and int(distributed_world_size) <= 1:
+        raise RuntimeError("distributed_enabled requires distributed_world_size > 1")
     pin_memory = bool(pin_memory and device.type == "cuda")
+    train_sampler = None
+    if bool(distributed_enabled):
+        train_sampler = DistributedSampler(
+            train_ds,
+            num_replicas=int(distributed_world_size),
+            rank=int(distributed_rank),
+            shuffle=True,
+            seed=int(seed),
+        )
     train_loader_kwargs = {
         "batch_size": batch_size,
         "collate_fn": collate_train,
@@ -2443,7 +2521,12 @@ def train_next_move_model_from_jsonl_paths(
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = 1
         train_loader_kwargs["persistent_workers"] = False
-    train_loader = DataLoader(train_ds, shuffle=True, **train_loader_kwargs)
+    train_loader = DataLoader(
+        train_ds,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        **train_loader_kwargs,
+    )
 
     val_loader = DataLoader(
         val_ds,
@@ -2465,6 +2548,13 @@ def train_next_move_model_from_jsonl_paths(
         use_side_to_move=use_side_to_move_feature,
         side_to_move_embed_dim=side_to_move_embed_dim,
     ).to(device)
+    train_model: nn.Module = model
+    if bool(distributed_enabled):
+        ddp_kwargs: Dict[str, Any] = {}
+        if device.type == "cuda":
+            ddp_kwargs["device_ids"] = [int(device.index) if device.index is not None else 0]
+            ddp_kwargs["output_device"] = int(device.index) if device.index is not None else 0
+        train_model = DDP(model, **ddp_kwargs)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     has_val_rows = len(val_ds) > 0
@@ -2566,10 +2656,15 @@ def train_next_move_model_from_jsonl_paths(
                         "train_subset_applied": bool(train_subset_applied),
                         "val_subset_applied": bool(val_subset_applied),
                     },
+                    "distributed": {
+                        "enabled": bool(distributed_enabled),
+                        "world_size": int(distributed_world_size),
+                        "rank": int(distributed_rank),
+                    },
                 }
             }
         )
-    if progress_callback is not None:
+    if progress_callback is not None and is_primary:
         progress_callback(
             {
                 "event": "train_setup",
@@ -2593,14 +2688,19 @@ def train_next_move_model_from_jsonl_paths(
                     "train_subset_applied": bool(train_subset_applied),
                     "val_subset_applied": bool(val_subset_applied),
                 },
+                "distributed": {
+                    "enabled": bool(distributed_enabled),
+                    "world_size": int(distributed_world_size),
+                    "rank": int(distributed_rank),
+                },
             }
         )
 
     best_checkpoint_out_path = str(best_checkpoint_out or "").strip()
     epoch_checkpoint_dir_path = str(epoch_checkpoint_dir or "").strip()
-    if best_checkpoint_out_path:
+    if best_checkpoint_out_path and is_primary:
         Path(best_checkpoint_out_path).parent.mkdir(parents=True, exist_ok=True)
-    if epoch_checkpoint_dir_path:
+    if epoch_checkpoint_dir_path and is_primary:
         Path(epoch_checkpoint_dir_path).mkdir(parents=True, exist_ok=True)
 
     def _build_checkpoint_artifact(
@@ -2651,9 +2751,11 @@ def train_next_move_model_from_jsonl_paths(
 
     history: List[Dict] = []
     for epoch in range(1, epochs + 1):
-        if verbose:
+        if train_sampler is not None:
+            train_sampler.set_epoch(int(epoch))
+        if verbose and is_primary:
             print(f"[train] epoch {epoch}/{epochs} start")
-        if progress_callback is not None:
+        if progress_callback is not None and is_primary:
             progress_callback(
                 {
                     "event": "epoch_start",
@@ -2662,7 +2764,7 @@ def train_next_move_model_from_jsonl_paths(
                     "train_batches_total": int(len(train_loader)),
                 }
             )
-        model.train()
+        train_model.train()
         running_loss = 0.0
         seen = 0
         total_batches = len(train_loader)
@@ -2675,7 +2777,7 @@ def train_next_move_model_from_jsonl_paths(
             side_to_moves = side_to_moves.to(device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model(tokens, lengths, winners, phases, side_to_moves)
+                logits = train_model(tokens, lengths, winners, phases, side_to_moves)
                 losses = criterion(logits, labels)
                 weights = _example_loss_weights(
                     winners=winners,
@@ -2693,15 +2795,15 @@ def train_next_move_model_from_jsonl_paths(
             bs = labels.size(0)
             seen += bs
             running_loss += loss.item() * bs
-            if verbose and show_progress:
+            if verbose and show_progress and is_primary:
                 _print_epoch_progress(epoch, epochs, batch_idx, total_batches, running_loss, seen)
-        if verbose and show_progress and total_batches > 0:
+        if verbose and show_progress and total_batches > 0 and is_primary:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
         train_loss = running_loss / max(seen, 1)
         val_metrics = evaluate_loader(
-            model,
+            train_model,
             val_loader,
             device,
             topks=(1, 5),
@@ -2718,7 +2820,7 @@ def train_next_move_model_from_jsonl_paths(
             **val_metrics,
         }
         history.append(row)
-        if progress_callback is not None:
+        if progress_callback is not None and is_primary:
             progress_callback(
                 {
                     "event": "epoch_end",
@@ -2733,7 +2835,7 @@ def train_next_move_model_from_jsonl_paths(
                     },
                 }
             )
-        if verbose:
+        if verbose and is_primary:
             print(
                 {
                     "epoch": epoch,
@@ -2749,7 +2851,7 @@ def train_next_move_model_from_jsonl_paths(
             sched_value = _metric_value(row, scheduler_metric)
             scheduler.step(sched_value)
             after_lr = float(optimizer.param_groups[0]["lr"])
-            if verbose and after_lr != before_lr:
+            if verbose and after_lr != before_lr and is_primary:
                 print(
                     {
                         "lr_scheduler_step": {
@@ -2774,8 +2876,8 @@ def train_next_move_model_from_jsonl_paths(
                 best_val_loss = cur_val_loss
                 best_top1 = cur_top1
                 best_epoch = epoch
-                best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                if verbose:
+                best_state_dict = _cpu_cloned_state_dict(train_model)
+                if verbose and is_primary:
                     print(
                         {
                             "best_checkpoint_update": {
@@ -2785,27 +2887,27 @@ def train_next_move_model_from_jsonl_paths(
                             }
                         }
                     )
-                if best_checkpoint_out_path:
+                if best_checkpoint_out_path and is_primary:
                     best_artifact = _build_checkpoint_artifact(
-                        {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                        _cpu_cloned_state_dict(train_model),
                         current_epoch=int(epoch),
                         latest_row=row,
                         checkpoint_kind="best_so_far",
                     )
                     torch.save(best_artifact, best_checkpoint_out_path)
-                    if verbose:
+                    if verbose and is_primary:
                         print({"best_checkpoint_saved_to_disk": {"epoch": int(epoch), "path": best_checkpoint_out_path}})
 
-        if epoch_checkpoint_dir_path:
+        if epoch_checkpoint_dir_path and is_primary:
             epoch_ckpt_path = os.path.join(epoch_checkpoint_dir_path, f"model_epoch_{int(epoch):02d}.pt")
             epoch_artifact = _build_checkpoint_artifact(
-                {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                _cpu_cloned_state_dict(train_model),
                 current_epoch=int(epoch),
                 latest_row=row,
                 checkpoint_kind="epoch_end",
             )
             torch.save(epoch_artifact, epoch_ckpt_path)
-            if verbose:
+            if verbose and is_primary:
                 print({"epoch_checkpoint_saved_to_disk": {"epoch": int(epoch), "path": epoch_ckpt_path}})
 
         if early_stop_enabled:
@@ -2829,9 +2931,9 @@ def train_next_move_model_from_jsonl_paths(
                             "bad_epochs": int(early_stop_bad_epochs),
                         }
                     )
-                    if verbose:
+                    if verbose and is_primary:
                         print({"early_stopping_triggered": early_stop_info})
-                    if progress_callback is not None:
+                    if progress_callback is not None and is_primary:
                         progress_callback(
                             {
                                 "event": "early_stopping_triggered",
@@ -2862,7 +2964,7 @@ def train_next_move_model_from_jsonl_paths(
         "best_val_loss": None,
     }
     if restore_best and has_val_rows and best_state_dict is not None:
-        model.load_state_dict(best_state_dict)
+        _unwrap_model(train_model).load_state_dict(best_state_dict)
         best_checkpoint_info.update(
             {
                 "used": True,
@@ -2870,16 +2972,16 @@ def train_next_move_model_from_jsonl_paths(
                 "best_val_loss": float(best_val_loss),
             }
         )
-        if verbose:
+        if verbose and is_primary:
             print({"best_checkpoint_restored": best_checkpoint_info})
-    elif verbose:
+    elif verbose and is_primary:
         print({"best_checkpoint_restored": best_checkpoint_info})
 
     artifact = {
         "artifact_format_version": 2,
         "model_family": "next_move_lstm",
         "training_objective": "single_step_next_move",
-        "state_dict": model.state_dict(),
+        "state_dict": _unwrap_model(train_model).state_dict(),
         "vocab": vocab,
         "config": {
             "embed_dim": embed_dim,
@@ -2914,6 +3016,11 @@ def train_next_move_model_from_jsonl_paths(
                 "endgame": float(phase_weight_vector[3].item()),
             },
             "training_objective": "single_step_next_move",
+            "distributed": {
+                "enabled": bool(distributed_enabled),
+                "world_size": int(distributed_world_size),
+                "rank": int(distributed_rank),
+            },
         },
     }
 
@@ -2929,6 +3036,11 @@ def train_next_move_model_from_jsonl_paths(
         "vocab_size": len(vocab),
         "data_loading": data_loading_mode,
         "dataset_schema": schema_kind,
+        "distributed": {
+            "enabled": bool(distributed_enabled),
+            "world_size": int(distributed_world_size),
+            "rank": int(distributed_rank),
+        },
         "subset_sampling": {
             "max_total_rows": int(max_total_rows),
             "max_train_rows": int(max_train_rows),
@@ -2954,7 +3066,7 @@ def train_next_move_model_from_jsonl_paths(
                 "runtime_splice_index_bytes_val": int(val_runtime_index_bytes or 0),
             }
         )
-    if progress_callback is not None:
+    if progress_callback is not None and is_primary:
         progress_callback(
             {
                 "event": "train_complete",

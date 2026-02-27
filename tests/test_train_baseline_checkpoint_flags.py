@@ -10,6 +10,9 @@ class TrainBaselineCheckpointFlagsTests(unittest.TestCase):
         self.assertIn("--max-total-rows", text)
         self.assertIn("--best-checkpoint-out", text)
         self.assertIn("--epoch-checkpoint-dir", text)
+        self.assertIn("--distributed", text)
+        self.assertIn("--distributed-backend", text)
+        self.assertIn("--distributed-timeout-sec", text)
 
     def test_training_supports_subset_sampling_and_checkpoint_paths(self):
         text = Path("src/chessbot/training.py").read_text(encoding="utf-8")
