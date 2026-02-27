@@ -17,6 +17,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, TextIO
 import chess
 from src.chessbot.io_utils import ensure_parent, write_json
 from src.chessbot.play_vs_model import LoadedMoveModel
+from src.chessbot.secrets import default_dotenv_paths, resolve_secret
 from src.chessbot.validation import game_id_for, winner_from_result
 
 
@@ -864,7 +865,11 @@ def _preview_from_fixture(cfg: BotConfig, move_provider: MoveProvider, fixture_p
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Lichess bot play loop using local move model")
-    p.add_argument("--token", default="", help="Lichess API token override (otherwise keyring, then LICHESS_BOT_TOKEN)")
+    p.add_argument(
+        "--token",
+        default="",
+        help="Lichess API token override (otherwise keyring, then LICHESS_BOT_TOKEN, then .env files)",
+    )
     p.add_argument("--keyring-service", default=DEFAULT_KEYRING_SERVICE, help="Keyring service name for token lookup")
     p.add_argument("--keyring-username", default=DEFAULT_KEYRING_USERNAME, help="Keyring username for token lookup")
     p.add_argument("--model", default="latest", help="Model artifact path or 'latest'")
@@ -912,26 +917,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _token_from_keyring(service: str, username: str) -> str:
-    try:
-        import keyring  # type: ignore
-    except Exception:
-        return ""
-    try:
-        token = keyring.get_password(service, username)
-    except Exception:
-        return ""
-    return token or ""
-
-
 def _resolve_live_token(args: argparse.Namespace) -> str:
-    token = str(getattr(args, "token", "") or "")
-    if token:
-        return token
-    token = _token_from_keyring(str(args.keyring_service), str(args.keyring_username))
-    if token:
-        return token
-    return str(os.environ.get("LICHESS_BOT_TOKEN", "") or "")
+    repo_root = Path(__file__).resolve().parents[2]
+    dotenv_paths = default_dotenv_paths(
+        repo_root=repo_root,
+        override_var_names=("LICHESS_DOTENV_PATH", "CHESSBOT_DOTENV_PATH"),
+        fallback_filenames=(".env.lichess", ".env"),
+    )
+    token, _ = resolve_secret(
+        explicit_value=str(getattr(args, "token", "") or ""),
+        env_var_names=("LICHESS_BOT_TOKEN",),
+        keyring_service=str(args.keyring_service),
+        keyring_username=str(args.keyring_username),
+        dotenv_keys=("LICHESS_BOT_TOKEN",),
+        dotenv_paths=dotenv_paths,
+        order=("explicit", "keyring", "env", "dotenv"),
+    )
+    return token
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -945,7 +947,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not token and not args.preview_fixture:
         raise SystemExit(
             "Missing token. Pass --token, install/configure keyring "
-            f"({args.keyring_service}/{args.keyring_username}), or set LICHESS_BOT_TOKEN"
+            f"({args.keyring_service}/{args.keyring_username}), set LICHESS_BOT_TOKEN, "
+            "or provide .env fallback"
         )
 
     if args.challenge_user:

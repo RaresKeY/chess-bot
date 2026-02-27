@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.hf_dataset_fetch import _parse_repo_dataset_versions, _select_versions
+from scripts.hf_dataset_fetch import _parse_repo_dataset_versions, _resolve_token, _select_versions
 
 
 def test_select_versions_single_dataset_latest_without_version() -> None:
@@ -29,3 +29,12 @@ def test_select_versions_single_dataset_missing_raises() -> None:
             dataset_name="missing",
             version="",
         )
+
+
+def test_resolve_token_falls_back_to_dotenv(tmp_path, monkeypatch) -> None:
+    dotenv = tmp_path / ".env.hf_dataset"
+    dotenv.write_text("HF_TOKEN=dotenv-hf-token\n", encoding="utf-8")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr("src.chessbot.secrets.token_from_keyring", lambda *_: "")
+    monkeypatch.setattr("scripts.hf_dataset_fetch.default_dotenv_paths", lambda **_: [dotenv])
+    assert _resolve_token(None, "huggingface", "codex_hf_write_token") == "dotenv-hf-token"

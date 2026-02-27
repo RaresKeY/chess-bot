@@ -1,12 +1,22 @@
 import io
 import json
 import argparse
+import tempfile
 import urllib.error
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from deploy.runpod_cloud_training.idle_watchdog import _stop_runpod_pod
-from scripts.runpod_provision import _choose_template, _gpu_types, _graphql_json, _rank_gpu_rows, build_parser, cmd_provision
+from scripts.runpod_provision import (
+    _choose_template,
+    _gpu_types,
+    _graphql_json,
+    _rank_gpu_rows,
+    _resolve_api_key,
+    build_parser,
+    cmd_provision,
+)
 
 
 class _BytesResponse:
@@ -185,6 +195,17 @@ class RunpodApiHelperTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["provision"])
         self.assertFalse(args.use_runpod_training_preset_env)
+
+    def test_resolve_api_key_uses_dotenv_fallback(self):
+        args = argparse.Namespace(api_key="", keyring_service="runpod", keyring_username="RUNPOD_API_KEY")
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("src.chessbot.secrets.token_from_keyring", return_value=""):
+                with tempfile.TemporaryDirectory() as td:
+                    dotenv = Path(td) / ".env.runpod"
+                    dotenv.write_text("RUNPOD_API_KEY=dotenv-token\n", encoding="utf-8")
+                    with mock.patch("scripts.runpod_provision.default_dotenv_paths", return_value=[dotenv]):
+                        token = _resolve_api_key(args)
+        self.assertEqual(token, "dotenv-token")
 
 
 if __name__ == "__main__":

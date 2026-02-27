@@ -37,7 +37,9 @@ Provide a separate module for connecting the local move model to the Lichess Bot
 - Token source priority for live mode:
   1. `--token`
   2. system keyring lookup (defaults: service `lichess`, username `lichess_api_token`)
+     - credential description label: `Lichess API Token`
   3. `LICHESS_BOT_TOKEN` environment variable
+  4. dotenv fallback lookup (`LICHESS_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.lichess`, then `.env`)
 - `keyring` is included in project requirements; lookup failures are still handled gracefully (for example missing backend or missing credential).
 
 ## Preview Mode (current)

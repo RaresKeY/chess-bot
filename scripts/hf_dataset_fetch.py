@@ -8,6 +8,12 @@ import tarfile
 from pathlib import Path
 import shutil
 from collections import defaultdict
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from src.chessbot.secrets import default_dotenv_paths, resolve_secret
 
 
 def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -21,19 +27,20 @@ def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_te
 
 
 def _resolve_token(explicit_token: str | None, service: str, username: str) -> str | None:
-    if explicit_token:
-        return explicit_token.strip()
-    env_token = os.environ.get("HF_TOKEN", "").strip()
-    if env_token:
-        return env_token
-    try:
-        import keyring  # type: ignore
-    except Exception:
-        return None
-    try:
-        token = (keyring.get_password(service, username) or "").strip()
-    except Exception:
-        return None
+    dotenv_paths = default_dotenv_paths(
+        repo_root=REPO_ROOT,
+        override_var_names=("HF_DOTENV_PATH", "CHESSBOT_DOTENV_PATH"),
+        fallback_filenames=(".env.hf_dataset", ".env"),
+    )
+    token, _ = resolve_secret(
+        explicit_value=str(explicit_token or ""),
+        env_var_names=("HF_TOKEN",),
+        keyring_service=service,
+        keyring_username=username,
+        dotenv_keys=("HF_TOKEN",),
+        dotenv_paths=dotenv_paths,
+        order=("explicit", "env", "keyring", "dotenv"),
+    )
     return token or None
 
 

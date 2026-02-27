@@ -10,6 +10,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from src.chessbot.secrets import default_dotenv_paths, resolve_secret
+
 
 REST_BASE = "https://rest.runpod.io/v1"
 GRAPHQL_BASE = "https://api.runpod.io/graphql"
@@ -61,25 +66,22 @@ def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_te
     )
 
 
-def _token_from_keyring(service: str, username: str) -> str:
-    try:
-        import keyring  # type: ignore
-    except Exception:
-        return ""
-    try:
-        token = keyring.get_password(service, username)
-    except Exception:
-        return ""
-    return token or ""
-
-
 def _resolve_api_key(args: argparse.Namespace) -> str:
-    if getattr(args, "api_key", ""):
-        return str(args.api_key)
-    env_key = str(os.environ.get("RUNPOD_API_KEY", "") or "")
-    if env_key:
-        return env_key
-    return _token_from_keyring(str(args.keyring_service), str(args.keyring_username))
+    dotenv_paths = default_dotenv_paths(
+        repo_root=REPO_ROOT,
+        override_var_names=("RUNPOD_DOTENV_PATH", "CHESSBOT_DOTENV_PATH"),
+        fallback_filenames=(".env.runpod", ".env"),
+    )
+    value, _ = resolve_secret(
+        explicit_value=str(getattr(args, "api_key", "") or ""),
+        env_var_names=("RUNPOD_API_KEY",),
+        keyring_service=str(args.keyring_service),
+        keyring_username=str(args.keyring_username),
+        dotenv_keys=("RUNPOD_API_KEY",),
+        dotenv_paths=dotenv_paths,
+        order=("explicit", "env", "keyring", "dotenv"),
+    )
+    return value
 
 
 def _http_json(
@@ -336,7 +338,7 @@ def _print_json(obj: Any) -> None:
 def cmd_gpu_search(args: argparse.Namespace) -> int:
     api_key = _resolve_api_key(args)
     if not api_key:
-        raise SystemExit("Missing RunPod API key (use --api-key, env RUNPOD_API_KEY, or keyring)")
+        raise SystemExit("Missing RunPod API key (checked --api-key, RUNPOD_API_KEY, keyring, and .env fallback)")
     rows = _gpu_types(api_key, graphql_endpoint=args.graphql_endpoint)
     ranked = _rank_gpu_rows(
         rows,
@@ -353,7 +355,7 @@ def cmd_gpu_search(args: argparse.Namespace) -> int:
 def cmd_template_list(args: argparse.Namespace) -> int:
     api_key = _resolve_api_key(args)
     if not api_key:
-        raise SystemExit("Missing RunPod API key (use --api-key, env RUNPOD_API_KEY, or keyring)")
+        raise SystemExit("Missing RunPod API key (checked --api-key, RUNPOD_API_KEY, keyring, and .env fallback)")
     templates = _list_templates(
         api_key,
         include_runpod_templates=args.include_runpod_templates,
@@ -374,7 +376,7 @@ def cmd_template_list(args: argparse.Namespace) -> int:
 def cmd_provision(args: argparse.Namespace) -> int:
     api_key = _resolve_api_key(args)
     if not api_key:
-        raise SystemExit("Missing RunPod API key (use --api-key, env RUNPOD_API_KEY, or keyring)")
+        raise SystemExit("Missing RunPod API key (checked --api-key, RUNPOD_API_KEY, keyring, and .env fallback)")
 
     chosen_gpu: Optional[Dict[str, Any]] = None
     if args.gpu_type_id:
@@ -489,7 +491,11 @@ def cmd_provision(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="RunPod API helper (GPU search, template selection, pod provisioning)")
-    p.add_argument("--api-key", default="", help="RunPod API key (falls back to env RUNPOD_API_KEY or keyring)")
+    p.add_argument(
+        "--api-key",
+        default="",
+        help="RunPod API key (falls back to env RUNPOD_API_KEY, keyring, then .env files)",
+    )
     p.add_argument("--keyring-service", default=DEFAULT_KEYRING_SERVICE, help="Keyring service name for API key lookup")
     p.add_argument("--keyring-username", default=DEFAULT_KEYRING_USERNAME, help="Keyring username/key for API key lookup")
     p.add_argument("--rest-base", default=REST_BASE, help="RunPod REST API base URL")

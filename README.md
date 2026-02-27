@@ -210,7 +210,7 @@ Prereqs:
 - RunPod pod template exists (for example `chess-bot-training`)
 - host has `ssh`, `rsync`, `jq`, `curl`
 - host SSH public key exists at `~/.ssh/id_ed25519.pub`
-- RunPod API key available via keyring (preferred) or env fallback
+- RunPod API key available via CLI arg/env/keyring, with dotenv fallback (`.env.runpod`/`.env`)
 
 Preferred auth (keyring):
 
@@ -240,9 +240,23 @@ set +a
 bash scripts/runpod_cli_doctor.sh
 ```
 
+Optional: populate repo-local `.env` directly from keyring (writes `RUNPOD_API_KEY`, `HF_TOKEN`, `LICHESS_BOT_TOKEN`):
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/populate_env_from_keyring.py
+```
+
+If you want placeholders for missing keyring entries instead of a failure:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/populate_env_from_keyring.py --allow-missing
+```
+
 Build and push the RunPod image (recommended to use a pinned tag, not only `latest`):
 
 ```bash
+# default repo for this project:
+# IMAGE_REPO=ghcr.io/rareskey/chess-bot-runpod
 IMAGE_REPO=ghcr.io/<your-user>/chess-bot-runpod \
 IMAGE_TAG=<your-tag> \
 PUSH_IMAGE=1 \
@@ -284,6 +298,8 @@ set -a
 . ./.env.hf_dataset
 set +a
 ```
+
+Token resolution order for publish/fetch scripts: `--token` -> `HF_TOKEN` -> keyring -> dotenv (`.env.hf_dataset`/`.env`).
 
 Publish a validated dataset directory (default upload is a compressed `tar.gz` bundle + `manifest.json` + `checksums.sha256`):
 

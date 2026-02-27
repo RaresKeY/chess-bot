@@ -1,3 +1,4 @@
+import argparse
 import io
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from src.chessbot.lichess_bot import (
     LivePreviewStore,
     _valid_record_from_live_transcript,
     _challenge_decline_reason,
+    _resolve_live_token,
 )
 
 
@@ -323,6 +325,32 @@ class LichessBotTests(unittest.TestCase):
         self.assertEqual(rec["headers"]["LichessGameId"], "g_live_1")
         self.assertEqual(rec["headers"]["WhiteElo"], "1429")
         self.assertEqual(rec["headers"]["BlackElo"], "3000")
+
+    def test_resolve_live_token_prefers_keyring_before_env(self):
+        args = argparse.Namespace(
+            token="",
+            keyring_service="lichess",
+            keyring_username="lichess_api_token",
+        )
+        with mock.patch.dict("os.environ", {"LICHESS_BOT_TOKEN": "env-token"}, clear=True):
+            with mock.patch("src.chessbot.secrets.token_from_keyring", return_value="keyring-token"):
+                token = _resolve_live_token(args)
+        self.assertEqual(token, "keyring-token")
+
+    def test_resolve_live_token_uses_dotenv_fallback(self):
+        args = argparse.Namespace(
+            token="",
+            keyring_service="lichess",
+            keyring_username="lichess_api_token",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            dotenv = Path(td) / ".env.lichess"
+            dotenv.write_text("LICHESS_BOT_TOKEN=dotenv-token\n", encoding="utf-8")
+            with mock.patch.dict("os.environ", {}, clear=True):
+                with mock.patch("src.chessbot.secrets.token_from_keyring", return_value=""):
+                    with mock.patch("src.chessbot.lichess_bot.default_dotenv_paths", return_value=[dotenv]):
+                        token = _resolve_live_token(args)
+        self.assertEqual(token, "dotenv-token")
 
 
 if __name__ == "__main__":
