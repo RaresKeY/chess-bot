@@ -517,3 +517,46 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `Tesla V100-SXM2-16GB | V100 SXM2 | 16`
 - `Tesla V100-SXM2-32GB | V100 SXM2 32GB | 32`
 - `unknown | unknown | 0`
+
+## RunPod GPU Availability Snapshot (2026-02-27, COMMUNITY)
+- Command:
+  - ``.venv/bin/python scripts/runpod_provision.py --keyring-service runpod --keyring-username RUNPOD_API_KEY gpu-search --cloud-type COMMUNITY --min-memory-gb 12 --limit 120``
+- Raw/dated outputs saved:
+  - `artifacts/reports/runpod_gpu_types_snapshot_2026-02-27.json`
+  - `config/runpod_gpu_types_catalog_2026-02-27.json`
+- Snapshot count: `40` GPU entries.
+- Cheapest entries supporting at least 2 GPUs at snapshot time:
+  - `NVIDIA RTX A5000` (`price_per_hr=0.16`, `max_gpu_count=10`, `memory_gb=24`)
+  - `NVIDIA RTX A4000` (`price_per_hr=0.17`, `max_gpu_count=8`, `memory_gb=16`)
+  - `NVIDIA GeForce RTX 3080 Ti` (`price_per_hr=0.18`, `max_gpu_count=6`, `memory_gb=12`)
+- `NVIDIA GeForce RTX 5090` was present but higher cost (`price_per_hr=0.69`, `max_gpu_count=8`, `memory_gb=32`).
+
+## Manual 2-GPU Custom-10k DDP Flow (Saved Runbook, 2026-02-27)
+- Purpose: run a quick single-node multi-GPU validation with a manually pushed local custom dataset, without HF fetch/publish side effects.
+- Successful reference run:
+  - run id: `runpod-cycle-20260227T101419Z`
+  - pod id: `3mwx5mfh2208mf`
+  - gpu: `2 x NVIDIA RTX A4000` (community)
+  - ssh endpoint at run time: `runner@87.197.146.56:40320`
+
+1. Start a 2-GPU pod from the host (`COMMUNITY`, cheap SKU first):
+   - `RUNPOD_GPU_COUNT=2 RUNPOD_GPU_TYPE_ID='NVIDIA RTX A5000' RUNPOD_CLOUD_TYPE=COMMUNITY RUNPOD_TEMPLATE_NAME='chess-bot-training' bash scripts/runpod_cycle_start.sh`
+   - If capacity returns REST `500`/`no instances`, retry with next-cheapest 2-GPU type (for example `NVIDIA RTX A4000`).
+2. Push manual local dataset (no HF train mode):
+   - `RUNPOD_CYCLE_RUN_ID=<run_id> RUNPOD_LOCAL_DATASET_DIR=<repo>/data/dataset/_custom_test_10k_all_months_game RUNPOD_REMOTE_DATASET_NAME=_custom_test_10k_all_months_game bash scripts/runpod_cycle_push_dataset.sh`
+3. Run explicit DDP training over 2 GPUs via `torchrun` on the pod:
+   - From host, SSH to the pod and run:
+   - `CUDA_VISIBLE_DEVICES=0,1 /opt/venvs/chessbot/bin/torchrun --standalone --nnodes=1 --nproc-per-node=2 scripts/train_baseline.py --train <remote_dataset>/train.jsonl --val <remote_dataset>/val.jsonl --output <remote_run_dir>/model_ddp_10k.pt --metrics-out <remote_run_dir>/metrics_ddp_10k.json --progress-jsonl-out <remote_run_dir>/progress_ddp_10k.jsonl --telemetry-dir <remote_run_dir>/telemetry --epochs 1 --batch-size 256 --num-workers 4 --distributed on --runtime-min-context 8 --runtime-min-target 1 --runtime-max-samples-per-game 0 --no-progress --max-total-rows 10000`
+4. Pull artifacts locally:
+   - `artifacts/runpod_cycles/<run_id>/collected/manual_ddp_10k/`
+   - expected files:
+     - `model_ddp_10k.pt`
+     - `metrics_ddp_10k.json`
+     - `progress_ddp_10k.jsonl`
+     - `torchrun_train.log`
+     - `train_exit_code.txt`
+5. Validate DDP evidence:
+   - `train_exit_code.txt` should be `0`
+   - `metrics_ddp_10k.json` should include `distributed.enabled=true` and `distributed.world_size=2`
+   - `torchrun_train.log` should show `train_setup.distributed.rank=0` and `rank=1` with device assignment split (`cuda:0`, `cuda:1`)
+   - this run showed `train_rows=8889`, `val_rows=1111` and `subset_sampling.max_total_rows=10000`
