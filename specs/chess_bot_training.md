@@ -60,6 +60,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - in distributed mode, `scripts/train_baseline.py` maps rank to `cuda:LOCAL_RANK` when `--device auto|cuda`
   - train DataLoader uses `DistributedSampler`; sampler epoch is advanced each training epoch
   - non-primary ranks suppress progress JSONL/log chatter and skip writing final model/metrics files
+  - when distributed mode is requested but CUDA is unavailable, CLI now raises an expanded startup diagnostic message including distributed env vars, torch/CUDA runtime facts, `nvidia-smi -L` output (or error), and host-mismatch hints for faster RunPod node triage
 - CUDA-oriented controls:
   - `--num-workers` (DataLoader workers)
   - `--pin-memory/--no-pin-memory` (auto-disabled on CPU)

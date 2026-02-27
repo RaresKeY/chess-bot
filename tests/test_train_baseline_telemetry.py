@@ -63,6 +63,36 @@ class TrainBaselineTelemetryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.mod._resolve_distributed_context("on")
 
+    def test_collect_cuda_startup_diagnostics_includes_torch_env_and_nvidia_smi(self):
+        dist_ctx = {"enabled": True, "world_size": 4, "rank": 0, "local_rank": 0}
+        with mock.patch.dict(
+            os.environ,
+            {"WORLD_SIZE": "4", "RANK": "0", "LOCAL_RANK": "0", "CUDA_VISIBLE_DEVICES": "0,1,2,3"},
+            clear=False,
+        ):
+            with mock.patch.object(self.mod.shutil, "which", return_value="/usr/bin/nvidia-smi"):
+                with mock.patch.object(self.mod.subprocess, "check_output", return_value="GPU 0: Fake GPU\n"):
+                    diag = self.mod._collect_cuda_startup_diagnostics(dist_ctx)
+        self.assertTrue(diag["distributed"]["enabled"])
+        self.assertEqual(diag["distributed"]["world_size"], 4)
+        self.assertIn("cuda_is_available", diag["torch"])
+        self.assertIn("cuda_device_count", diag["torch"])
+        self.assertEqual(diag["env"]["CUDA_VISIBLE_DEVICES"], "0,1,2,3")
+        self.assertIn("GPU 0: Fake GPU", diag["nvidia_smi_l"])
+
+    def test_format_cuda_unavailable_distributed_error_contains_json_and_hints(self):
+        diag = {
+            "distributed": {"enabled": True, "world_size": 4, "rank": 0, "local_rank": 0},
+            "torch": {"cuda_is_available": False, "cuda_device_count": 4},
+            "env": {"CUDA_VISIBLE_DEVICES": "0,1,2,3"},
+            "nvidia_smi_l": "GPU 0: RTX 5090",
+        }
+        msg = self.mod._format_cuda_unavailable_distributed_error(diag)
+        self.assertIn("torch.cuda.is_available() is False", msg)
+        self.assertIn("startup_diagnostics=", msg)
+        self.assertIn("RTX 5090", msg)
+        self.assertIn("hints:", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

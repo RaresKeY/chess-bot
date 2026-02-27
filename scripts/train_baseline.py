@@ -149,6 +149,62 @@ def _resolve_distributed_context(mode: str) -> Dict[str, int | bool]:
     }
 
 
+def _collect_cuda_startup_diagnostics(dist_ctx: Dict[str, int | bool]) -> Dict[str, Any]:
+    env_keys = [
+        "WORLD_SIZE",
+        "RANK",
+        "LOCAL_RANK",
+        "CUDA_VISIBLE_DEVICES",
+        "NCCL_DEBUG",
+        "NCCL_P2P_DISABLE",
+        "NCCL_IB_DISABLE",
+    ]
+    env_info = {k: os.environ.get(k, "") for k in env_keys}
+    diag: Dict[str, Any] = {
+        "distributed": {
+            "enabled": bool(dist_ctx.get("enabled", False)),
+            "world_size": int(dist_ctx.get("world_size", 1)),
+            "rank": int(dist_ctx.get("rank", 0)),
+            "local_rank": int(dist_ctx.get("local_rank", 0)),
+        },
+        "torch": {
+            "version": str(getattr(torch, "__version__", "")),
+            "cuda_version_compiled": str(getattr(torch.version, "cuda", "")),
+            "cuda_is_available": bool(torch.cuda.is_available()),
+            "cuda_device_count": int(torch.cuda.device_count()),
+        },
+        "env": env_info,
+    }
+    if shutil.which("nvidia-smi"):
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "-L"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=8.0,
+            ).strip()
+            diag["nvidia_smi_l"] = out
+        except Exception as exc:
+            diag["nvidia_smi_l_error"] = repr(exc)
+    else:
+        diag["nvidia_smi_l_error"] = "nvidia-smi not found"
+    return diag
+
+
+def _format_cuda_unavailable_distributed_error(diag: Dict[str, Any]) -> str:
+    hints = [
+        "PyTorch CUDA runtime failed to initialize on this node.",
+        "This can happen when node drivers/runtime are mismatched even if `nvidia-smi` shows GPUs.",
+        "Try a fresh pod/host, verify image+driver compatibility, then rerun the same torch CUDA self-check.",
+    ]
+    return (
+        "Distributed GPU training requires CUDA, but torch.cuda.is_available() is False.\n"
+        f"startup_diagnostics={json.dumps(diag, ensure_ascii=True)}\n"
+        "hints:\n- "
+        + "\n- ".join(hints)
+    )
+
+
 class _TrainingTelemetryLogger:
     def __init__(
         self,
@@ -483,7 +539,8 @@ def main() -> None:
     device_request = str(args.device)
     if distributed_enabled:
         if not torch.cuda.is_available():
-            raise RuntimeError("Distributed GPU training requires CUDA, but torch.cuda.is_available() is False")
+            diag = _collect_cuda_startup_diagnostics(dist_ctx)
+            raise RuntimeError(_format_cuda_unavailable_distributed_error(diag))
         torch.cuda.set_device(distributed_local_rank)
         if device_request in {"auto", "cuda"}:
             device_request = f"cuda:{distributed_local_rank}"
