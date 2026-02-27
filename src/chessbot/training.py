@@ -380,6 +380,25 @@ def _index_game_jsonl_paths_from_runtime_cache(
     """
     path_strs = [os.fspath(p) for p in paths]
     resolved_to_global: Dict[str, int] = {str(Path(p).resolve()): i for i, p in enumerate(path_strs)}
+
+    def _extract_dataset_token(path_obj: Path) -> str:
+        for part in path_obj.parts:
+            if part.endswith("_game"):
+                return part
+        return ""
+
+    alias_to_global: Dict[str, int] = {}
+    alias_ambiguous: set[str] = set()
+    for i, p in enumerate(path_strs):
+        p_obj = Path(p).resolve()
+        dataset_token = _extract_dataset_token(p_obj)
+        file_name = p_obj.name
+        if dataset_token and file_name:
+            alias = f"{dataset_token}::{file_name}"
+            if alias in alias_to_global and alias_to_global[alias] != i:
+                alias_ambiguous.add(alias)
+            else:
+                alias_to_global[alias] = i
     split_expected = str(expected_split or "").strip().lower()
     if split_expected not in {"", "train", "val", "test"}:
         return None, f"unsupported_expected_split:{split_expected}"
@@ -460,7 +479,13 @@ def _index_game_jsonl_paths_from_runtime_cache(
         for cp in cache_paths_resolved:
             gid = resolved_to_global.get(cp)
             if gid is None:
-                return None, f"cache_path_not_in_input:{cp}"
+                cp_obj = Path(cp)
+                alias = f"{_extract_dataset_token(cp_obj)}::{cp_obj.name}"
+                if alias in alias_ambiguous:
+                    return None, f"cache_path_alias_ambiguous:{cp}"
+                gid = alias_to_global.get(alias)
+                if gid is None:
+                    return None, f"cache_path_not_in_input:{cp}"
             local_to_global.append(int(gid))
 
         for i in range(n_rows):

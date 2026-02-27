@@ -165,7 +165,7 @@ wait_remote_repo_ready() {
   local ssh_host_key_checking ssh_known_hosts_file
   ssh_host_key_checking="$(runpod_cycle_ssh_host_key_checking)"
   ssh_known_hosts_file="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
-  local ssh_opts=(-i "${ssh_key}" -p "${ssh_port}" -o BatchMode=yes -o ConnectTimeout="${ssh_connect_timeout}" -o IdentitiesOnly=yes -o "StrictHostKeyChecking=${ssh_host_key_checking}" -o "UserKnownHostsFile=${ssh_known_hosts_file}")
+  local ssh_opts=(-i "${ssh_key}" -p "${ssh_port}" -o BatchMode=yes -o ConnectTimeout="${ssh_connect_timeout}" -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o "StrictHostKeyChecking=${ssh_host_key_checking}" -o "UserKnownHostsFile=${ssh_known_hosts_file}")
   while true; do
     if ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
       "test -d '${remote_repo_dir}' && test -f '${remote_repo_dir}/scripts/train_baseline.py' && test -w '${remote_repo_dir}'" \
@@ -219,7 +219,7 @@ SSH_USER="$(runpod_cycle_ssh_user)"
 SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
 SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
 SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
-SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
+SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
 
 REMOTE_REPO_DIR="${RUNPOD_REMOTE_REPO_DIR:-$(runpod_cycle_remote_repo_dir "${PROVISION_JSON}")}"
 REMOTE_RUN_DIR="${REMOTE_REPO_DIR}/artifacts/runpod_cycles/${RUN_ID}"
@@ -404,10 +404,10 @@ suggestions = {
     ],
 }
 
-Path(os.environ["CONTEXT_JSON"]).write_text(json.dumps(context, indent=2) + "\\n", encoding="utf-8")
-Path(os.environ["SUGGESTIONS_JSON"]).write_text(json.dumps(suggestions, indent=2) + "\\n", encoding="utf-8")
+Path(os.environ["CONTEXT_JSON"]).write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+Path(os.environ["SUGGESTIONS_JSON"]).write_text(json.dumps(suggestions, indent=2) + "\n", encoding="utf-8")
 Path(os.environ["SUGGESTIONS_MD"]).write_text(
-    "\\n".join(
+    "\n".join(
         [
             "# GPU Training Spec Suggestions",
             "",

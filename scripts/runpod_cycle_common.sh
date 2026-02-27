@@ -167,11 +167,23 @@ runpod_cycle_ensure_ssh_keypair() {
   local key_path pub_path
   key_path="$(runpod_cycle_ssh_key)"
   pub_path="$(runpod_cycle_ssh_pubkey_path)"
+  command -v ssh-keygen >/dev/null 2>&1 || {
+    echo "[runpod-cycle] missing required command: ssh-keygen" >&2
+    exit 1
+  }
+  local managed_default_key="${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"
+  local needs_regen=0
   if [[ ! -f "${key_path}" || ! -f "${pub_path}" ]]; then
-    command -v ssh-keygen >/dev/null 2>&1 || {
-      echo "[runpod-cycle] missing required command: ssh-keygen" >&2
-      exit 1
-    }
+    needs_regen=1
+  fi
+  # If using the managed default key path, force no-passphrase semantics.
+  if [[ "${key_path}" == "${managed_default_key}" && -f "${key_path}" ]]; then
+    if ! ssh-keygen -y -P "" -f "${key_path}" >/dev/null 2>&1; then
+      echo "[runpod-cycle] existing managed temp key requires passphrase; regenerating no-passphrase key at ${key_path}" >&2
+      needs_regen=1
+    fi
+  fi
+  if [[ "${needs_regen}" == "1" ]]; then
     rm -f "${key_path}" "${pub_path}"
     ssh-keygen -t ed25519 -N "" -f "${key_path}" -C "codex-runpod-temp" >/dev/null
   fi
@@ -222,6 +234,8 @@ runpod_cycle_ssh_base_args() {
     ssh \
     -i "${key}" \
     -o IdentitiesOnly=yes \
+    -o AddKeysToAgent=no \
+    -o IdentityAgent=none \
     -o "StrictHostKeyChecking=${host_key_checking}" \
     -o "UserKnownHostsFile=${known_hosts}" \
     -p "${port}" \

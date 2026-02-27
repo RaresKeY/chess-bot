@@ -191,6 +191,8 @@ OUT
             text = Path(name).read_text(encoding="utf-8")
             self.assertIn("BatchMode=yes", text, name)
             self.assertIn("ConnectTimeout", text, name)
+            self.assertIn("AddKeysToAgent=no", text, name)
+            self.assertIn("IdentityAgent=none", text, name)
 
     def test_gateway_route_automation_removed(self):
         common = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
@@ -264,6 +266,12 @@ OUT
             self.assertIn("runpod_cycle_prepare_ssh_client_files", text, name)
             self.assertIn("runpod_cycle_ssh_host_key_checking", text, name)
             self.assertIn("runpod_cycle_ssh_known_hosts_file", text, name)
+
+    def test_managed_temp_key_is_forced_no_passphrase_on_reuse(self):
+        text = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
+        self.assertIn('managed_default_key="${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"', text)
+        self.assertIn('ssh-keygen -y -P "" -f "${key_path}"', text)
+        self.assertIn("requires passphrase; regenerating no-passphrase key", text)
 
     def test_full_train_hf_context_probe_uses_quoted_heredoc(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")

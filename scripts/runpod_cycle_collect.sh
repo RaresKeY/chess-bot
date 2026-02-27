@@ -32,7 +32,7 @@ RSYNC_TIMING_LOG="${LOGS_DIR}/collect_rsync_timing.log"
 
 mkdir -p "${LOCAL_COLLECT_DIR}"
 
-printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
+printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
   "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
 
 {

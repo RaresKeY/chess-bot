@@ -98,6 +98,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - inherits current `runpod_provision.py` defaults (notably `--use-runpod-training-preset-env` is now opt-in)
 - `scripts/runpod_cycle_common.sh`
   - shared helpers for modular lifecycle scripts (run id paths, keyring token lookup, pod JSON parsing, SSH/connection fields)
+  - managed temp key guard: when using default managed key path (`/tmp/chessbot_runpod_temp_id_ed25519`), scripts validate that the private key is usable with empty passphrase and automatically regenerate it if a stale passphrase-protected key is found
+  - shared SSH args disable host agent/keyring import prompts for managed keys (`AddKeysToAgent=no`, `IdentityAgent=none`)
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
   - provisions a pod from template using keyring-backed RunPod auth

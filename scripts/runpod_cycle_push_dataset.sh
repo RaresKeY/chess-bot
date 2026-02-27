@@ -29,14 +29,14 @@ SSH_USER="$(runpod_cycle_ssh_user)"
 SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
 SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
 SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
-SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
+SSH_OPTS=(-i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
 
 REMOTE_READY_TIMEOUT_SECONDS="${RUNPOD_REMOTE_READY_TIMEOUT_SECONDS:-300}"
 REMOTE_READY_POLL_SECONDS="${RUNPOD_REMOTE_READY_POLL_SECONDS:-5}"
 remote_ready_deadline=$(( $(date +%s) + REMOTE_READY_TIMEOUT_SECONDS ))
 READY_CHECK_LOG="${LOGS_DIR}/push_dataset_ready_check.log"
 RSYNC_LOG="${LOGS_DIR}/push_dataset_rsync.log"
-printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
+printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
   "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
 
 while true; do

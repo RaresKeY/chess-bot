@@ -63,7 +63,8 @@ Do not skip the regression test when:
 - If a test file uses `pytest`, use:
   - `.venv/bin/python -m pytest -q tests/test_...py`
 - For full-suite convenience, use:
-  - `bash scripts/run_all_tests.sh`
+  - `bash scripts/test.sh`
+  - compatibility alias: `bash scripts/run_all_tests.sh`
 
 ## Anti-Patterns
 - Fixing the bug without a test when a local test is feasible
