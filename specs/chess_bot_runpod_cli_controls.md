@@ -196,6 +196,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`
     - `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`
   - forwards best/epoch checkpoint paths so trainer writes intermediate model artifacts during long runs
+- `scripts/runpod_cycle_status.sh`
+  - single-command status snapshot for an active run id
+  - reports local watcher/full-flow process presence plus remote stage (`repo_not_ready`, `run_dir_not_created`, `bootstrap_or_fetching`, `hf_fetch_done`, `pretrain_ready_or_launching`, `training_running`, `training_finished`, `ssh_unreachable`)
+  - includes remote sentinel/file counts (`train_pid`, `progress_lines`, `train_log_lines`, `train_exit_code`, checkpoint presence) and one-line GPU sample when available
+  - supports `--watch` polling mode for continuous JSON snapshots
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
   - operational caveat: if the local watcher step fails after remote training has started/completed, the wrapper's error trap can stop the pod before `collect`; this does not mutate/delete the source HF dataset repo, and remote run artifacts typically remain on the pod volume until the pod is terminated (restart the same pod and run `scripts/runpod_cycle_collect.sh` for the same `RUNPOD_CYCLE_RUN_ID`)
 - `scripts/runpod_cycle_summarize_gpu_observations.py`

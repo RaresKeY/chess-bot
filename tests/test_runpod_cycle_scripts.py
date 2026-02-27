@@ -111,6 +111,7 @@ OUT
     def test_cycle_scripts_exist(self):
         names = [
             "scripts/runpod_cycle_common.sh",
+            "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_start.sh",
             "scripts/runpod_cycle_push_dataset.sh",
             "scripts/runpod_cycle_train.sh",
@@ -182,6 +183,7 @@ OUT
 
     def test_cycle_ssh_scripts_use_batch_mode_and_connect_timeout(self):
         for name in [
+            "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_push_dataset.sh",
             "scripts/runpod_cycle_train.sh",
             "scripts/runpod_cycle_collect.sh",
@@ -304,6 +306,13 @@ OUT
         self.assertIn("sync_epoch_artifacts()", text)
         self.assertIn("append_epoch_eta_report()", text)
         self.assertIn("runpod_cycle_require_cmd scp", text)
+
+    def test_cycle_status_reports_remote_stage_and_supports_watch_mode(self):
+        text = Path("scripts/runpod_cycle_status.sh").read_text(encoding="utf-8")
+        self.assertIn("collect_once()", text)
+        self.assertIn("--watch", text)
+        self.assertIn('"remote_state"', text)
+        self.assertIn("training_running", text)
 
     def test_full_train_hf_remote_fetch_uses_unified_args_builder(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
