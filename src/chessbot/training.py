@@ -801,6 +801,17 @@ def _index_jsonl_paths(paths: List[str]) -> Tuple[List[str], List[int], List[int
     return path_strs, path_ids, offsets
 
 
+def _sample_subset_indices(total: int, keep: int, seed: int) -> List[int]:
+    total = int(total)
+    keep = int(keep)
+    if keep <= 0 or total <= 0 or keep >= total:
+        return list(range(max(total, 0)))
+    rnd = random.Random(int(seed))
+    idxs = rnd.sample(range(total), keep)
+    idxs.sort()
+    return idxs
+
+
 def collate_train(batch: List[Tuple[List[int], int, int, int, int]]):
     lengths = torch.tensor([len(x[0]) for x in batch], dtype=torch.long)
     max_len = int(lengths.max().item())
@@ -2233,6 +2244,11 @@ def train_next_move_model_from_jsonl_paths(
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
     require_runtime_splice_cache: bool = False,
+    max_train_rows: int = 0,
+    max_val_rows: int = 0,
+    max_total_rows: int = 0,
+    best_checkpoint_out: str = "",
+    epoch_checkpoint_dir: str = "",
 ):
     if int(rollout_horizon) > 1:
         return _train_next_move_model_from_jsonl_paths_multistep(
@@ -2369,6 +2385,43 @@ def train_next_move_model_from_jsonl_paths(
         val_runtime_index_bytes = None
         cache_load_reason_by_split = None
 
+    if int(max_total_rows) > 0 and int(max_train_rows) <= 0 and int(max_val_rows) <= 0:
+        total_rows_source = int(max(0, train_rows_total)) + int(max(0, val_rows_total))
+        if total_rows_source > 0:
+            if int(train_rows_total) > 0 and int(val_rows_total) > 0:
+                train_share = float(train_rows_total) / float(total_rows_source)
+                computed_train = int(round(float(max_total_rows) * train_share))
+                computed_train = max(1, min(int(train_rows_total), computed_train))
+                computed_val = int(max_total_rows) - computed_train
+                computed_val = max(1, min(int(val_rows_total), computed_val))
+                max_train_rows = int(computed_train)
+                max_val_rows = int(computed_val)
+            elif int(train_rows_total) > 0:
+                max_train_rows = min(int(max_total_rows), int(train_rows_total))
+            elif int(val_rows_total) > 0:
+                max_val_rows = min(int(max_total_rows), int(val_rows_total))
+
+    train_rows_source_total = int(train_rows_total)
+    val_rows_source_total = int(val_rows_total)
+    train_subset_applied = False
+    val_subset_applied = False
+    if int(max_train_rows) > 0 and int(max_train_rows) < int(len(train_ds)):
+        keep_train = int(max_train_rows)
+        train_ds = torch.utils.data.Subset(
+            train_ds,
+            _sample_subset_indices(total=len(train_ds), keep=keep_train, seed=int(seed) + 101),
+        )
+        train_rows_total = int(len(train_ds))
+        train_subset_applied = True
+    if int(max_val_rows) > 0 and int(max_val_rows) < int(len(val_ds)):
+        keep_val = int(max_val_rows)
+        val_ds = torch.utils.data.Subset(
+            val_ds,
+            _sample_subset_indices(total=len(val_ds), keep=keep_val, seed=int(seed) + 202),
+        )
+        val_rows_total = int(len(val_ds))
+        val_subset_applied = True
+
     if train_rows_total <= 0:
         raise RuntimeError("No training rows found")
 
@@ -2504,6 +2557,15 @@ def train_next_move_model_from_jsonl_paths(
                     "data_loading": data_loading_mode,
                     "dataset_schema": schema_kind,
                     "cache_load_reason_by_split": cache_load_reason_by_split,
+                    "subset_sampling": {
+                        "max_total_rows": int(max_total_rows),
+                        "max_train_rows": int(max_train_rows),
+                        "max_val_rows": int(max_val_rows),
+                        "train_rows_source": int(train_rows_source_total),
+                        "val_rows_source": int(val_rows_source_total),
+                        "train_subset_applied": bool(train_subset_applied),
+                        "val_subset_applied": bool(val_subset_applied),
+                    },
                 }
             }
         )
@@ -2522,8 +2584,70 @@ def train_next_move_model_from_jsonl_paths(
                 "data_loading": data_loading_mode,
                 "dataset_schema": schema_kind,
                 "cache_load_reason_by_split": cache_load_reason_by_split,
+                "subset_sampling": {
+                    "max_total_rows": int(max_total_rows),
+                    "max_train_rows": int(max_train_rows),
+                    "max_val_rows": int(max_val_rows),
+                    "train_rows_source": int(train_rows_source_total),
+                    "val_rows_source": int(val_rows_source_total),
+                    "train_subset_applied": bool(train_subset_applied),
+                    "val_subset_applied": bool(val_subset_applied),
+                },
             }
         )
+
+    best_checkpoint_out_path = str(best_checkpoint_out or "").strip()
+    epoch_checkpoint_dir_path = str(epoch_checkpoint_dir or "").strip()
+    if best_checkpoint_out_path:
+        Path(best_checkpoint_out_path).parent.mkdir(parents=True, exist_ok=True)
+    if epoch_checkpoint_dir_path:
+        Path(epoch_checkpoint_dir_path).mkdir(parents=True, exist_ok=True)
+
+    def _build_checkpoint_artifact(
+        model_state_dict: Dict[str, torch.Tensor],
+        *,
+        current_epoch: int,
+        latest_row: Dict[str, Any],
+        checkpoint_kind: str,
+    ) -> Dict[str, Any]:
+        return {
+            "artifact_format_version": 2,
+            "model_family": "next_move_lstm",
+            "training_objective": "single_step_next_move",
+            "state_dict": model_state_dict,
+            "vocab": vocab,
+            "config": {
+                "embed_dim": embed_dim,
+                "hidden_dim": hidden_dim,
+                "num_layers": num_layers,
+                "dropout": dropout,
+                "use_winner": use_winner,
+                "use_phase": bool(use_phase_feature),
+                "phase_embed_dim": int(phase_embed_dim),
+                "use_side_to_move": bool(use_side_to_move_feature),
+                "side_to_move_embed_dim": int(side_to_move_embed_dim),
+            },
+            "runtime": {
+                "device": str(device),
+                "amp": use_amp,
+                "checkpoint_kind": str(checkpoint_kind),
+                "checkpoint_epoch": int(current_epoch),
+                "checkpoint_metrics": {
+                    "train_loss": float(latest_row.get("train_loss", 0.0)),
+                    "val_loss": float(latest_row.get("val_loss", 0.0)),
+                    "top1": float(latest_row.get("top1", 0.0)),
+                    "top5": float(latest_row.get("top5", 0.0)),
+                    "lr": float(latest_row.get("lr", optimizer.param_groups[0]["lr"])),
+                },
+                "phase_weights": {
+                    "unknown": float(phase_weight_vector[0].item()),
+                    "opening": float(phase_weight_vector[1].item()),
+                    "middlegame": float(phase_weight_vector[2].item()),
+                    "endgame": float(phase_weight_vector[3].item()),
+                },
+                "training_objective": "single_step_next_move",
+            },
+        }
 
     history: List[Dict] = []
     for epoch in range(1, epochs + 1):
@@ -2661,6 +2785,28 @@ def train_next_move_model_from_jsonl_paths(
                             }
                         }
                     )
+                if best_checkpoint_out_path:
+                    best_artifact = _build_checkpoint_artifact(
+                        {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                        current_epoch=int(epoch),
+                        latest_row=row,
+                        checkpoint_kind="best_so_far",
+                    )
+                    torch.save(best_artifact, best_checkpoint_out_path)
+                    if verbose:
+                        print({"best_checkpoint_saved_to_disk": {"epoch": int(epoch), "path": best_checkpoint_out_path}})
+
+        if epoch_checkpoint_dir_path:
+            epoch_ckpt_path = os.path.join(epoch_checkpoint_dir_path, f"model_epoch_{int(epoch):02d}.pt")
+            epoch_artifact = _build_checkpoint_artifact(
+                {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                current_epoch=int(epoch),
+                latest_row=row,
+                checkpoint_kind="epoch_end",
+            )
+            torch.save(epoch_artifact, epoch_ckpt_path)
+            if verbose:
+                print({"epoch_checkpoint_saved_to_disk": {"epoch": int(epoch), "path": epoch_ckpt_path}})
 
         if early_stop_enabled:
             cur_metric = _metric_value(row, early_stop_metric_name)
@@ -2774,6 +2920,8 @@ def train_next_move_model_from_jsonl_paths(
     dataset_info = {
         "train_rows": train_rows_total,
         "val_rows": val_rows_total,
+        "train_rows_source": int(train_rows_source_total),
+        "val_rows_source": int(val_rows_source_total),
         "train_rows_by_file": train_rows_by_file,
         "val_rows_by_file": val_rows_by_file,
         "train_index_rows": len(train_ds),
@@ -2781,6 +2929,13 @@ def train_next_move_model_from_jsonl_paths(
         "vocab_size": len(vocab),
         "data_loading": data_loading_mode,
         "dataset_schema": schema_kind,
+        "subset_sampling": {
+            "max_total_rows": int(max_total_rows),
+            "max_train_rows": int(max_train_rows),
+            "max_val_rows": int(max_val_rows),
+            "train_subset_applied": bool(train_subset_applied),
+            "val_subset_applied": bool(val_subset_applied),
+        },
     }
     if schema_kind == "game":
         dataset_info.update(

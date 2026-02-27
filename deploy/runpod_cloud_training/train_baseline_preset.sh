@@ -22,6 +22,11 @@ TRAIN_RUNTIME_MIN_CONTEXT="${TRAIN_RUNTIME_MIN_CONTEXT:-8}"
 TRAIN_RUNTIME_MIN_TARGET="${TRAIN_RUNTIME_MIN_TARGET:-1}"
 TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-0}"
 TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE="${TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE:-0}"
+TRAIN_MAX_TRAIN_ROWS="${TRAIN_MAX_TRAIN_ROWS:-0}"
+TRAIN_MAX_VAL_ROWS="${TRAIN_MAX_VAL_ROWS:-0}"
+TRAIN_MAX_TOTAL_ROWS="${TRAIN_MAX_TOTAL_ROWS:-0}"
+TRAIN_BEST_CHECKPOINT_OUT="${TRAIN_BEST_CHECKPOINT_OUT:-}"
+TRAIN_EPOCH_CHECKPOINT_DIR="${TRAIN_EPOCH_CHECKPOINT_DIR:-}"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-6}"
@@ -255,6 +260,13 @@ if [[ -f "${HF_DATASET_FETCH_MANIFEST}" ]]; then
 fi
 echo "[runpod-train] output=${OUTPUT_PATH}"
 echo "[runpod-train] metrics=${METRICS_OUT}"
+echo "[runpod-train] subset_caps max_total_rows=${TRAIN_MAX_TOTAL_ROWS} max_train_rows=${TRAIN_MAX_TRAIN_ROWS} max_val_rows=${TRAIN_MAX_VAL_ROWS}"
+if [[ -n "${TRAIN_BEST_CHECKPOINT_OUT}" ]]; then
+  echo "[runpod-train] best_checkpoint_out=${TRAIN_BEST_CHECKPOINT_OUT}"
+fi
+if [[ -n "${TRAIN_EPOCH_CHECKPOINT_DIR}" ]]; then
+  echo "[runpod-train] epoch_checkpoint_dir=${TRAIN_EPOCH_CHECKPOINT_DIR}"
+fi
 if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then
   echo "[runpod-train] progress_jsonl=${TRAIN_PROGRESS_JSONL_OUT}"
 fi
@@ -301,6 +313,22 @@ fi
 
 if [[ "${TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE}" == "1" ]]; then
   cmd+=( --require-runtime-splice-cache )
+fi
+
+if [[ "${TRAIN_MAX_TRAIN_ROWS}" != "0" ]]; then
+  cmd+=( --max-train-rows "${TRAIN_MAX_TRAIN_ROWS}" )
+fi
+if [[ "${TRAIN_MAX_VAL_ROWS}" != "0" ]]; then
+  cmd+=( --max-val-rows "${TRAIN_MAX_VAL_ROWS}" )
+fi
+if [[ "${TRAIN_MAX_TOTAL_ROWS}" != "0" ]]; then
+  cmd+=( --max-total-rows "${TRAIN_MAX_TOTAL_ROWS}" )
+fi
+if [[ -n "${TRAIN_BEST_CHECKPOINT_OUT}" ]]; then
+  cmd+=( --best-checkpoint-out "${TRAIN_BEST_CHECKPOINT_OUT}" )
+fi
+if [[ -n "${TRAIN_EPOCH_CHECKPOINT_DIR}" ]]; then
+  cmd+=( --epoch-checkpoint-dir "${TRAIN_EPOCH_CHECKPOINT_DIR}" )
 fi
 
 if [[ -n "${TRAIN_PROGRESS_JSONL_OUT}" ]]; then

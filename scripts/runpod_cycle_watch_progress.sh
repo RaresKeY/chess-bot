@@ -11,6 +11,7 @@ mkdir -p "${LOGS_DIR}"
 
 runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd ssh
+runpod_cycle_require_cmd scp
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
@@ -26,17 +27,25 @@ if [[ "${SSH_FORCE_TTY}" == "1" ]]; then
   SSH_TTY_ARGS=(-tt)
 fi
 SSH_OPTS=("${SSH_TTY_ARGS[@]}" -i "${SSH_KEY}" -p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
+SCP_OPTS=(-i "${SSH_KEY}" -P "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}")
 
 REMOTE_REPO_DIR="${RUNPOD_REMOTE_REPO_DIR:-$(runpod_cycle_remote_repo_dir "${PROVISION_JSON}")}"
 REMOTE_RUN_DIR="${REMOTE_REPO_DIR}/artifacts/runpod_cycles/${RUN_ID}"
 REMOTE_PROGRESS_JSONL="${RUNPOD_REMOTE_PROGRESS_JSONL:-${REMOTE_RUN_DIR}/train_progress_${RUN_ID}.jsonl}"
 REMOTE_EXIT_CODE_FILE="${RUNPOD_REMOTE_TRAIN_EXIT_CODE_FILE:-${REMOTE_RUN_DIR}/train_exit_code.txt}"
 REMOTE_TRAIN_LOG="${RUNPOD_REMOTE_TRAIN_LOG:-${REMOTE_RUN_DIR}/train_stdout_${RUN_ID}.log}"
+REMOTE_BEST_CHECKPOINT="${RUNPOD_REMOTE_BEST_CHECKPOINT:-${REMOTE_RUN_DIR}/model_best_${RUN_ID}.pt}"
+REMOTE_EPOCH_CHECKPOINT_DIR="${RUNPOD_REMOTE_EPOCH_CHECKPOINT_DIR:-${REMOTE_RUN_DIR}/epoch_checkpoints}"
 POLL_SECONDS="${RUNPOD_PROGRESS_POLL_SECONDS:-5}"
 BAR_WIDTH="${RUNPOD_PROGRESS_BAR_WIDTH:-32}"
 WATCH_LOG="${LOGS_DIR}/train_progress_watch.log"
 WATCH_DEBUG="${RUNPOD_WATCH_DEBUG:-0}"
+LOCAL_CYCLE_DIR="$(runpod_cycle_dir "${REPO_ROOT}" "${RUN_ID}")"
+LOCAL_REPORT_DIR="${LOCAL_CYCLE_DIR}/reports"
+LOCAL_LIVE_CKPT_DIR="${LOCAL_CYCLE_DIR}/live_checkpoints"
+EPOCH_ETA_REPORT_JSONL="${LOCAL_REPORT_DIR}/epoch_eta_report_${RUN_ID}.jsonl"
 TTY_STATE_ORIG="$(stty -g 2>/dev/null || true)"
+mkdir -p "${LOCAL_REPORT_DIR}" "${LOCAL_LIVE_CKPT_DIR}"
 
 cleanup_child_processes() {
   local pids=()
@@ -84,6 +93,56 @@ remote_stream_ended_without_exit=0
 status_source="none"
 warned_stdout_fallback=0
 last_meta_line=""
+script_start_ts_ms=0
+
+copy_remote_file_if_exists() {
+  local remote_path="$1"
+  local local_path="$2"
+  local exists
+  exists="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "test -f '${remote_path}' && echo 1 || echo 0" 2>/dev/null || echo 0)"
+  [[ "${exists}" == "1" ]] || return 0
+  mkdir -p "$(dirname "${local_path}")"
+  scp "${SCP_OPTS[@]}" "${SSH_USER}@${SSH_HOST}:${remote_path}" "${local_path}" >/dev/null 2>&1 || true
+}
+
+sync_epoch_artifacts() {
+  local epoch="$1"
+  copy_remote_file_if_exists "${REMOTE_BEST_CHECKPOINT}" "${LOCAL_LIVE_CKPT_DIR}/model_best_${RUN_ID}.pt"
+  local epoch_remote="${REMOTE_EPOCH_CHECKPOINT_DIR}/model_epoch_$(printf '%02d' "${epoch}").pt"
+  local epoch_local="${LOCAL_LIVE_CKPT_DIR}/model_epoch_$(printf '%02d' "${epoch}").pt"
+  copy_remote_file_if_exists "${epoch_remote}" "${epoch_local}"
+}
+
+append_epoch_eta_report() {
+  local progress_line="$1"
+  local epoch="$2"
+  local epochs="$3"
+  local ts_epoch_ms
+  ts_epoch_ms="$(printf '%s\n' "${progress_line}" | jq -r '.ts_epoch_ms // 0' 2>/dev/null || echo 0)"
+  if [[ ! "${ts_epoch_ms}" =~ ^[0-9]+$ ]]; then
+    ts_epoch_ms=0
+  fi
+  (( script_start_ts_ms <= 0 )) && script_start_ts_ms="${ts_epoch_ms}"
+  local eta_seconds=0
+  local eta_utc=""
+  if (( script_start_ts_ms > 0 && ts_epoch_ms > script_start_ts_ms && epoch > 0 )); then
+    local elapsed_ms=$(( ts_epoch_ms - script_start_ts_ms ))
+    local avg_epoch_ms=$(( elapsed_ms / epoch ))
+    local remaining_epochs=$(( epochs - epoch ))
+    (( remaining_epochs < 0 )) && remaining_epochs=0
+    local eta_ms=$(( avg_epoch_ms * remaining_epochs ))
+    eta_seconds=$(( eta_ms / 1000 ))
+    eta_utc="$(date -u -d "@$(( ts_epoch_ms / 1000 + eta_seconds ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$(
+    printf '%s\n' "${progress_line}" | jq -c \
+      --arg run_id "${RUN_ID}" \
+      --arg report_ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg eta_utc "${eta_utc}" \
+      --argjson eta_seconds "${eta_seconds}" \
+      '. + {run_id:$run_id, report_ts_utc:$report_ts, eta_seconds_remaining:$eta_seconds, eta_utc:$eta_utc}'
+  )" >> "${EPOCH_ETA_REPORT_JSONL}" 2>/dev/null || true
+}
 
 render_bar() {
   local done="$1"
@@ -263,6 +322,7 @@ process_snapshot() {
       case "${last_event}" in
         script_start)
           total_epochs="$(printf '%s\n' "${progress_line}" | jq -r '.epochs_requested // 0' 2>/dev/null || echo 0)"
+          script_start_ts_ms="$(printf '%s\n' "${progress_line}" | jq -r '.ts_epoch_ms // 0' 2>/dev/null || echo 0)"
           ;;
         train_setup)
           if (( total_epochs <= 0 )); then
@@ -290,6 +350,10 @@ process_snapshot() {
               " top1=" + ((.top1 // 0) | tostring)
             ' 2>/dev/null || true
           )"
+          if [[ "${completed_epoch}" =~ ^[0-9]+$ ]] && (( completed_epoch > 0 )); then
+            sync_epoch_artifacts "${completed_epoch}"
+            append_epoch_eta_report "${progress_line}" "${completed_epoch}" "${total_epochs:-0}"
+          fi
           ;;
         train_complete|script_complete)
           ec="$(printf '%s\n' "${progress_line}" | jq -r '.epochs_completed // .history_last_epoch // empty' 2>/dev/null || true)"

@@ -8,6 +8,7 @@ Define the current preferred end-to-end RunPod training flow, including exact op
 - Underlying lifecycle: `scripts/runpod_cycle_full_train_hf.sh` and `scripts/runpod_cycle_*.sh`
 - Dataset source: Hugging Face dataset repo fetch inside pod (no host->pod dataset push)
 - Progress/watchdog: `scripts/runpod_cycle_watch_progress.sh` and remote training sentinels
+  - watcher now also syncs remote best/epoch checkpoints locally at epoch boundaries and appends epoch ETA report JSONL
 
 ## Current Preferred Defaults (2026-02-27)
 - Include all published monthly datasets:
@@ -22,6 +23,12 @@ Define the current preferred end-to-end RunPod training flow, including exact op
   - no override envs set (`RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` unset, `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` unset)
   - remote auto logic chooses `num_workers=max(nproc-1,1)`
   - batch size chosen by remote VRAM tier heuristic
+  - on RTX 5090 without explicit batch override, flow now uses an auto retry ladder (`4096 -> 3072 -> 2048`) and falls back on OOM
+- Fast-stage subset option:
+  - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS` can cap effective train+val rows after indexing/cache load (auto split by original train/val ratio)
+  - optional explicit split caps: `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`, `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`
+- GPU default:
+  - `RUNPOD_GPU_TYPE_ID` default in easy flow is `NVIDIA GeForce RTX 5090`
 - SSH handling:
   - managed temp key auto-generated on host at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
   - no personal-key passphrase prompt path in preferred flow
@@ -42,7 +49,7 @@ The flow runs `train_baseline.py` via preset (or direct fallback when needed) wi
 - `runtime_max_samples_per_game=0`
 - LR scheduler: `plateau` on `val_loss` with `factor=0.5`, `patience=3`, `threshold=1e-4`
 - `early_stopping_patience=0`
-- `no_progress` enabled (machine-readable JSONL progress stream still enabled for watcher)
+- progress output enabled (machine-readable JSONL progress stream enabled for watcher)
 
 ## Start-To-Finish Operator Steps
 1. Validate host tooling and RunPod auth:
@@ -85,6 +92,7 @@ bash scripts/runpod_full_train_easy.sh
 - Uses HF dataset fetch in pod for training data selection; does not depend on host SSH dataset upload for preferred full flow.
 - Uses managed temporary SSH key by default for provision + SSH lifecycle commands.
 - Uses cache-first runtime splice behavior and fails fast if runtime splice cache cannot be used.
+- Trainer can persist `best` and `epoch-end` checkpoints to disk during training when flow-provided paths are set; watcher attempts to copy those artifacts locally each epoch end.
 - Stops pod at end of flow (`runpod_cycle_stop.sh`); explicit termination remains a separate operator action.
 
 ## Iteration Policy

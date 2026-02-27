@@ -302,6 +302,14 @@ def main() -> None:
     parser.add_argument("--runtime-min-context", type=int, default=8, help="Runtime splicing min context plies for game-level datasets")
     parser.add_argument("--runtime-min-target", type=int, default=1, help="Runtime splicing min target plies for game-level datasets")
     parser.add_argument("--runtime-max-samples-per-game", type=int, default=0, help="Runtime splicing sample cap per game (0=no cap)")
+    parser.add_argument("--max-train-rows", type=int, default=0, help="Optional cap on effective training rows after indexing/cache load")
+    parser.add_argument("--max-val-rows", type=int, default=0, help="Optional cap on effective validation rows after indexing/cache load")
+    parser.add_argument(
+        "--max-total-rows",
+        type=int,
+        default=0,
+        help="Optional cap on effective train+val rows (auto-split by source ratio when per-split caps unset)",
+    )
     parser.add_argument(
         "--require-runtime-splice-cache",
         action=argparse.BooleanOptionalAction,
@@ -396,6 +404,8 @@ def main() -> None:
         default=True,
         help="Show per-epoch batch progress bar (requires --verbose)",
     )
+    parser.add_argument("--best-checkpoint-out", default="", help="Optional path to persist current best checkpoint at each improvement")
+    parser.add_argument("--epoch-checkpoint-dir", default="", help="Optional directory to write epoch-end checkpoints")
     parser.add_argument(
         "--telemetry",
         action=argparse.BooleanOptionalAction,
@@ -637,6 +647,11 @@ def main() -> None:
             runtime_min_target=args.runtime_min_target,
             runtime_max_samples_per_game=args.runtime_max_samples_per_game,
             require_runtime_splice_cache=args.require_runtime_splice_cache,
+            max_train_rows=args.max_train_rows,
+            max_val_rows=args.max_val_rows,
+            max_total_rows=args.max_total_rows,
+            best_checkpoint_out=args.best_checkpoint_out,
+            epoch_checkpoint_dir=args.epoch_checkpoint_dir,
         )
     except Exception as exc:
         emit_progress({"event": "script_error", "error_type": type(exc).__name__, "message": str(exc)})
@@ -699,6 +714,9 @@ def main() -> None:
         "runtime_splice": dataset_info.get("runtime_splice"),
         "runtime_splice_index_bytes_train": dataset_info.get("runtime_splice_index_bytes_train"),
         "runtime_splice_index_bytes_val": dataset_info.get("runtime_splice_index_bytes_val"),
+        "train_rows_source": dataset_info.get("train_rows_source"),
+        "val_rows_source": dataset_info.get("val_rows_source"),
+        "subset_sampling": dataset_info.get("subset_sampling"),
         "epochs": args.epochs,
         "history": history,
         "model_path": args.output,
@@ -724,7 +742,12 @@ def main() -> None:
         "runtime_min_context": args.runtime_min_context,
         "runtime_min_target": args.runtime_min_target,
         "runtime_max_samples_per_game": args.runtime_max_samples_per_game,
+        "max_train_rows": args.max_train_rows,
+        "max_val_rows": args.max_val_rows,
+        "max_total_rows": args.max_total_rows,
         "require_runtime_splice_cache": args.require_runtime_splice_cache,
+        "best_checkpoint_out": args.best_checkpoint_out,
+        "epoch_checkpoint_dir": args.epoch_checkpoint_dir,
         "restore_best": args.restore_best,
         "lr_scheduler": args.lr_scheduler,
         "lr_scheduler_metric": args.lr_scheduler_metric,

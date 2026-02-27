@@ -32,6 +32,9 @@ FLOW_SKIP_START="${RUNPOD_CYCLE_SKIP_START:-0}"
 FLOW_RUNTIME_MIN_CONTEXT="${RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT:-${TRAIN_RUNTIME_MIN_CONTEXT:-8}}"
 FLOW_RUNTIME_MIN_TARGET="${RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET:-${TRAIN_RUNTIME_MIN_TARGET:-1}}"
 FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-0}}"
+FLOW_MAX_TOTAL_ROWS="${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-0}"
+FLOW_MAX_TRAIN_ROWS="${RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS:-0}"
+FLOW_MAX_VAL_ROWS="${RUNPOD_FULL_TRAIN_MAX_VAL_ROWS:-0}"
 
 GPU_SEARCH_JSON="${CYCLE_DIR}/gpu_search.json"
 GPU_SELECTION_JSON="${CYCLE_DIR}/gpu_selection.json"
@@ -124,6 +127,7 @@ pick_gpu() {
     "NVIDIA H100" \
     "NVIDIA A100" \
     "NVIDIA L40S" \
+    "RTX 5090" \
     "RTX 6000 Ada" \
     "RTX 4090" \
     "RTX 3090"
@@ -232,6 +236,8 @@ REMOTE_TRAIN_LOG="${REMOTE_RUN_DIR}/train_stdout_${RUN_ID}.log"
 REMOTE_TRAIN_PID_FILE="${REMOTE_RUN_DIR}/train_pid.txt"
 REMOTE_TRAIN_EXIT_CODE_FILE="${REMOTE_RUN_DIR}/train_exit_code.txt"
 REMOTE_GPU_SAMPLES_CSV="${REMOTE_RUN_DIR}/gpu_usage_samples_${RUN_ID}.csv"
+REMOTE_BEST_CHECKPOINT="${REMOTE_RUN_DIR}/model_best_${RUN_ID}.pt"
+REMOTE_EPOCH_CHECKPOINT_DIR="${REMOTE_RUN_DIR}/epoch_checkpoints"
 
 wait_remote_repo_ready "${SSH_HOST}" "${SSH_PORT}" "${SSH_USER}" "${SSH_KEY}" "${REMOTE_REPO_DIR}"
 
@@ -396,7 +402,7 @@ suggestions = {
         "amp": True,
         "phase_weight_endgame": 2.0,
         "disable_early_stopping_for_full_run": True,
-        "train_extra_args": "--epochs 100 --early-stopping-patience 0 --no-progress",
+        "train_extra_args": "--epochs 100 --early-stopping-patience 0",
     },
     "notes": [
         "Batch-size suggestion is a conservative VRAM-tier heuristic; verify with collected peak GPU memory samples.",
@@ -419,7 +425,7 @@ Path(os.environ["SUGGESTIONS_MD"]).write_text(
             f"- Dataset total GiB: `{suggestions['dataset_summary']['total_gib']}`",
             f"- Suggested batch size: `{batch_size}`",
             f"- Suggested num_workers: `{workers}`",
-            "- Suggested run: `--epochs 100 --early-stopping-patience 0 --no-progress` with progress JSONL enabled",
+            "- Suggested run: `--epochs 100 --early-stopping-patience 0` with progress JSONL enabled",
             "",
             "These are pre-training suggestions. Compare against collected peak VRAM samples after the run.",
             "",
@@ -432,7 +438,7 @@ PY
 EOF
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-  "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' HF_DATASET_SCHEMA_FILTER='${HF_DATASET_SCHEMA_FILTER}' HF_DATASET_NAME='${HF_DATASET_NAME}' HF_DATASET_VERSION='${HF_DATASET_VERSION}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' FLOW_RUNTIME_MIN_CONTEXT='${FLOW_RUNTIME_MIN_CONTEXT}' FLOW_RUNTIME_MIN_TARGET='${FLOW_RUNTIME_MIN_TARGET}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
+  "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' REMOTE_BEST_CHECKPOINT='${REMOTE_BEST_CHECKPOINT}' REMOTE_EPOCH_CHECKPOINT_DIR='${REMOTE_EPOCH_CHECKPOINT_DIR}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' HF_DATASET_SCHEMA_FILTER='${HF_DATASET_SCHEMA_FILTER}' HF_DATASET_NAME='${HF_DATASET_NAME}' HF_DATASET_VERSION='${HF_DATASET_VERSION}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' FLOW_RUNTIME_MIN_CONTEXT='${FLOW_RUNTIME_MIN_CONTEXT}' FLOW_RUNTIME_MIN_TARGET='${FLOW_RUNTIME_MIN_TARGET}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_MAX_TRAIN_ROWS='${FLOW_MAX_TRAIN_ROWS}' FLOW_MAX_VAL_ROWS='${FLOW_MAX_VAL_ROWS}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
   <<'EOF' 2>&1 | tee "${REMOTE_TRAIN_LAUNCH_LOG}"
 set -Eeuo pipefail
 mkdir -p "${REMOTE_RUN_DIR}"
@@ -505,7 +511,12 @@ export TRAIN_RUNTIME_MIN_CONTEXT="${FLOW_RUNTIME_MIN_CONTEXT}"
 export TRAIN_RUNTIME_MIN_TARGET="${FLOW_RUNTIME_MIN_TARGET}"
 export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
 export TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1
-export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0 --no-progress"
+export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"
+export TRAIN_MAX_TRAIN_ROWS="${FLOW_MAX_TRAIN_ROWS}"
+export TRAIN_MAX_VAL_ROWS="${FLOW_MAX_VAL_ROWS}"
+export TRAIN_BEST_CHECKPOINT_OUT="${REMOTE_BEST_CHECKPOINT}"
+export TRAIN_EPOCH_CHECKPOINT_DIR="${REMOTE_EPOCH_CHECKPOINT_DIR}"
+export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0"
 TRAIN_PRESET_IMAGE="/opt/runpod_cloud_training/train_baseline_preset.sh"
 TRAIN_PRESET_REPO="${REMOTE_REPO_DIR}/deploy/runpod_cloud_training/train_baseline_preset.sh"
 TRAIN_PRESET_SCRIPT="${TRAIN_PRESET_IMAGE}"
@@ -527,18 +538,78 @@ fi
   echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers=${TRAIN_NUM_WORKERS} epochs=${FLOW_EPOCHS}"
   echo "[runpod-cycle-full-train-hf] hf_dataset_schema_filter=${HF_DATASET_SCHEMA_FILTER}"
   echo "[runpod-cycle-full-train-hf] runtime_min_context=${TRAIN_RUNTIME_MIN_CONTEXT} runtime_min_target=${TRAIN_RUNTIME_MIN_TARGET} runtime_max_samples_per_game=${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"
+  echo "[runpod-cycle-full-train-hf] subset_caps max_total_rows=${TRAIN_MAX_TOTAL_ROWS} max_train_rows=${TRAIN_MAX_TRAIN_ROWS} max_val_rows=${TRAIN_MAX_VAL_ROWS}"
   echo "[runpod-cycle-full-train-hf] progress_jsonl=${REMOTE_PROGRESS_JSONL}"
+  echo "[runpod-cycle-full-train-hf] best_checkpoint_out=${TRAIN_BEST_CHECKPOINT_OUT}"
+  echo "[runpod-cycle-full-train-hf] epoch_checkpoint_dir=${TRAIN_EPOCH_CHECKPOINT_DIR}"
   echo "[runpod-cycle-full-train-hf] hf_manifest=${REMOTE_HF_FETCH_MANIFEST}"
   echo "[runpod-cycle-full-train-hf] train_preset_script=${TRAIN_PRESET_SCRIPT}"
   echo "[runpod-cycle-full-train-hf] train_preset_has_hf=${preset_has_hf} train_preset_has_progress=${preset_has_progress}"
 } >> "${REMOTE_TRAIN_LOG}"
 rc=0
+declare -a batch_attempts
+batch_attempts=("${TRAIN_BATCH_SIZE}")
+if [[ -z "${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}" ]]; then
+  gpu_name_for_batch="$('/opt/venvs/chessbot/bin/python' - "${REMOTE_CONTEXT_JSON}" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+devices = ((data.get("gpu") or {}).get("devices") or [])
+if devices and isinstance(devices[0], dict):
+    print(str(devices[0].get("name") or ""))
+else:
+    print("")
+PY
+)"
+  if [[ "${gpu_name_for_batch}" == *"RTX 5090"* ]]; then
+    # Prefer a higher effective batch on 5090; fallback on OOM.
+    batch_attempts=(4096 3072 2048)
+  fi
+fi
+declare -A _seen_batch=()
+declare -a batch_attempts_dedup=()
+for _b in "${batch_attempts[@]}"; do
+  if [[ "${_b}" =~ ^[0-9]+$ ]] && (( _b > 0 )) && [[ -z "${_seen_batch[${_b}]:-}" ]]; then
+    _seen_batch["${_b}"]=1
+    batch_attempts_dedup+=("${_b}")
+  fi
+done
+if (( ${#batch_attempts_dedup[@]} == 0 )); then
+  batch_attempts_dedup=("${TRAIN_BATCH_SIZE}")
+fi
+{
+  echo "[runpod-cycle-full-train-hf] batch_attempt_plan=${batch_attempts_dedup[*]}"
+} >> "${REMOTE_TRAIN_LOG}"
+
+is_oom_failure_tail() {
+  tail -n 200 "${REMOTE_TRAIN_LOG}" 2>/dev/null | grep -Eiq \
+    'cuda out of memory|out of memory|cublas_status_alloc_failed|cuda error: out of memory'
+}
+
 if [[ "${preset_has_hf}" == "1" ]]; then
   if [[ "${preset_has_progress}" != "1" ]]; then
     unset TRAIN_PROGRESS_JSONL_OUT
     echo "[runpod-cycle-full-train-hf] preset lacks TRAIN_PROGRESS_JSONL_OUT support; progress JSONL disabled for this run" >> "${REMOTE_TRAIN_LOG}"
   fi
-  bash "${TRAIN_PRESET_SCRIPT}" >> "${REMOTE_TRAIN_LOG}" 2>&1 || rc=$?
+  for _batch_try in "${batch_attempts_dedup[@]}"; do
+    export TRAIN_BATCH_SIZE="${_batch_try}"
+    echo "[runpod-cycle-full-train-hf] batch_attempt_start=${_batch_try} via=preset" >> "${REMOTE_TRAIN_LOG}"
+    rc=0
+    bash "${TRAIN_PRESET_SCRIPT}" >> "${REMOTE_TRAIN_LOG}" 2>&1 || rc=$?
+    if [[ "${rc}" == "0" ]]; then
+      break
+    fi
+    if [[ -n "${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}" ]]; then
+      break
+    fi
+    if ! is_oom_failure_tail; then
+      break
+    fi
+    echo "[runpod-cycle-full-train-hf] batch_attempt_oom_retry next_batch=<next>" >> "${REMOTE_TRAIN_LOG}"
+  done
 else
   echo "[runpod-cycle-full-train-hf] preset lacks HF aggregate support; using direct train_baseline.py fallback" >> "${REMOTE_TRAIN_LOG}"
   mapfile -t hf_train_paths < <('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" <<'PY'
@@ -600,50 +671,74 @@ PY
     echo "[runpod-cycle-full-train-hf] no train/val paths found in HF fetch manifest: ${REMOTE_HF_FETCH_MANIFEST}" >> "${REMOTE_TRAIN_LOG}"
     rc=1
   else
-    direct_cmd=( '/opt/venvs/chessbot/bin/python' "${REMOTE_REPO_DIR}/scripts/train_baseline.py"
-      --output "${OUTPUT_PATH}"
-      --metrics-out "${METRICS_OUT}"
-      --epochs "${FLOW_EPOCHS}"
-      --lr 0.0002
-      --embed-dim 256
-      --hidden-dim 512
-      --num-layers 2
-      --dropout 0.15
-      --batch-size "${TRAIN_BATCH_SIZE}"
-      --num-workers "${TRAIN_NUM_WORKERS}"
-      --amp
-      --phase-feature
-      --side-to-move-feature
-      --phase-weight-endgame 2.0
-      --lr-scheduler plateau
-      --lr-scheduler-metric val_loss
-      --lr-plateau-factor 0.5
-      --lr-plateau-patience 3
-      --lr-plateau-threshold 0.0001
-      --early-stopping-patience 0
-      --no-progress
-    )
-    if grep -q 'progress-jsonl-out' "${REMOTE_REPO_DIR}/scripts/train_baseline.py" 2>/dev/null; then
-      direct_cmd+=( --progress-jsonl-out "${REMOTE_PROGRESS_JSONL}" )
-    else
-      echo "[runpod-cycle-full-train-hf] remote train_baseline.py lacks --progress-jsonl-out; local watcher will wait for exit sentinel only" >> "${REMOTE_TRAIN_LOG}"
-    fi
-    for p in "${hf_train_paths[@]}"; do
-      direct_cmd+=( --train "${p}" )
+    for _batch_try in "${batch_attempts_dedup[@]}"; do
+      export TRAIN_BATCH_SIZE="${_batch_try}"
+      echo "[runpod-cycle-full-train-hf] batch_attempt_start=${_batch_try} via=direct_fallback" >> "${REMOTE_TRAIN_LOG}"
+      direct_cmd=( '/opt/venvs/chessbot/bin/python' "${REMOTE_REPO_DIR}/scripts/train_baseline.py"
+        --output "${OUTPUT_PATH}"
+        --metrics-out "${METRICS_OUT}"
+        --epochs "${FLOW_EPOCHS}"
+        --lr 0.0002
+        --embed-dim 256
+        --hidden-dim 512
+        --num-layers 2
+        --dropout 0.15
+        --batch-size "${TRAIN_BATCH_SIZE}"
+        --num-workers "${TRAIN_NUM_WORKERS}"
+        --amp
+        --phase-feature
+        --side-to-move-feature
+        --phase-weight-endgame 2.0
+        --lr-scheduler plateau
+        --lr-scheduler-metric val_loss
+        --lr-plateau-factor 0.5
+        --lr-plateau-patience 3
+        --lr-plateau-threshold 0.0001
+        --early-stopping-patience 0
+      )
+      if [[ "${FLOW_MAX_TRAIN_ROWS}" != "0" ]]; then
+        direct_cmd+=( --max-train-rows "${FLOW_MAX_TRAIN_ROWS}" )
+      fi
+      if [[ "${FLOW_MAX_VAL_ROWS}" != "0" ]]; then
+        direct_cmd+=( --max-val-rows "${FLOW_MAX_VAL_ROWS}" )
+      fi
+      if [[ "${FLOW_MAX_TOTAL_ROWS}" != "0" ]]; then
+        direct_cmd+=( --max-total-rows "${FLOW_MAX_TOTAL_ROWS}" )
+      fi
+      direct_cmd+=( --best-checkpoint-out "${REMOTE_BEST_CHECKPOINT}" --epoch-checkpoint-dir "${REMOTE_EPOCH_CHECKPOINT_DIR}" )
+      if grep -q 'progress-jsonl-out' "${REMOTE_REPO_DIR}/scripts/train_baseline.py" 2>/dev/null; then
+        direct_cmd+=( --progress-jsonl-out "${REMOTE_PROGRESS_JSONL}" )
+      else
+        echo "[runpod-cycle-full-train-hf] remote train_baseline.py lacks --progress-jsonl-out; local watcher will wait for exit sentinel only" >> "${REMOTE_TRAIN_LOG}"
+      fi
+      for p in "${hf_train_paths[@]}"; do
+        direct_cmd+=( --train "${p}" )
+      done
+      for p in "${hf_val_paths[@]}"; do
+        direct_cmd+=( --val "${p}" )
+      done
+      if [[ "${selected_schema}" == "game_jsonl_runtime_splice_v1" ]]; then
+        direct_cmd+=( --runtime-min-context "${TRAIN_RUNTIME_MIN_CONTEXT}" --runtime-min-target "${TRAIN_RUNTIME_MIN_TARGET}" --runtime-max-samples-per-game "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}" )
+      fi
+      direct_cmd+=( --require-runtime-splice-cache )
+      {
+        printf '[runpod-cycle-full-train-hf] direct_fallback_exec:'
+        printf ' %q' "${direct_cmd[@]}"
+        printf '\n'
+      } >> "${REMOTE_TRAIN_LOG}"
+      rc=0
+      "${direct_cmd[@]}" >> "${REMOTE_TRAIN_LOG}" 2>&1 || rc=$?
+      if [[ "${rc}" == "0" ]]; then
+        break
+      fi
+      if [[ -n "${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}" ]]; then
+        break
+      fi
+      if ! is_oom_failure_tail; then
+        break
+      fi
+      echo "[runpod-cycle-full-train-hf] batch_attempt_oom_retry next_batch=<next>" >> "${REMOTE_TRAIN_LOG}"
     done
-    for p in "${hf_val_paths[@]}"; do
-      direct_cmd+=( --val "${p}" )
-    done
-    if [[ "${selected_schema}" == "game_jsonl_runtime_splice_v1" ]]; then
-      direct_cmd+=( --runtime-min-context "${TRAIN_RUNTIME_MIN_CONTEXT}" --runtime-min-target "${TRAIN_RUNTIME_MIN_TARGET}" --runtime-max-samples-per-game "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}" )
-    fi
-    direct_cmd+=( --require-runtime-splice-cache )
-    {
-      printf '[runpod-cycle-full-train-hf] direct_fallback_exec:'
-      printf ' %q' "${direct_cmd[@]}"
-      printf '\n'
-    } >> "${REMOTE_TRAIN_LOG}"
-    "${direct_cmd[@]}" >> "${REMOTE_TRAIN_LOG}" 2>&1 || rc=$?
   fi
 fi
 if [[ -n "${gpu_sampler_pid}" ]]; then
@@ -664,6 +759,8 @@ EOF
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
 RUNPOD_REMOTE_TRAIN_EXIT_CODE_FILE="${REMOTE_TRAIN_EXIT_CODE_FILE}" \
 RUNPOD_REMOTE_PROGRESS_JSONL="${REMOTE_PROGRESS_JSONL}" \
+RUNPOD_REMOTE_BEST_CHECKPOINT="${REMOTE_BEST_CHECKPOINT}" \
+RUNPOD_REMOTE_EPOCH_CHECKPOINT_DIR="${REMOTE_EPOCH_CHECKPOINT_DIR}" \
 bash "${REPO_ROOT}/scripts/runpod_cycle_watch_progress.sh"
 
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh"

@@ -11,7 +11,7 @@ export RUNPOD_HF_DATASET_SCHEMA_FILTER="${RUNPOD_HF_DATASET_SCHEMA_FILTER:-auto}
 export RUNPOD_FULL_TRAIN_EPOCHS="${RUNPOD_FULL_TRAIN_EPOCHS:-100}"
 export RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-COMMUNITY}"
 export RUNPOD_GPU_MIN_MEMORY_GB="${RUNPOD_GPU_MIN_MEMORY_GB:-24}"
-export RUNPOD_GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA RTX 6000 Ada Generation}"
+export RUNPOD_GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 5090}"
 export RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
@@ -25,6 +25,7 @@ cat <<EOF
 [runpod-full-train-easy] temp_ssh_key=$(runpod_cycle_ssh_key)
 [runpod-full-train-easy] batch_size_override=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}
 [runpod-full-train-easy] num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}
+[runpod-full-train-easy] max_total_rows=${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-<unset>}
 [runpod-full-train-easy] runtime_max_samples_per_game=${RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-<unset>}
 EOF
 

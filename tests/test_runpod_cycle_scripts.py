@@ -240,10 +240,12 @@ OUT
         text = Path("scripts/runpod_full_train_easy.sh").read_text(encoding="utf-8")
         self.assertIn("RUNPOD_HF_DATASET_REPO_ID", text)
         self.assertIn("RUNPOD_FULL_TRAIN_EPOCHS", text)
+        self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 5090", text)
         self.assertIn("runpod_cycle_prepare_ssh_client_files", text)
         self.assertIn("temp_ssh_key=$(runpod_cycle_ssh_key)", text)
         self.assertIn("batch_size_override=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn("num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}", text)
+        self.assertIn("max_total_rows=${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-<unset>}", text)
         self.assertIn("scripts/runpod_cycle_full_train_hf.sh", text)
 
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
@@ -282,7 +284,24 @@ OUT
         self.assertIn("override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn('cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"', text)
         self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"', text)
+        self.assertIn('export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0"', text)
+        self.assertNotIn("--no-progress", text)
+        self.assertIn('if [[ "${gpu_name_for_batch}" == *"RTX 5090"* ]]; then', text)
+        self.assertIn("batch_attempts=(4096 3072 2048)", text)
+        self.assertIn("is_oom_failure_tail()", text)
+        self.assertIn('FLOW_MAX_TOTAL_ROWS="${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-0}"', text)
+        self.assertIn('export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"', text)
+        self.assertIn('RUNPOD_REMOTE_BEST_CHECKPOINT="${REMOTE_BEST_CHECKPOINT}"', text)
         self.assertIn("cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers}", text)
+
+    def test_watch_progress_syncs_remote_checkpoints_and_writes_epoch_eta_report(self):
+        text = Path("scripts/runpod_cycle_watch_progress.sh").read_text(encoding="utf-8")
+        self.assertIn('REMOTE_BEST_CHECKPOINT="${RUNPOD_REMOTE_BEST_CHECKPOINT:-${REMOTE_RUN_DIR}/model_best_${RUN_ID}.pt}"', text)
+        self.assertIn('REMOTE_EPOCH_CHECKPOINT_DIR="${RUNPOD_REMOTE_EPOCH_CHECKPOINT_DIR:-${REMOTE_RUN_DIR}/epoch_checkpoints}"', text)
+        self.assertIn("EPOCH_ETA_REPORT_JSONL", text)
+        self.assertIn("sync_epoch_artifacts()", text)
+        self.assertIn("append_epoch_eta_report()", text)
+        self.assertIn("runpod_cycle_require_cmd scp", text)
 
     def test_full_train_hf_remote_fetch_uses_unified_args_builder(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")

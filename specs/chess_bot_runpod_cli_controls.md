@@ -173,6 +173,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_watch_progress.sh`
   - keeps a single SSH session open to stream remote JSONL progress snapshots and renders a local epoch progress bar using machine-readable events from `scripts/train_baseline.py --progress-jsonl-out`
   - watches a remote `train_exit_code.txt` sentinel and exits with the same code
+  - on `epoch_end`, attempts to pull remote best/epoch checkpoints into local `artifacts/runpod_cycles/<run_id>/live_checkpoints/`
+  - appends per-epoch ETA/data snapshots to `artifacts/runpod_cycles/<run_id>/reports/epoch_eta_report_<run_id>.jsonl`
   - scans snapshot tails for the latest valid JSON progress event (avoids getting stuck when the newest tailed line is partial/non-JSON)
   - supports manual PTY allocation via `RUNPOD_SSH_FORCE_TTY=1` when a host environment requires it
   - handles `Ctrl-C`/`SIGTERM` by restoring TTY state and stopping local child watcher processes to reduce terminal corruption/noisy leftover streams
@@ -188,6 +190,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
   - local quick-play command/model retrieval now uses robust collected-artifact lookup (prefers `model_<run_id>.pt`, falls back to latest `.pt`) to tolerate naming variations while preserving run-id preference
   - default remote `num_workers` now uses the pod's available CPU threads minus one (`max(nproc-1, 1)`) unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set
+  - supports subset caps for fast-stage runs:
+    - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS`
+    - `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`
+    - `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`
+  - forwards best/epoch checkpoint paths so trainer writes intermediate model artifacts during long runs
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
   - operational caveat: if the local watcher step fails after remote training has started/completed, the wrapper's error trap can stop the pod before `collect`; this does not mutate/delete the source HF dataset repo, and remote run artifacts typically remain on the pod volume until the pod is terminated (restart the same pod and run `scripts/runpod_cycle_collect.sh` for the same `RUNPOD_CYCLE_RUN_ID`)
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
@@ -253,8 +260,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - defaults:
     - HF repo `LogicLark-QuantumQuill/chess-bot-datasets`
     - `RUNPOD_FULL_TRAIN_EPOCHS=100`
-    - community GPU with explicit default `NVIDIA RTX 6000 Ada Generation`
+    - community GPU with explicit default `NVIDIA GeForce RTX 5090`
     - temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
+    - progress output enabled by default (plus JSONL progress stream for watcher)
     - remote training `num_workers` defaults to `max(nproc-1, 1)` on the pod when no override is set
   - operator can still override by env, but no flags/params are required for the default path
   - compact-dataset / runtime-splice-friendly env overrides (useful for smoke runs):
