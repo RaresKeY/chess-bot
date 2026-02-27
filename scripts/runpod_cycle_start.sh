@@ -11,6 +11,7 @@ PROVISION_JSON="$(runpod_cycle_provision_json "${REPO_ROOT}" "${RUN_ID}")"
 REPORT_MD="$(runpod_cycle_report_md "${REPO_ROOT}" "${RUN_ID}")"
 
 runpod_cycle_require_cmd jq
+runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 mkdir -p "${CYCLE_DIR}" "$(dirname "${REPORT_MD}")"
 
 POD_NAME="${RUNPOD_POD_NAME:-chess-bot-cycle-${RUN_ID}}"
@@ -43,8 +44,9 @@ else
   cmd+=( --no-use-runpod-training-preset-env )
 fi
 
-if [[ "${RUNPOD_INJECT_LOCAL_SSH_KEY_ENV:-1}" == "1" ]]; then
-  SSH_PUBKEY_PATH="${RUNPOD_SSH_PUBKEY_PATH:-$HOME/.ssh/id_ed25519.pub}"
+INJECT_MANAGED_SSH_KEY_ENV="${RUNPOD_INJECT_MANAGED_SSH_KEY_ENV:-1}"
+if [[ "${INJECT_MANAGED_SSH_KEY_ENV}" == "1" ]]; then
+  SSH_PUBKEY_PATH="$(runpod_cycle_ssh_pubkey_path)"
   if [[ -f "${SSH_PUBKEY_PATH}" ]]; then
     SSH_PUBKEY_VALUE="$(<"${SSH_PUBKEY_PATH}")"
     if [[ -n "${SSH_PUBKEY_VALUE}" ]]; then
@@ -52,7 +54,7 @@ if [[ "${RUNPOD_INJECT_LOCAL_SSH_KEY_ENV:-1}" == "1" ]]; then
       cmd+=( --env "PUBLIC_KEY=${SSH_PUBKEY_VALUE}" )
     fi
   else
-    echo "[runpod-cycle-start] warning: local ssh pubkey not found at ${SSH_PUBKEY_PATH}; continuing without AUTHORIZED_KEYS/PUBLIC_KEY override" >&2
+    echo "[runpod-cycle-start] warning: managed ssh pubkey not found at ${SSH_PUBKEY_PATH}; continuing without AUTHORIZED_KEYS/PUBLIC_KEY override" >&2
   fi
 fi
 

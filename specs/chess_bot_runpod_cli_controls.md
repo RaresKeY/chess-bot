@@ -101,8 +101,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
   - provisions a pod from template using keyring-backed RunPod auth
-  - now injects local SSH public key env overrides by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`) from `~/.ssh/id_ed25519.pub` when present
-  - local SSH key injection can be controlled with `RUNPOD_INJECT_LOCAL_SSH_KEY_ENV` and `RUNPOD_SSH_PUBKEY_PATH`
+  - now injects a managed no-passphrase temp SSH key by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`), generated at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
+  - managed key injection can be controlled with `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`, `RUNPOD_SSH_KEY`, and `RUNPOD_SSH_PUBKEY_PATH`
   - now injects a unique per-run `REPO_DIR` by default (`/workspace/chess-bot-<run_id>`) to avoid stale/root-owned repo directories on reused persistent volumes
   - unique `REPO_DIR` injection can be controlled with `RUNPOD_SET_UNIQUE_REPO_DIR` and `RUNPOD_DEFAULT_REMOTE_REPO_DIR`
   - now injects smoke-safe service env defaults by default (`START_SSHD=1`, `START_JUPYTER=0`, `START_INFERENCE_API=0`, `START_HF_WATCH=0`, `START_IDLE_WATCHDOG=0`) to keep `sshd` stable during lifecycle smoke tests
@@ -193,8 +193,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports JSON and Markdown summary outputs for operator notes/spec updates
 - `scripts/runpod_full_train_easy.sh`
   - one-command opinionated wrapper around `runpod_cycle_full_train_hf.sh`
-  - auto-generates a temporary no-passphrase SSH key under `/tmp`, injects it for provisioning, and sets default HF repo / 100-epoch / GPU settings so the operator can run without export-heavy setup
-  - tightens temp-key handling by forcing `0600` permissions on the generated private key
+  - uses the shared RunPod managed-key path from `runpod_cycle_common.sh`: temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` with private key mode `0600`
+  - injects that managed key for provisioning and SSH commands so host passphrase prompts are avoided by default
   - logs effective HF prefix/schema filter and runtime-splice smoke throttle overrides when provided
 - `scripts/runpod_full_train_easy_smoke_test.sh`
   - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, runtime-splice sample cap)
@@ -252,7 +252,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - HF repo `LogicLark-QuantumQuill/chess-bot-datasets`
     - `RUNPOD_FULL_TRAIN_EPOCHS=100`
     - community GPU with explicit default `NVIDIA RTX 6000 Ada Generation`
-    - temporary no-passphrase SSH key under `/tmp/chessbot_runpod_temp_id_ed25519`
+    - temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
     - remote training `num_workers` defaults to `max(nproc-1, 1)` on the pod when no override is set
   - operator can still override by env, but no flags/params are required for the default path
   - compact-dataset / runtime-splice-friendly env overrides (useful for smoke runs):

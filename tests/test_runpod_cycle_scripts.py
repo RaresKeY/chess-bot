@@ -238,11 +238,16 @@ OUT
         text = Path("scripts/runpod_full_train_easy.sh").read_text(encoding="utf-8")
         self.assertIn("RUNPOD_HF_DATASET_REPO_ID", text)
         self.assertIn("RUNPOD_FULL_TRAIN_EPOCHS", text)
-        self.assertIn("ssh-keygen -t ed25519 -N \"\"", text)
-        self.assertIn("chmod 600", text)
+        self.assertIn("runpod_cycle_prepare_ssh_client_files", text)
+        self.assertIn("temp_ssh_key=$(runpod_cycle_ssh_key)", text)
         self.assertIn("batch_size_override=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn("num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}", text)
         self.assertIn("scripts/runpod_cycle_full_train_hf.sh", text)
+
+    def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
+        text = Path("scripts/runpod_cycle_start.sh").read_text(encoding="utf-8")
+        self.assertIn('RUNPOD_INJECT_MANAGED_SSH_KEY_ENV', text)
+        self.assertNotIn('RUNPOD_INJECT_LOCAL_SSH_KEY_ENV', text)
 
     def test_cycle_scripts_use_config_known_hosts_and_safer_default_host_key_checking(self):
         common = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
@@ -276,7 +281,8 @@ OUT
         self.assertIn("fetch_args=(", text)
         self.assertIn("fetch_args+=( --all-latest )", text)
         self.assertIn("fetch_args+=( --dataset-name", text)
-        self.assertIn("hf_dataset_fetch.py' \"${fetch_args[@]}\"", text)
+        self.assertIn("hf_dataset_fetch.py", text)
+        self.assertIn("\\${fetch_args[@]}", text)
 
     def test_terminate_all_reconciles_pod_not_found_404_as_terminated(self):
         with tempfile.TemporaryDirectory() as td:

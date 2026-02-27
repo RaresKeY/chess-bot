@@ -209,7 +209,7 @@ Host-side lifecycle smoke test for the RunPod training template/image (provision
 Prereqs:
 - RunPod pod template exists (for example `chess-bot-training`)
 - host has `ssh`, `rsync`, `jq`, `curl`
-- host SSH public key exists at `~/.ssh/id_ed25519.pub`
+- no manual host SSH key setup required for easy/full flows; scripts auto-generate a managed no-passphrase temp key at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
 - RunPod API key available via CLI arg/env/keyring, with dotenv fallback (`.env.runpod`/`.env`)
 
 Preferred auth (keyring):

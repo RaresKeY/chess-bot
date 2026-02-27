@@ -156,7 +156,28 @@ runpod_cycle_ssh_host() {
 }
 
 runpod_cycle_ssh_key() {
-  printf '%s\n' "${RUNPOD_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+  printf '%s\n' "${RUNPOD_SSH_KEY:-${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}}"
+}
+
+runpod_cycle_ssh_pubkey_path() {
+  printf '%s\n' "${RUNPOD_SSH_PUBKEY_PATH:-$(runpod_cycle_ssh_key).pub}"
+}
+
+runpod_cycle_ensure_ssh_keypair() {
+  local key_path pub_path
+  key_path="$(runpod_cycle_ssh_key)"
+  pub_path="$(runpod_cycle_ssh_pubkey_path)"
+  if [[ ! -f "${key_path}" || ! -f "${pub_path}" ]]; then
+    command -v ssh-keygen >/dev/null 2>&1 || {
+      echo "[runpod-cycle] missing required command: ssh-keygen" >&2
+      exit 1
+    }
+    rm -f "${key_path}" "${pub_path}"
+    ssh-keygen -t ed25519 -N "" -f "${key_path}" -C "codex-runpod-temp" >/dev/null
+  fi
+  chmod 600 "${key_path}" 2>/dev/null || true
+  export RUNPOD_SSH_KEY="${key_path}"
+  export RUNPOD_SSH_PUBKEY_PATH="${pub_path}"
 }
 
 runpod_cycle_ssh_host_key_checking() {
@@ -178,6 +199,7 @@ runpod_cycle_ssh_known_hosts_file() {
 
 runpod_cycle_prepare_ssh_client_files() {
   local repo_root="$1"
+  runpod_cycle_ensure_ssh_keypair
   local known_hosts
   known_hosts="$(runpod_cycle_ssh_known_hosts_file "${repo_root}")"
   mkdir -p "$(dirname "${known_hosts}")"
