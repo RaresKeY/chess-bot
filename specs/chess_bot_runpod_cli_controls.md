@@ -20,6 +20,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_full_smoke.sh`
 - `scripts/runpod_cycle_watch_progress.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
+- `scripts/runpod_cycle_report_style.py`
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/hf_dataset_publish.py`
@@ -98,13 +99,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - inherits current `runpod_provision.py` defaults (notably `--use-runpod-training-preset-env` is now opt-in)
 - `scripts/runpod_cycle_common.sh`
   - shared helpers for modular lifecycle scripts (run id paths, keyring token lookup, pod JSON parsing, SSH/connection fields)
-  - managed temp key guard: when using default managed key path (`/tmp/chessbot_runpod_temp_id_ed25519`), scripts validate that the private key is usable with empty passphrase and automatically regenerate it if a stale passphrase-protected key is found
+  - managed temp key only: scripts always use `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` and do not support personal/local key override variables
   - shared SSH args disable host agent/keyring import prompts for managed keys (`AddKeysToAgent=no`, `IdentityAgent=none`)
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
   - provisions a pod from template using keyring-backed RunPod auth
   - now injects a managed no-passphrase temp SSH key by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`), generated at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
-  - managed key injection can be controlled with `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`, `RUNPOD_SSH_KEY`, and `RUNPOD_SSH_PUBKEY_PATH`
+  - managed key injection can be controlled with `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
   - now injects a unique per-run `REPO_DIR` by default (`/workspace/chess-bot-<run_id>`) to avoid stale/root-owned repo directories on reused persistent volumes
   - unique `REPO_DIR` injection can be controlled with `RUNPOD_SET_UNIQUE_REPO_DIR` and `RUNPOD_DEFAULT_REMOTE_REPO_DIR`
   - now injects smoke-safe service env defaults by default (`START_SSHD=1`, `START_JUPYTER=0`, `START_INFERENCE_API=0`, `START_HF_WATCH=0`, `START_IDLE_WATCHDOG=0`) to keep `sshd` stable during lifecycle smoke tests
@@ -190,7 +191,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - remote training launcher now prefers the repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over the image-baked `/opt/...` copy to avoid stale image-script behavior
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
   - local quick-play command/model retrieval now uses robust collected-artifact lookup (prefers `model_<run_id>.pt`, falls back to latest `.pt`) to tolerate naming variations while preserving run-id preference
-  - default remote `num_workers` now uses the pod's available CPU threads minus one (`max(nproc-1, 1)`) unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set
+  - default remote `num_workers` now uses a safer capped auto policy unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set:
+    - `cpu_based = max(nproc-1, 1)`
+    - `ddp_based = TRAIN_NPROC_PER_NODE * vram_suggested_num_workers`
+    - `hard_cap = RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP` (default `32`)
+    - `auto_num_workers = min(cpu_based, ddp_based, hard_cap)`
   - supports subset caps for fast-stage runs:
     - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS`
     - `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`
@@ -198,11 +203,17 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - forwards best/epoch checkpoint paths so trainer writes intermediate model artifacts during long runs
 - `scripts/runpod_cycle_status.sh`
   - single-command status snapshot for an active run id
-  - reports local watcher/full-flow process presence plus remote stage (`repo_not_ready`, `run_dir_not_created`, `bootstrap_or_fetching`, `hf_fetch_done`, `pretrain_ready_or_launching`, `training_running`, `training_finished`, `ssh_unreachable`)
+  - reports local watcher/full-flow process presence plus remote stage (`repo_not_ready`, `run_dir_not_created`, `bootstrap_or_fetching`, `hf_fetch_done`, `pretrain_ready_or_launching`, `training_running`, `training_finished`, `manual_training_or_artifacts_present`, `manual_training_finished`, `ssh_unreachable`)
   - includes remote sentinel/file counts (`train_pid`, `progress_lines`, `train_log_lines`, `train_exit_code`, checkpoint presence) and one-line GPU sample when available
+  - includes manual sub-run discovery metadata under `remote.manual_runs` and `remote.manual_latest` for `manual_*` training directories
   - supports `--watch` polling mode for continuous JSON snapshots
+  - supports `--auto-collect` to trigger `scripts/runpod_cycle_collect.sh` once when a detected `manual_*` run reaches completed exit code (uses local marker files to avoid repeated collects)
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
   - operational caveat: if the local watcher step fails after remote training has started/completed, the wrapper's error trap can stop the pod before `collect`; this does not mutate/delete the source HF dataset repo, and remote run artifacts typically remain on the pod volume until the pod is terminated (restart the same pod and run `scripts/runpod_cycle_collect.sh` for the same `RUNPOD_CYCLE_RUN_ID`)
+- `scripts/runpod_cycle_report_style.py`
+  - generates a concise operator-facing markdown/json progress report for one run id
+  - report includes epoch progress, ETA, latest/peak GPU usage samples, DDP/cache fields, and local artifact presence
+  - default markdown output path: `artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md`
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
   - aggregates `gpu_full_training_observation_*.json` artifacts across runs, groups by GPU SKU, and emits heuristic next-run override suggestions (batch size / workers)
   - supports JSON and Markdown summary outputs for operator notes/spec updates
@@ -215,6 +226,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=${RUNPOD_GPU_COUNT}` (effective remote train process count)
   - single-GPU compatibility remains via explicit env override (`RUNPOD_GPU_COUNT=1`, `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=1`)
   - logs effective HF prefix/schema filter and runtime-splice smoke throttle overrides when provided
+  - prints the canonical easy-style report destination (`artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md`)
 - `scripts/runpod_full_train_easy_smoke_test.sh`
   - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, runtime-splice sample cap)
   - verifies local collected artifacts with `scripts/runpod_cycle_verify_full_hf_run.py`
@@ -274,7 +286,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_GPU_COUNT=2` and `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=2` (default multi-process train launch)
     - temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
     - progress output enabled by default (plus JSONL progress stream for watcher)
-    - remote training `num_workers` defaults to `max(nproc-1, 1)` on the pod when no override is set
+    - remote training `num_workers` defaults to `min(max(nproc-1,1), TRAIN_NPROC_PER_NODE*vram_suggested_num_workers, RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP)` (default hard cap `32`) when no override is set
   - operator can still override by env, but no flags/params are required for the default path
   - compact-dataset / runtime-splice-friendly env overrides (useful for smoke runs):
     - `RUNPOD_HF_DATASET_PATH_PREFIX` (for example `validated_datasets/elite_2025-11_game`)
@@ -288,6 +300,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `bash scripts/runpod_full_train_easy_smoke_test.sh`
     - uses the same easy/full-HF path, then verifies local artifacts + stop response + termination response
     - defaults to a single compact month fetch (`RUNPOD_HF_DATASET_NAME=elite_2025-11_game`) instead of aggregate `--all-latest` to reduce smoke runtime/cost
+  - supervised-run references:
+    - monitoring snapshot loop: `bash scripts/runpod_cycle_status.sh --watch`
+    - concise progress summary: `python scripts/runpod_cycle_report_style.py --run-id <run_id>`
+    - canonical supervised checklist/acceptance criteria: `specs/chess_bot_runpod_preferred_training_flow.md` section `Supervised Cloud Training Reference Notes`
 - For larger/reused validated datasets, prefer publishing once to a HF dataset repo and fetching into the pod/volume cache, instead of repeated host->pod `rsync` uploads
 - Stepwise modular flow:
   1. `bash scripts/runpod_cycle_start.sh`

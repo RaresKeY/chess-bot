@@ -489,19 +489,38 @@ else:
 PY
 )
 TRAIN_BATCH_SIZE="${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-${suggested[0]:-2048}}"
-cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
-if ! [[ "${cpu_threads}" =~ ^[0-9]+$ ]]; then
-  cpu_threads=0
+suggested_num_workers="${suggested[1]:-6}"
+if ! [[ "${suggested_num_workers}" =~ ^[0-9]+$ ]] || (( suggested_num_workers < 1 )); then
+  suggested_num_workers=6
 fi
-auto_num_workers=1
-if (( cpu_threads > 1 )); then
-  auto_num_workers=$((cpu_threads - 1))
-fi
-TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"
 TRAIN_NPROC_PER_NODE="${FLOW_TRAIN_NPROC_PER_NODE:-1}"
 if ! [[ "${TRAIN_NPROC_PER_NODE}" =~ ^[0-9]+$ ]] || (( TRAIN_NPROC_PER_NODE < 1 )); then
   TRAIN_NPROC_PER_NODE=1
 fi
+cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+if ! [[ "${cpu_threads}" =~ ^[0-9]+$ ]]; then
+  cpu_threads=0
+fi
+cpu_based_num_workers=1
+if (( cpu_threads > 1 )); then
+  cpu_based_num_workers=$((cpu_threads - 1))
+fi
+ddp_based_num_workers=$((TRAIN_NPROC_PER_NODE * suggested_num_workers))
+if (( ddp_based_num_workers < 1 )); then
+  ddp_based_num_workers=1
+fi
+hard_cap_num_workers="${RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP:-32}"
+if ! [[ "${hard_cap_num_workers}" =~ ^[0-9]+$ ]] || (( hard_cap_num_workers < 1 )); then
+  hard_cap_num_workers=32
+fi
+auto_num_workers="${cpu_based_num_workers}"
+if (( ddp_based_num_workers < auto_num_workers )); then
+  auto_num_workers="${ddp_based_num_workers}"
+fi
+if (( hard_cap_num_workers < auto_num_workers )); then
+  auto_num_workers="${hard_cap_num_workers}"
+fi
+TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"
 export REPO_DIR="${REMOTE_REPO_DIR}"
 export OUTPUT_PATH="${REMOTE_RUN_DIR}/model_${RUN_ID}.pt"
 export METRICS_OUT="${REMOTE_RUN_DIR}/metrics_${RUN_ID}.json"
@@ -543,7 +562,7 @@ fi
 {
   echo "[runpod-cycle-full-train-hf] training launch"
   echo "[runpod-cycle-full-train-hf] override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>} override_num_workers=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}"
-  echo "[runpod-cycle-full-train-hf] cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers} vram_suggested_num_workers=${suggested[1]:-6}"
+  echo "[runpod-cycle-full-train-hf] cpu_threads=${cpu_threads} cpu_based_num_workers=${cpu_based_num_workers} ddp_based_num_workers=${ddp_based_num_workers} hard_cap_num_workers=${hard_cap_num_workers} auto_num_workers=${auto_num_workers} vram_suggested_num_workers=${suggested_num_workers}"
   echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers=${TRAIN_NUM_WORKERS} epochs=${FLOW_EPOCHS}"
   echo "[runpod-cycle-full-train-hf] train_nproc_per_node=${TRAIN_NPROC_PER_NODE}"
   echo "[runpod-cycle-full-train-hf] hf_dataset_schema_filter=${HF_DATASET_SCHEMA_FILTER}"
@@ -792,6 +811,8 @@ LOCAL_SPEC_SUGGESTIONS_DIR="${CYCLE_DIR}/spec_suggestions"
 mkdir -p "${LOCAL_SPEC_SUGGESTIONS_DIR}"
 LOCAL_OBS_JSON="${LOCAL_SPEC_SUGGESTIONS_DIR}/gpu_full_training_observation_${RUN_ID}.json"
 LOCAL_OBS_MD="${LOCAL_SPEC_SUGGESTIONS_DIR}/gpu_full_training_observation_${RUN_ID}.md"
+LOCAL_EASY_REPORT_MD="${CYCLE_DIR}/reports/easy_progress_report.md"
+LOCAL_EASY_REPORT_JSON="${CYCLE_DIR}/reports/easy_progress_report.json"
 
 "${PY_BIN}" - "${LOCAL_COLLECT_DIR}" "${LOCAL_OBS_JSON}" "${LOCAL_OBS_MD}" "${RUN_ID}" <<'PY'
 import csv
@@ -908,12 +929,21 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Local collected run artifacts: \`${LOCAL_COLLECT_DIR}\`" \
   "- Local post-run observation JSON: \`${LOCAL_OBS_JSON}\`" \
   "- Local post-run observation MD: \`${LOCAL_OBS_MD}\`" \
+  "- Easy progress report MD: \`${LOCAL_EASY_REPORT_MD}\`" \
+  "- Easy progress report JSON: \`${LOCAL_EASY_REPORT_JSON}\`" \
   "- Quick play command file: \`${PLAY_CMD_TXT}\`" \
   ""
+
+"${PY_BIN}" "${REPO_ROOT}/scripts/runpod_cycle_report_style.py" \
+  --run-id "${RUN_ID}" \
+  --repo-root "${REPO_ROOT}" \
+  --write-md "${LOCAL_EASY_REPORT_MD}" \
+  --write-json "${LOCAL_EASY_REPORT_JSON}"
 
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_stop.sh"
 FLOW_SUCCESS=1
 
 echo "[runpod-cycle-full-train-hf] run_id=${RUN_ID}"
 echo "[runpod-cycle-full-train-hf] collected_artifacts=${LOCAL_COLLECT_DIR}"
+echo "[runpod-cycle-full-train-hf] easy_progress_report=${LOCAL_EASY_REPORT_MD}"
 echo "[runpod-cycle-full-train-hf] quick_play_command=$(cat "${PLAY_CMD_TXT}")"

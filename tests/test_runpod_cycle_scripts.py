@@ -111,6 +111,7 @@ OUT
     def test_cycle_scripts_exist(self):
         names = [
             "scripts/runpod_cycle_common.sh",
+            "scripts/runpod_cycle_report_style.py",
             "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_start.sh",
             "scripts/runpod_cycle_push_dataset.sh",
@@ -252,6 +253,7 @@ OUT
         self.assertIn("batch_size_override=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn("num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}", text)
         self.assertIn("max_total_rows=${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-<unset>}", text)
+        self.assertIn("final_report=artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md", text)
         self.assertIn("scripts/runpod_cycle_full_train_hf.sh", text)
 
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
@@ -275,11 +277,11 @@ OUT
             self.assertIn("runpod_cycle_ssh_host_key_checking", text, name)
             self.assertIn("runpod_cycle_ssh_known_hosts_file", text, name)
 
-    def test_managed_temp_key_is_forced_no_passphrase_on_reuse(self):
+    def test_managed_temp_key_path_only_no_legacy_key_overrides(self):
         text = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
-        self.assertIn('managed_default_key="${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"', text)
-        self.assertIn('ssh-keygen -y -P "" -f "${key_path}"', text)
-        self.assertIn("requires passphrase; regenerating no-passphrase key", text)
+        self.assertIn('printf \'%s\\n\' "${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"', text)
+        self.assertNotIn("RUNPOD_SSH_KEY", text)
+        self.assertNotIn("RUNPOD_SSH_PUBKEY_PATH", text)
 
     def test_full_train_hf_context_probe_uses_quoted_heredoc(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
@@ -291,6 +293,9 @@ OUT
         self.assertIn('rm -f "${REMOTE_PROGRESS_JSONL}" "${REMOTE_GPU_SAMPLES_CSV}" "${REMOTE_TRAIN_PID_FILE}" "${REMOTE_TRAIN_LOG}"', text)
         self.assertIn("override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn('cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"', text)
+        self.assertIn('suggested_num_workers="${suggested[1]:-6}"', text)
+        self.assertIn('hard_cap_num_workers="${RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP:-32}"', text)
+        self.assertIn("ddp_based_num_workers=$((TRAIN_NPROC_PER_NODE * suggested_num_workers))", text)
         self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"', text)
         self.assertIn('TRAIN_NPROC_PER_NODE="${FLOW_TRAIN_NPROC_PER_NODE:-1}"', text)
         self.assertIn('export TRAIN_NPROC_PER_NODE', text)
@@ -302,7 +307,7 @@ OUT
         self.assertIn('FLOW_MAX_TOTAL_ROWS="${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-0}"', text)
         self.assertIn('export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"', text)
         self.assertIn('RUNPOD_REMOTE_BEST_CHECKPOINT="${REMOTE_BEST_CHECKPOINT}"', text)
-        self.assertIn("cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers}", text)
+        self.assertIn("cpu_threads=${cpu_threads} cpu_based_num_workers=${cpu_based_num_workers} ddp_based_num_workers=${ddp_based_num_workers} hard_cap_num_workers=${hard_cap_num_workers} auto_num_workers=${auto_num_workers}", text)
 
     def test_train_preset_supports_torchrun_nproc(self):
         text = Path("deploy/runpod_cloud_training/train_baseline_preset.sh").read_text(encoding="utf-8")
@@ -324,8 +329,13 @@ OUT
         text = Path("scripts/runpod_cycle_status.sh").read_text(encoding="utf-8")
         self.assertIn("collect_once()", text)
         self.assertIn("--watch", text)
+        self.assertIn("--auto-collect", text)
         self.assertIn('"remote_state"', text)
         self.assertIn("training_running", text)
+        self.assertIn("manual_training_finished", text)
+        self.assertIn("manual_training_or_artifacts_present", text)
+        self.assertIn('"manual_runs"', text)
+        self.assertIn("auto-collect triggered for manual run", text)
 
     def test_full_train_hf_remote_fetch_uses_unified_args_builder(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
@@ -334,6 +344,8 @@ OUT
         self.assertIn("fetch_args+=( --dataset-name", text)
         self.assertIn("hf_dataset_fetch.py", text)
         self.assertIn("\\${fetch_args[@]}", text)
+        self.assertIn("runpod_cycle_report_style.py", text)
+        self.assertIn("easy_progress_report.md", text)
 
     def test_terminate_all_reconciles_pod_not_found_404_as_terminated(self):
         with tempfile.TemporaryDirectory() as td:
@@ -412,7 +424,7 @@ OUT
             env["RUNPOD_SSH_HOST"] = "127.0.0.1"
             env["RUNPOD_SSH_PORT"] = "22"
             env["RUNPOD_SSH_USER"] = "runner"
-            env["RUNPOD_SSH_KEY"] = str(Path(td) / "dummy_key")
+            env["RUNPOD_TEMP_SSH_KEY_BASE"] = str(Path(td) / "dummy_key")
             env["RUNPOD_SSH_KNOWN_HOSTS_FILE"] = str(known_hosts)
             env["RUNPOD_SSH_HOST_KEY_CHECKING"] = "no"
             env["RUNPOD_PROGRESS_POLL_SECONDS"] = "1"
@@ -454,7 +466,7 @@ OUT
             env["RUNPOD_SSH_HOST"] = "127.0.0.1"
             env["RUNPOD_SSH_PORT"] = "22"
             env["RUNPOD_SSH_USER"] = "runner"
-            env["RUNPOD_SSH_KEY"] = str(Path(td) / "dummy_key")
+            env["RUNPOD_TEMP_SSH_KEY_BASE"] = str(Path(td) / "dummy_key")
             env["RUNPOD_SSH_KNOWN_HOSTS_FILE"] = str(known_hosts)
             env["RUNPOD_SSH_HOST_KEY_CHECKING"] = "no"
             env["RUNPOD_PROGRESS_POLL_SECONDS"] = "1"

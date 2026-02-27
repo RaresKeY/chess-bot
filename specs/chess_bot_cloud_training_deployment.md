@@ -34,8 +34,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional Hugging Face artifact auto-sync watcher
 - Optional idle watchdog for autostop behavior
 - Host-side cycle scripts now default to safer SSH client behavior (`StrictHostKeyChecking=accept-new` with persistent `config/runpod_known_hosts`) instead of the older insecure `/tmp` + host-key-checking-disabled pattern; overrides remain available via `RUNPOD_SSH_HOST_KEY_CHECKING` and `RUNPOD_SSH_KNOWN_HOSTS_FILE`
-- Host-side RunPod flows now default to a managed temporary no-passphrase SSH key (`${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`) to avoid host passphrase prompts and stale personal-key dependencies; override remains available via `RUNPOD_SSH_KEY` / `RUNPOD_SSH_PUBKEY_PATH`
-- Managed-key bootstrap validates default-key no-passphrase usability and auto-regenerates the temp key if a stale passphrase-protected key is detected at the managed key path
+- Host-side RunPod flows use only a managed temporary SSH keypair at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` (no personal/local key override path)
+- Managed-key bootstrap creates the temp keypair when missing and reuses it for subsequent lifecycle steps in the same flow
 - Host-side SSH invocations now force `AddKeysToAgent=no` and `IdentityAgent=none` to prevent desktop keyring/gpg-agent import passphrase prompts for managed temp keys
 - Managed key env injection toggle is `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
 - Entrypoint now explicitly unlocks the `runner` account (while keeping password auth disabled) so Ubuntu/Debian `sshd` accepts public-key auth for direct mapped SSH

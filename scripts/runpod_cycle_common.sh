@@ -156,11 +156,11 @@ runpod_cycle_ssh_host() {
 }
 
 runpod_cycle_ssh_key() {
-  printf '%s\n' "${RUNPOD_SSH_KEY:-${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}}"
+  printf '%s\n' "${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"
 }
 
 runpod_cycle_ssh_pubkey_path() {
-  printf '%s\n' "${RUNPOD_SSH_PUBKEY_PATH:-$(runpod_cycle_ssh_key).pub}"
+  printf '%s\n' "$(runpod_cycle_ssh_key).pub"
 }
 
 runpod_cycle_ensure_ssh_keypair() {
@@ -171,25 +171,11 @@ runpod_cycle_ensure_ssh_keypair() {
     echo "[runpod-cycle] missing required command: ssh-keygen" >&2
     exit 1
   }
-  local managed_default_key="${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"
-  local needs_regen=0
   if [[ ! -f "${key_path}" || ! -f "${pub_path}" ]]; then
-    needs_regen=1
-  fi
-  # If using the managed default key path, force no-passphrase semantics.
-  if [[ "${key_path}" == "${managed_default_key}" && -f "${key_path}" ]]; then
-    if ! ssh-keygen -y -P "" -f "${key_path}" >/dev/null 2>&1; then
-      echo "[runpod-cycle] existing managed temp key requires passphrase; regenerating no-passphrase key at ${key_path}" >&2
-      needs_regen=1
-    fi
-  fi
-  if [[ "${needs_regen}" == "1" ]]; then
     rm -f "${key_path}" "${pub_path}"
     ssh-keygen -t ed25519 -N "" -f "${key_path}" -C "codex-runpod-temp" >/dev/null
   fi
   chmod 600 "${key_path}" 2>/dev/null || true
-  export RUNPOD_SSH_KEY="${key_path}"
-  export RUNPOD_SSH_PUBKEY_PATH="${pub_path}"
 }
 
 runpod_cycle_ssh_host_key_checking() {

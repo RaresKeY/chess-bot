@@ -5,11 +5,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runpod_cycle_common.sh"
 
 REPO_ROOT="$(runpod_cycle_repo_root)"
 RUN_ID="${RUNPOD_CYCLE_RUN_ID:-$(runpod_cycle_run_id)}"
+CYCLE_DIR="$(runpod_cycle_dir "${REPO_ROOT}" "${RUN_ID}")"
 PROVISION_JSON="$(runpod_cycle_provision_json "${REPO_ROOT}" "${RUN_ID}")"
 REPORT_MD="$(runpod_cycle_report_md "${REPO_ROOT}" "${RUN_ID}")"
 REPORT_DIR="$(dirname "${REPORT_MD}")"
 LOGS_DIR="$(runpod_cycle_logs_dir "${REPO_ROOT}" "${RUN_ID}")"
-mkdir -p "${REPORT_DIR}" "${LOGS_DIR}"
+AUTO_COLLECT_MARKERS_DIR="${CYCLE_DIR}/.auto_collect_markers"
+mkdir -p "${REPORT_DIR}" "${LOGS_DIR}" "${AUTO_COLLECT_MARKERS_DIR}"
 
 runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd ssh
@@ -18,10 +20,12 @@ runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 WATCH_MODE=0
 POLL_SECONDS="${RUNPOD_STATUS_POLL_SECONDS:-5}"
 WRITE_SNAPSHOT=1
+AUTO_COLLECT=0
 for arg in "$@"; do
   case "${arg}" in
     --watch) WATCH_MODE=1 ;;
     --no-write) WRITE_SNAPSHOT=0 ;;
+    --auto-collect) AUTO_COLLECT=1 ;;
   esac
 done
 
@@ -149,6 +153,38 @@ elif manifest.exists():
 else:
     state = "bootstrap_or_fetching"
 
+manual_runs = []
+if run_dir.exists():
+    manual_dirs = sorted(
+        [p for p in run_dir.iterdir() if p.is_dir() and p.name.startswith("manual_")],
+        key=lambda p: p.stat().st_mtime,
+    )
+    for d in manual_dirs:
+        manual_exit = None
+        manual_exit_file = d / "train_exit_code.txt"
+        if manual_exit_file.exists():
+            try:
+                manual_exit = int(manual_exit_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                manual_exit = None
+        manual_model_count = len(list(d.glob("*.pt")))
+        manual_progress_count = len(list(d.glob("progress*.jsonl")))
+        manual_runs.append(
+            {
+                "dir": d.name,
+                "train_exit_code": manual_exit,
+                "model_file_count": manual_model_count,
+                "progress_file_count": manual_progress_count,
+            }
+        )
+
+manual_latest = manual_runs[-1] if manual_runs else {}
+if state not in {"training_running", "training_finished"}:
+    if manual_latest and manual_latest.get("train_exit_code") is not None:
+        state = "manual_training_finished"
+    elif manual_runs:
+        state = "manual_training_or_artifacts_present"
+
 print(
     json.dumps(
         {
@@ -169,6 +205,8 @@ print(
             "best_checkpoint_exists": best_ckpt.exists(),
             "epoch_checkpoint_count": epoch_ckpt_count,
             "gpu": gpu_line,
+            "manual_runs": manual_runs,
+            "manual_latest": manual_latest,
         },
         ensure_ascii=True,
     )
@@ -202,6 +240,26 @@ EOF
   if [[ "${WRITE_SNAPSHOT}" == "1" ]]; then
     local out="${REPORT_DIR}/status_snapshot_$(date -u +%Y%m%dT%H%M%SZ).json"
     printf '%s\n' "${summary}" > "${out}"
+  fi
+
+  if [[ "${AUTO_COLLECT}" == "1" ]]; then
+    local remote_state manual_dir manual_exit marker_name marker_path
+    remote_state="$(printf '%s\n' "${summary}" | jq -r '.remote.remote_state // ""')"
+    manual_dir="$(printf '%s\n' "${summary}" | jq -r '.remote.manual_latest.dir // ""')"
+    manual_exit="$(printf '%s\n' "${summary}" | jq -r '.remote.manual_latest.train_exit_code // empty')"
+    if [[ "${remote_state}" == "manual_training_finished" && -n "${manual_dir}" && "${manual_exit}" =~ ^-?[0-9]+$ ]]; then
+      marker_name="$(printf '%s' "${manual_dir}" | tr '/: ' '___')"
+      marker_path="${AUTO_COLLECT_MARKERS_DIR}/${marker_name}.done"
+      if [[ ! -f "${marker_path}" ]]; then
+        echo "[runpod-cycle-status] auto-collect triggered for manual run '${manual_dir}' (exit=${manual_exit})" >&2
+        if RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh" >/dev/null 2>&1; then
+          : > "${marker_path}"
+          echo "[runpod-cycle-status] auto-collect completed for '${manual_dir}'" >&2
+        else
+          echo "[runpod-cycle-status] auto-collect failed for '${manual_dir}'" >&2
+        fi
+      fi
+    fi
   fi
 }
 

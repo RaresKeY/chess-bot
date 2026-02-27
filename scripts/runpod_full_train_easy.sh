@@ -31,6 +31,7 @@ cat <<EOF
 [runpod-full-train-easy] num_workers_override=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}
 [runpod-full-train-easy] max_total_rows=${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-<unset>}
 [runpod-full-train-easy] runtime_max_samples_per_game=${RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-<unset>}
+[runpod-full-train-easy] final_report=artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md
 EOF
 
 exec bash "${REPO_ROOT}/scripts/runpod_cycle_full_train_hf.sh"
