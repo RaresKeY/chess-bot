@@ -111,6 +111,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - `data_loading` mode metadata (currently `indexed_jsonl_on_demand`)
 - `dataset_schema` metadata (`spliced` or `game`)
 - in compact game-level mode, metrics also include game counts (`train_games`, `val_games`) and `runtime_splice` settings used during indexing
+- in compact game-level mode, metrics include `cache_load_reason_by_split` with per-split cache status (`hit`) or fallback reason string (for example `cache_config_mismatch`, `cache_file_missing:...`)
 - epoch history (train_loss, val_loss, top1, top5)
 - when multistep mode is enabled (`rollout_horizon > 1`), epoch history additionally includes rollout metrics such as `rollout_step{n}_acc`, `rollout_prefix_match_len_avg`, `rollout_legal_rate`, and `rollout_weighted_continuation_score`
 - model path
@@ -145,6 +146,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - scheduler/early-stopping runtime metadata and early-stop behavior in a tiny synthetic training run
   - runtime splice cache index loading for game datasets, plus fallback to runtime indexing on cache config mismatch
   - tiny game-dataset training path that confirms cache-backed data loading mode is used when cache is present
+  - per-split cache-load reason reporting (`cache_load_reason_by_split`) in dataset metrics/progress setup events for game datasets (hit vs fallback reason)
   - multistep file-backed training path emits rollout metrics/progress fields and multistep runtime metadata
 - `tests/test_game_dataset_architecture.py` covers:
   - compact game-dataset builder CLI output schema (`moves`, no duplicated splice rows)

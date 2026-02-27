@@ -264,6 +264,8 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertEqual(event_names.count("epoch_start"), 2)
         self.assertEqual(event_names.count("epoch_end"), 2)
         self.assertEqual(event_names[-1], "train_complete")
+        train_setup = [e for e in events if e.get("event") == "train_setup"][0]
+        self.assertIsNone(train_setup.get("cache_load_reason_by_split"))
 
         epoch_end_events = [e for e in events if e.get("event") == "epoch_end"]
         self.assertEqual(epoch_end_events[0]["epoch"], 1)
@@ -376,8 +378,68 @@ class TrainingFeatureTests(unittest.TestCase):
             )
             self.assertEqual(dataset_info["dataset_schema"], "game")
             self.assertEqual(dataset_info["data_loading"], "indexed_game_jsonl_runtime_splice_cache")
+            self.assertEqual(dataset_info["cache_load_reason_by_split"], {"train": "hit", "val": "hit"})
             self.assertEqual(len(history), 1)
             self.assertIn("runtime", artifact)
+
+    def test_game_training_reports_cache_load_reason_per_split(self):
+        rows = [
+            {"game_id": "g1", "moves": ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1"], "winner_side": "W"},
+            {"game_id": "g2", "moves": ["d2d4", "d7d5", "c2c4", "e7e6", "b1c3", "g8f6", "c1g5", "f8e7", "e2e3"], "winner_side": "B"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp) / "dataset"
+            ds.mkdir(parents=True, exist_ok=True)
+            train_path = ds / "train.jsonl"
+            val_path = ds / "val.jsonl"
+            with train_path.open("w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+            with val_path.open("w", encoding="utf-8") as f:
+                for row in rows[:1]:
+                    f.write(json.dumps(row) + "\n")
+            (ds / "stats.json").write_text(json.dumps({"dataset_format": "game_jsonl_runtime_splice_v1"}) + "\n", encoding="utf-8")
+
+            self._write_runtime_cache_manifest(ds, min_context=8, min_target=1, max_samples_per_game=0, seed=7)
+            self._write_runtime_cache_split(ds, "train", train_path, offsets=[0], splice_indices=[7], phase_ids=[1])
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            _artifact, _history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[str(train_path)],
+                val_paths=[str(val_path)],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+                progress_callback=on_progress,
+            )
+
+        self.assertEqual(dataset_info["cache_load_reason_by_split"]["train"], "hit")
+        self.assertIn("cache_file_missing:", dataset_info["cache_load_reason_by_split"]["val"])
+        train_setup = [e for e in events if e.get("event") == "train_setup"][0]
+        self.assertEqual(train_setup["cache_load_reason_by_split"]["train"], "hit")
+        self.assertIn("cache_file_missing:", train_setup["cache_load_reason_by_split"]["val"])
 
     def test_train_next_move_model_from_jsonl_paths_multistep_emits_rollout_metrics(self):
         train_rows = [

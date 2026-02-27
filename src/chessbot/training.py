@@ -517,6 +517,12 @@ def _index_game_jsonl_paths_cached_or_runtime(
     return runtime_out, False, reason
 
 
+def _cache_load_reason_label(*, used_cache: bool, reason: str) -> str:
+    if bool(used_cache):
+        return "hit"
+    return str(reason or "runtime_index_fallback")
+
+
 class IndexedJsonlGameSpliceDataset(Dataset):
     """Runtime-splicing map-style dataset backed by game-level JSONL files."""
 
@@ -1593,6 +1599,10 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             runtime_cfg,
             expected_split="val",
         )
+        cache_load_reason_by_split = {
+            "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
+            "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),
+        }
         train_ds = IndexedJsonlGameRolloutDataset(
             train_index[0], train_index[1], train_index[2], train_index[3], train_index[4], vocab=vocab, rollout_horizon=rollout_horizon
         )
@@ -1617,6 +1627,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         data_loading_mode = "indexed_jsonl_on_demand"
         train_runtime_index_bytes = None
         val_runtime_index_bytes = None
+        cache_load_reason_by_split = None
     if train_rows_total <= 0:
         raise RuntimeError("No training rows found")
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
@@ -1751,6 +1762,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                     },
                     "data_loading": data_loading_mode,
                     "dataset_schema": schema_kind,
+                    "cache_load_reason_by_split": cache_load_reason_by_split,
                     "training_objective": "multistep_teacher_forced_recursive",
                     "rollout_horizon": int(rollout_horizon),
                     "closeness_horizon": int(closeness_horizon),
@@ -1773,6 +1785,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 "pin_memory": bool(pin_memory),
                 "data_loading": data_loading_mode,
                 "dataset_schema": schema_kind,
+                "cache_load_reason_by_split": cache_load_reason_by_split,
                 "training_objective": "multistep_teacher_forced_recursive",
                 "rollout_horizon": int(rollout_horizon),
                 "closeness_horizon": int(closeness_horizon),
@@ -2110,6 +2123,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                     "min_target": int(runtime_cfg.min_target),
                     "max_samples_per_game": int(runtime_cfg.max_samples_per_game),
                 },
+                "cache_load_reason_by_split": cache_load_reason_by_split,
                 "runtime_splice_index_bytes_train": int(train_runtime_index_bytes or 0),
                 "runtime_splice_index_bytes_val": int(val_runtime_index_bytes or 0),
             }
@@ -2253,6 +2267,10 @@ def train_next_move_model_from_jsonl_paths(
             runtime_cfg,
             expected_split="val",
         )
+        cache_load_reason_by_split = {
+            "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
+            "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),
+        }
         train_ds = IndexedJsonlGameSpliceDataset(
             train_index[0], train_index[1], train_index[2], train_index[3], train_index[4], vocab=vocab
         )
@@ -2279,6 +2297,7 @@ def train_next_move_model_from_jsonl_paths(
         data_loading_mode = "indexed_jsonl_on_demand"
         train_runtime_index_bytes = None
         val_runtime_index_bytes = None
+        cache_load_reason_by_split = None
 
     if train_rows_total <= 0:
         raise RuntimeError("No training rows found")
@@ -2414,6 +2433,7 @@ def train_next_move_model_from_jsonl_paths(
                     },
                     "data_loading": data_loading_mode,
                     "dataset_schema": schema_kind,
+                    "cache_load_reason_by_split": cache_load_reason_by_split,
                 }
             }
         )
@@ -2431,6 +2451,7 @@ def train_next_move_model_from_jsonl_paths(
                 "pin_memory": bool(pin_memory),
                 "data_loading": data_loading_mode,
                 "dataset_schema": schema_kind,
+                "cache_load_reason_by_split": cache_load_reason_by_split,
             }
         )
 
@@ -2703,6 +2724,7 @@ def train_next_move_model_from_jsonl_paths(
                     "min_target": int(runtime_cfg.min_target),
                     "max_samples_per_game": int(runtime_cfg.max_samples_per_game),
                 },
+                "cache_load_reason_by_split": cache_load_reason_by_split,
                 "runtime_splice_index_bytes_train": int(train_runtime_index_bytes or 0),
                 "runtime_splice_index_bytes_val": int(val_runtime_index_bytes or 0),
             }
