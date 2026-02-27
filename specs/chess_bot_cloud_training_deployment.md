@@ -92,7 +92,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - the preset aggregates discovered `train.jsonl` and `val.jsonl` files from the selected schema bucket and passes them to `scripts/train_baseline.py` via repeated `--train` / `--val` flags
   - fetch summary manifest is written to `HF_DATASET_FETCH_MANIFEST`
   - `HF_USE_EXISTING_FETCH_MANIFEST=1` lets the preset reuse a previously-created aggregate fetch manifest (skip a second HF fetch and train from the cached dataset set)
-  - "latest" selection is lexicographic on the version path segment, so sortable version labels (for example timestamp-prefixed `validated-YYYYMMDDTHHMMSSZ`) are recommended
+  - "latest" selection prefers versions containing timestamp tokens (`YYYYMMDDTHHMMSSZ`), supporting both `validated-YYYY...Z` and raw `YYYY...Z` labels; lexicographic fallback is only used when timestamps are absent
   - if the selected dataset rows are compact game-level rows (`moves`/`moves_uci` schema), the preset detects this and passes runtime splice controls through to `scripts/train_baseline.py` (`TRAIN_RUNTIME_MIN_CONTEXT`, `TRAIN_RUNTIME_MIN_TARGET`, `TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME`)
 - Uses current repo baseline architecture/training defaults:
   - `embed_dim=256`, `hidden_dim=512`, `num_layers=2`, `dropout=0.15`

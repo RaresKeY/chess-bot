@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import tarfile
+import re
 from pathlib import Path
 import shutil
 from collections import defaultdict
@@ -77,6 +78,27 @@ def _parse_repo_dataset_versions(repo_files: list[str], prefix: str) -> dict[str
     return {k: sorted(v) for k, v in roots.items()}
 
 
+_TS_RE = re.compile(r"(\d{8}T\d{6}Z)")
+
+
+def _version_sort_key(version: str) -> tuple[int, str, str]:
+    """Prefer versions containing timestamp tokens (YYYYMMDDTHHMMSSZ), then lexical tie-breaker.
+
+    Works for both `validated-YYYY...Z` and raw `YYYY...Z`.
+    """
+    v = str(version or "").strip()
+    m = _TS_RE.search(v)
+    if m:
+        return (1, m.group(1), v)
+    return (0, "", v)
+
+
+def _latest_version(versions: list[str]) -> str:
+    if not versions:
+        raise SystemExit("No versions available")
+    return sorted(versions, key=_version_sort_key)[-1]
+
+
 def _select_versions(
     *,
     versions_by_dataset: dict[str, list[str]],
@@ -88,14 +110,14 @@ def _select_versions(
         selected: list[tuple[str, str]] = []
         for ds_name, versions in sorted(versions_by_dataset.items()):
             if versions:
-                selected.append((ds_name, versions[-1]))
+                selected.append((ds_name, _latest_version(versions)))
         return selected
     if version:
         return [(dataset_name, version)]
     versions = versions_by_dataset.get(dataset_name, [])
     if not versions:
         raise SystemExit(f"No datasets found for '{dataset_name}'")
-    return [(dataset_name, versions[-1])]
+    return [(dataset_name, _latest_version(versions))]
 
 
 def _copy_or_extract_dataset(local_repo_path: Path, fetched_dir: Path, extract_archive: bool) -> tuple[list[str], dict | None]:
