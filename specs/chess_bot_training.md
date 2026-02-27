@@ -9,6 +9,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - legacy splice-row JSONL (`context` + `target` + `next_move`)
   - compact game-level JSONL (`moves` or `moves_uci`) with runtime splicing
 - Repeated `--train` / `--val` inputs are combined via file-backed JSONL indexing (line offsets) instead of concatenating row dicts in memory
+- Multi-month repeated-input behavior is size-proportional by row count/sample count: larger monthly files naturally contribute more training/validation examples because all indexed rows are consumed uniformly (no extra month-level weighting/sampling layer)
 - Existing single-path usage remains supported (one `--train`, one `--val`)
 - For compact game-level datasets, training builds a sample index of `(game row offset, splice_index)` and derives `context`/`target` at runtime
 

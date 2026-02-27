@@ -3,6 +3,12 @@
 ## Responsibility
 Provide direct, copy/paste commands for running training (full run and smoke run) against compact game datasets.
 
+## Multi-Month Input Behavior
+- You can repeat `--train` and `--val` to combine multiple month shards.
+- Combined training/validation exposure is size-proportional to each file's indexed sample rows.
+- Runtime behavior is unchanged: no month sampler, no file-level weighting flags, and no API changes.
+- `artifacts/train_metrics*.json` records `train_inputs`/`val_inputs` plus `train_rows_by_file`/`val_rows_by_file` for per-file accounting.
+
 ## Top-Level Full Training Command
 
 Run from repo root:
@@ -51,6 +57,26 @@ Run from repo root:
   --output artifacts/model_smoke.pt \
   --metrics-out artifacts/train_metrics_smoke.json \
   --progress-jsonl-out artifacts/train_progress_smoke.jsonl \
+  --no-progress
+```
+
+## Multi-Month Example (Repeated Flags)
+
+```bash
+.venv/bin/python scripts/train_baseline.py \
+  --train data/dataset/elite_2025-09_game/train.jsonl \
+  --train data/dataset/elite_2025-10_game/train.jsonl \
+  --train data/dataset/elite_2025-11_game/train.jsonl \
+  --val data/dataset/elite_2025-09_game/val.jsonl \
+  --val data/dataset/elite_2025-10_game/val.jsonl \
+  --val data/dataset/elite_2025-11_game/val.jsonl \
+  --output artifacts/model_full_elite_2025-09_to_2025-11_game.pt \
+  --metrics-out artifacts/train_metrics_full_elite_2025-09_to_2025-11_game.json \
+  --device auto \
+  --epochs 40 \
+  --batch-size 2048 \
+  --num-workers 8 \
+  --amp \
   --no-progress
 ```
 

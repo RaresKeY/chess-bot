@@ -272,6 +272,90 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertEqual(epoch_end_events[1]["epoch"], 2)
         self.assertIn("metrics", epoch_end_events[0])
         self.assertIn("val_loss", epoch_end_events[0]["metrics"])
+        self.assertIn("lr", epoch_end_events[0]["metrics"])
+
+    def test_train_next_move_model_from_jsonl_paths_multi_input_tracks_per_file_rows(self):
+        train_a_rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        train_b_rows = [
+            {"context": ["c2c4"], "target": ["e7e6"], "next_move": "e7e6", "winner_side": "B", "phase": "middlegame"},
+        ]
+        val_a_rows = [
+            {"context": ["g1f3"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        val_b_rows = [
+            {"context": ["e2e4", "e7e5"], "target": ["g1f3"], "next_move": "g1f3", "winner_side": "W", "phase": "opening"},
+            {"context": ["d2d4", "d7d5"], "target": ["c2c4"], "next_move": "c2c4", "winner_side": "W", "phase": "middlegame"},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            train_a = Path(tmp) / "train_a.jsonl"
+            train_b = Path(tmp) / "train_b.jsonl"
+            val_a = Path(tmp) / "val_a.jsonl"
+            val_b = Path(tmp) / "val_b.jsonl"
+            for path, rows in (
+                (train_a, train_a_rows),
+                (train_b, train_b_rows),
+                (val_a, val_a_rows),
+                (val_b, val_b_rows),
+            ):
+                with path.open("w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row) + "\n")
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[str(train_a), str(train_b)],
+                val_paths=[str(val_a), str(val_b)],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+                progress_callback=on_progress,
+            )
+
+        self.assertIn("runtime", artifact)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(dataset_info["train_rows"], 3)
+        self.assertEqual(dataset_info["val_rows"], 3)
+        self.assertEqual(dataset_info["train_rows_by_file"][str(train_a)], 2)
+        self.assertEqual(dataset_info["train_rows_by_file"][str(train_b)], 1)
+        self.assertEqual(dataset_info["val_rows_by_file"][str(val_a)], 1)
+        self.assertEqual(dataset_info["val_rows_by_file"][str(val_b)], 2)
+        self.assertEqual(dataset_info["train_index_rows"], 3)
+        self.assertEqual(dataset_info["val_index_rows"], 3)
+
+        train_setup = [e for e in events if e.get("event") == "train_setup"][0]
+        self.assertEqual(train_setup["train_rows"], 3)
+        self.assertEqual(train_setup["val_rows"], 3)
+        epoch_end = [e for e in events if e.get("event") == "epoch_end"][0]
+        self.assertIn("val_loss", epoch_end["metrics"])
+        self.assertIn("top1", epoch_end["metrics"])
+        self.assertIn("top5", epoch_end["metrics"])
+        self.assertIn("lr", epoch_end["metrics"])
 
     def test_runtime_cache_index_loader_uses_cache_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -509,6 +593,91 @@ class TrainingFeatureTests(unittest.TestCase):
         event_names = [e.get("event") for e in events]
         self.assertIn("train_setup", event_names)
         epoch_end = [e for e in events if e.get("event") == "epoch_end"][0]
+        self.assertIn("rollout_step4_acc", epoch_end["metrics"])
+        self.assertIn("rollout_weighted_continuation_score", epoch_end["metrics"])
+
+    def test_train_next_move_model_from_jsonl_paths_multistep_multi_input_tracks_rows_and_metrics(self):
+        train_a_rows = [
+            {"context": ["e2e4"], "target": ["e7e5", "g1f3", "b8c6", "f1b5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5", "c2c4", "e7e6", "b1c3"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        train_b_rows = [
+            {"context": ["g1f3"], "target": ["d7d5", "d2d4", "g8f6", "c2c4"], "next_move": "d7d5", "winner_side": "B", "phase": "middlegame"},
+        ]
+        val_a_rows = [
+            {"context": ["c2c4"], "target": ["e7e5", "b1c3", "g8f6", "g2g3"], "next_move": "e7e5", "winner_side": "B", "phase": "middlegame"},
+        ]
+        val_b_rows = [
+            {"context": ["e2e4", "e7e5"], "target": ["g1f3", "b8c6", "f1b5", "a7a6"], "next_move": "g1f3", "winner_side": "W", "phase": "opening"},
+            {"context": ["d2d4", "d7d5"], "target": ["c2c4", "e7e6", "b1c3", "g8f6"], "next_move": "c2c4", "winner_side": "W", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_a = Path(tmp) / "train_a.jsonl"
+            train_b = Path(tmp) / "train_b.jsonl"
+            val_a = Path(tmp) / "val_a.jsonl"
+            val_b = Path(tmp) / "val_b.jsonl"
+            for path, rows in (
+                (train_a, train_a_rows),
+                (train_b, train_b_rows),
+                (val_a, val_a_rows),
+                (val_b, val_b_rows),
+            ):
+                with path.open("w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row) + "\n")
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[str(train_a), str(train_b)],
+                val_paths=[str(val_a), str(val_b)],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+                progress_callback=on_progress,
+                rollout_horizon=4,
+                closeness_horizon=4,
+                rollout_loss_decay=0.7,
+            )
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(dataset_info["train_rows"], 3)
+        self.assertEqual(dataset_info["val_rows"], 3)
+        self.assertEqual(dataset_info["train_rows_by_file"][str(train_a)], 2)
+        self.assertEqual(dataset_info["train_rows_by_file"][str(train_b)], 1)
+        self.assertEqual(dataset_info["val_rows_by_file"][str(val_a)], 1)
+        self.assertEqual(dataset_info["val_rows_by_file"][str(val_b)], 2)
+        self.assertEqual(dataset_info["training_objective"], "multistep_teacher_forced_recursive")
+        self.assertIn("rollout_step4_acc", history[0])
+        self.assertEqual(artifact["runtime"]["training_objective"], "multistep_teacher_forced_recursive")
+
+        train_setup = [e for e in events if e.get("event") == "train_setup"][0]
+        self.assertEqual(train_setup["train_rows"], 3)
+        self.assertEqual(train_setup["val_rows"], 3)
+        epoch_end = [e for e in events if e.get("event") == "epoch_end"][0]
+        self.assertIn("val_loss", epoch_end["metrics"])
+        self.assertIn("rollout_step2_acc", epoch_end["metrics"])
         self.assertIn("rollout_step4_acc", epoch_end["metrics"])
         self.assertIn("rollout_weighted_continuation_score", epoch_end["metrics"])
 
