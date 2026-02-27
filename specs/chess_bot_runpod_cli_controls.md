@@ -146,6 +146,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - pod fetches the latest version of every dataset from the HF dataset repo prefix (default `validated_datasets`)
     - `runpod_cycle_push_dataset.sh` can be skipped for this mode
     - remote fetch summary manifest is written under `${REPO_DIR}/artifacts/hf_dataset_fetch_manifest.json`
+    - exports `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` so training fails on runtime-cache miss/mismatch instead of runtime index fallback
 - `scripts/runpod_cycle_collect.sh`
   - pulls remote run artifacts and timing logs into local `artifacts/runpod_cycles/<run_id>/collected/`
 - `scripts/runpod_cycle_local_validate.sh`
@@ -180,6 +181,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - forwards `RUNPOD_HF_DATASET_SCHEMA_FILTER` to the remote preset and direct fallback path so compact game datasets (`game_jsonl_runtime_splice_v1`) can be selected explicitly from mixed HF repos
   - supports single-dataset remote HF fetch for smoke/targeted runs via `RUNPOD_HF_DATASET_NAME` and optional `RUNPOD_HF_DATASET_VERSION` (otherwise defaults to `--all-latest` under `RUNPOD_HF_DATASET_PATH_PREFIX`)
   - forwards runtime-splice smoke throttles (`RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT`, `RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET`, `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME`) into the remote preset/direct fallback for compact `*_game` dataset smoke runs
+  - enforces runtime splice cache usage in remote training (`TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` / `--require-runtime-splice-cache`); cache miss/mismatch now fails the run instead of falling back to runtime index build
   - remote training launcher now prefers the repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over the image-baked `/opt/...` copy to avoid stale image-script behavior
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
   - local quick-play command/model retrieval now uses robust collected-artifact lookup (prefers `model_<run_id>.pt`, falls back to latest `.pt`) to tolerate naming variations while preserving run-id preference

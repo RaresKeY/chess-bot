@@ -1558,6 +1558,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     runtime_min_context: int = 8,
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
+    require_runtime_splice_cache: bool = False,
 ):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -1576,6 +1577,37 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     train_game_rows_by_file: Dict[str, int] = {}
     val_game_rows_by_file: Dict[str, int] = {}
     if schema_kind == "game":
+        if bool(require_runtime_splice_cache):
+            train_cache_out, _train_cache_reason = _index_game_jsonl_paths_from_runtime_cache(
+                train_paths,
+                runtime_cfg,
+                expected_split="train",
+            )
+            val_cache_out, _val_cache_reason = _index_game_jsonl_paths_from_runtime_cache(
+                val_paths,
+                runtime_cfg,
+                expected_split="val",
+            )
+            if train_cache_out is None or val_cache_out is None:
+                raise RuntimeError(
+                    "Runtime splice cache required but unavailable "
+                    f"(train={_train_cache_reason}, val={_val_cache_reason})"
+                )
+            train_index = train_cache_out
+            val_index = val_cache_out
+            train_cache_used = True
+            val_cache_used = True
+        else:
+            train_index, train_cache_used, _train_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+                train_paths,
+                runtime_cfg,
+                expected_split="train",
+            )
+            val_index, val_cache_used, _val_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+                val_paths,
+                runtime_cfg,
+                expected_split="val",
+            )
         (
             vocab,
             train_rows_by_file,
@@ -1589,16 +1621,6 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             val_game_rows_by_file,
             val_games_total,
         ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
-        train_index, train_cache_used, _train_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
-            train_paths,
-            runtime_cfg,
-            expected_split="train",
-        )
-        val_index, val_cache_used, _val_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
-            val_paths,
-            runtime_cfg,
-            expected_split="val",
-        )
         cache_load_reason_by_split = {
             "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
             "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),
@@ -2185,6 +2207,7 @@ def train_next_move_model_from_jsonl_paths(
     runtime_min_context: int = 8,
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
+    require_runtime_splice_cache: bool = False,
 ):
     if int(rollout_horizon) > 1:
         return _train_next_move_model_from_jsonl_paths_multistep(
@@ -2228,6 +2251,7 @@ def train_next_move_model_from_jsonl_paths(
             runtime_min_context=int(runtime_min_context),
             runtime_min_target=int(runtime_min_target),
             runtime_max_samples_per_game=int(runtime_max_samples_per_game),
+            require_runtime_splice_cache=bool(require_runtime_splice_cache),
         )
     random.seed(seed)
     torch.manual_seed(seed)
@@ -2244,6 +2268,37 @@ def train_next_move_model_from_jsonl_paths(
     train_game_rows_by_file: Dict[str, int] = {}
     val_game_rows_by_file: Dict[str, int] = {}
     if schema_kind == "game":
+        if bool(require_runtime_splice_cache):
+            train_cache_out, _train_cache_reason = _index_game_jsonl_paths_from_runtime_cache(
+                train_paths,
+                runtime_cfg,
+                expected_split="train",
+            )
+            val_cache_out, _val_cache_reason = _index_game_jsonl_paths_from_runtime_cache(
+                val_paths,
+                runtime_cfg,
+                expected_split="val",
+            )
+            if train_cache_out is None or val_cache_out is None:
+                raise RuntimeError(
+                    "Runtime splice cache required but unavailable "
+                    f"(train={_train_cache_reason}, val={_val_cache_reason})"
+                )
+            train_index = train_cache_out
+            val_index = val_cache_out
+            train_cache_used = True
+            val_cache_used = True
+        else:
+            train_index, train_cache_used, _train_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+                train_paths,
+                runtime_cfg,
+                expected_split="train",
+            )
+            val_index, val_cache_used, _val_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+                val_paths,
+                runtime_cfg,
+                expected_split="val",
+            )
         (
             vocab,
             train_rows_by_file,
@@ -2257,16 +2312,6 @@ def train_next_move_model_from_jsonl_paths(
             val_game_rows_by_file,
             val_games_total,
         ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
-        train_index, train_cache_used, _train_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
-            train_paths,
-            runtime_cfg,
-            expected_split="train",
-        )
-        val_index, val_cache_used, _val_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
-            val_paths,
-            runtime_cfg,
-            expected_split="val",
-        )
         cache_load_reason_by_split = {
             "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
             "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),

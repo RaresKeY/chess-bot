@@ -100,6 +100,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - phase + side-to-move features enabled
   - `ReduceLROnPlateau` + early stopping enabled (preset patience/min-delta values)
 - Supports env overrides for dataset paths, output paths, batch size/worker count, endgame phase weight, optional progress event stream path (`TRAIN_PROGRESS_JSONL_OUT`), and arbitrary extra train flags (`TRAIN_EXTRA_ARGS`)
+- Supports strict runtime-cache enforcement via `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` (passes `--require-runtime-splice-cache` to training and fails instead of runtime-index fallback on cache miss/mismatch)
 - Emits timing records to the shared phase timing JSONL (`resolve_dataset_paths`, `train_baseline`) with `source=runpod_train_preset`
 
 ## Phase Timing Logging Convention

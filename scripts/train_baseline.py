@@ -302,6 +302,12 @@ def main() -> None:
     parser.add_argument("--runtime-min-context", type=int, default=8, help="Runtime splicing min context plies for game-level datasets")
     parser.add_argument("--runtime-min-target", type=int, default=1, help="Runtime splicing min target plies for game-level datasets")
     parser.add_argument("--runtime-max-samples-per-game", type=int, default=0, help="Runtime splicing sample cap per game (0=no cap)")
+    parser.add_argument(
+        "--require-runtime-splice-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fail for game datasets when runtime splice cache cannot be used (no runtime index fallback)",
+    )
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -465,6 +471,7 @@ def main() -> None:
                 "runtime_min_context": int(args.runtime_min_context),
                 "runtime_min_target": int(args.runtime_min_target),
                 "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),
+                "require_runtime_splice_cache": bool(args.require_runtime_splice_cache),
             },
         }
     )
@@ -529,6 +536,7 @@ def main() -> None:
                     "runtime_min_context": args.runtime_min_context,
                     "runtime_min_target": args.runtime_min_target,
                     "runtime_max_samples_per_game": args.runtime_max_samples_per_game,
+                    "require_runtime_splice_cache": args.require_runtime_splice_cache,
                     "restore_best": args.restore_best,
                     "lr_scheduler": args.lr_scheduler,
                     "lr_scheduler_metric": args.lr_scheduler_metric,
@@ -573,6 +581,7 @@ def main() -> None:
             "runtime_min_context": int(args.runtime_min_context),
             "runtime_min_target": int(args.runtime_min_target),
             "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),
+            "require_runtime_splice_cache": bool(args.require_runtime_splice_cache),
         }
     )
 
@@ -627,6 +636,7 @@ def main() -> None:
             runtime_min_context=args.runtime_min_context,
             runtime_min_target=args.runtime_min_target,
             runtime_max_samples_per_game=args.runtime_max_samples_per_game,
+            require_runtime_splice_cache=args.require_runtime_splice_cache,
         )
     except Exception as exc:
         emit_progress({"event": "script_error", "error_type": type(exc).__name__, "message": str(exc)})
@@ -714,6 +724,7 @@ def main() -> None:
         "runtime_min_context": args.runtime_min_context,
         "runtime_min_target": args.runtime_min_target,
         "runtime_max_samples_per_game": args.runtime_max_samples_per_game,
+        "require_runtime_splice_cache": args.require_runtime_splice_cache,
         "restore_best": args.restore_best,
         "lr_scheduler": args.lr_scheduler,
         "lr_scheduler_metric": args.lr_scheduler_metric,

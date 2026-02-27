@@ -257,7 +257,7 @@ else
   echo "[runpod-cycle-full-train-hf] remote_hf_fetch_exec: all-latest under prefix ${HF_DATASET_PATH_PREFIX}" >&2
   fetch_args+=( --all-latest )
 fi
-'/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' "${fetch_args[@]}"
+'/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' "\${fetch_args[@]}"
 EOF
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
@@ -504,6 +504,7 @@ export HF_DATASET_CACHE_DIR="${REMOTE_REPO_DIR}/data/hf_datasets"
 export TRAIN_RUNTIME_MIN_CONTEXT="${FLOW_RUNTIME_MIN_CONTEXT}"
 export TRAIN_RUNTIME_MIN_TARGET="${FLOW_RUNTIME_MIN_TARGET}"
 export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
+export TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1
 export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0 --no-progress"
 TRAIN_PRESET_IMAGE="/opt/runpod_cloud_training/train_baseline_preset.sh"
 TRAIN_PRESET_REPO="${REMOTE_REPO_DIR}/deploy/runpod_cloud_training/train_baseline_preset.sh"
@@ -636,6 +637,7 @@ PY
     if [[ "${selected_schema}" == "game_jsonl_runtime_splice_v1" ]]; then
       direct_cmd+=( --runtime-min-context "${TRAIN_RUNTIME_MIN_CONTEXT}" --runtime-min-target "${TRAIN_RUNTIME_MIN_TARGET}" --runtime-max-samples-per-game "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}" )
     fi
+    direct_cmd+=( --require-runtime-splice-cache )
     {
       printf '[runpod-cycle-full-train-hf] direct_fallback_exec:'
       printf ' %q' "${direct_cmd[@]}"

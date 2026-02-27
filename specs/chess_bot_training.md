@@ -65,6 +65,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
     - `--runtime-min-context`
     - `--runtime-min-target`
     - `--runtime-max-samples-per-game` (0 = no cap)
+    - `--require-runtime-splice-cache/--no-require-runtime-splice-cache` (when enabled, game-dataset training fails if runtime cache cannot be loaded; no runtime index fallback)
   - `--num-layers` (LSTM layer count)
   - `--dropout` (embedding/head dropout and LSTM inter-layer dropout when multilayer)
   - `--phase-feature/--no-phase-feature`, `--phase-embed-dim`
@@ -84,6 +85,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - compact game-level mode: streams train JSONL to build vocabulary and runtime-splice sample counts, builds sample index `(game offset, splice_i)`, loads game rows on-demand and splices per sample in `Dataset.__getitem__`
   - when compatible `runtime_splice_cache` artifacts are present for game-level train/val paths, training loads precomputed packed indexes from cache instead of rebuilding them from JSONL
   - if cache files are missing/mismatched (for example runtime splice config mismatch), training safely falls back to runtime JSONL indexing
+  - when `--require-runtime-splice-cache` is enabled for game datasets, training checks cache-loadability first and raises an error on cache miss/mismatch instead of falling back
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)

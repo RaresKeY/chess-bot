@@ -9,7 +9,7 @@ Provide direct, copy/paste commands for running training (full run and smoke run
 - Runtime behavior is unchanged: no month sampler, no file-level weighting flags, and no API changes.
 - `artifacts/train_metrics*.json` records `train_inputs`/`val_inputs` plus `train_rows_by_file`/`val_rows_by_file` for per-file accounting.
 
-## Top-Level Full Training Command
+## Top-Level Full Training Command (Low Batch)
 
 Run from repo root:
 
@@ -21,8 +21,8 @@ Run from repo root:
   --metrics-out artifacts/train_metrics_full_elite_2025-11_game.json \
   --progress-jsonl-out artifacts/train_progress_full_elite_2025-11_game.jsonl \
   --device auto \
-  --epochs 100 \
-  --batch-size 2048 \
+  --epochs 20 \
+  --batch-size 512 \
   --num-workers 8 \
   --amp \
   --runtime-min-context 8 \
@@ -41,7 +41,6 @@ Run from repo root:
   --lr-plateau-patience 3 \
   --lr-plateau-threshold 1e-4 \
   --early-stopping-patience 0 \
-  --no-progress
 ```
 
 ## Fast Smoke Command
