@@ -73,8 +73,8 @@ if [[ "${CONFIRM}" != "YES" ]]; then
   exit 2
 fi
 
-TOKEN="$(runpod_cycle_api_token "${PY_BIN}")"
-[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-terminate-all] missing RunPod API token (set RUNPOD_API_KEY or keyring runpod/RUNPOD_API_KEY)" >&2; exit 1; }
+TOKEN="$(runpod_cycle_api_token "${PY_BIN}" "${REPO_ROOT}")"
+[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-terminate-all] missing RunPod API token (checked RUNPOD_API_KEY, keyring runpod/RUNPOD_API_KEY, and .env fallback)" >&2; exit 1; }
 
 LOG_DIR="${REPO_ROOT}/artifacts/reports"
 mkdir -p "${LOG_DIR}"

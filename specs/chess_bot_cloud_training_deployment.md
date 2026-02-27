@@ -144,11 +144,16 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - `scripts/hf_dataset_fetch.py` extracts the archive back into a local `dataset/` directory containing `train.jsonl`, `val.jsonl`, `test.jsonl` (if present), and `stats.json` (if present)
 - Publish script behavior:
   - validates required `train.jsonl`/`val.jsonl` by default
+  - supports publishing one dataset (`--dataset-dir`) or all matching datasets under a root (`--dataset-root`, default glob `elite_*_game`)
+  - for compact game datasets, validates `runtime_splice_cache/manifest.json` and per-split cache files by default before upload (`--require-runtime-cache`)
   - generates `manifest.json` and `checksums.sha256`
   - publish manifest includes `dataset_format` (detected from `stats.json` or row schema sniffing) and embeds `stats_json` when present for downstream schema-aware fetch/training flows
   - uploads a compressed `tar.gz` bundle by default (faster transfer for JSONL-heavy datasets)
   - supports `--archive-format none` to upload raw files instead
-  - token lookup defaults to keyring (`service=huggingface`, `username=codex_hf_write_token`), with `--token` / `HF_TOKEN` overrides
+  - HF token keyring identity is explicitly:
+    - `--keyring-service huggingface`
+    - `--keyring-username codex_hf_write_token`
+  - token lookup defaults to that keyring entry, with `--token` / `HF_TOKEN` overrides
   - sets `HF_HUB_ENABLE_HF_TRANSFER=1` by default for faster HF transfers when supported by the active env
   - supports `--dry-run` to inspect repo path/versioning without network upload
 - `scripts/hf_dataset_fetch.py` fetches a published dataset version from the HF dataset repo and extracts the archive into a local destination by default
@@ -197,7 +202,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - `provision` (choose GPU + template and create a Pod via REST, with optional wait loop)
 - `provision` supports template selection by exact `--template-id` or name/substring `--template-name`
 - Pod create flow supports common chess-bot ports (`22/tcp`, `8888/http`, `8000/http`) and optional env injection
-- Key lookup order is explicit arg -> env `RUNPOD_API_KEY` -> keyring (`runpod` / `RUNPOD_API_KEY`); scripts should avoid echoing CLI/env values containing the token
+- Key lookup order is explicit arg -> env `RUNPOD_API_KEY` -> keyring (`runpod` / `RUNPOD_API_KEY`) -> dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.runpod`, then `.env`); scripts should avoid echoing CLI/env values containing the token
 - Provisioning helper strips any accidental `api_key` query parameter from GraphQL endpoints and uses bearer headers for GraphQL/REST authentication
 - GraphQL GPU listing (`gpuTypes`) can fail with `HTTP 403` even when REST template listing works if the API key/account lacks GraphQL access; helper now raises an actionable error instead of a raw traceback
 - `provision --gpu-type-id <id>` now supports a fallback path when GraphQL GPU discovery is denied: it proceeds with the explicit GPU type ID (without GraphQL validation) and emits a warning

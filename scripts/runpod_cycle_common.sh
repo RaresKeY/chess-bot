@@ -58,18 +58,53 @@ runpod_cycle_registry_file() {
 runpod_cycle_keyring_token() {
   local py_bin="$1"
   "${py_bin}" - <<'PY'
-import keyring
-print((keyring.get_password("runpod", "RUNPOD_API_KEY") or "").strip())
+try:
+    import keyring
+except Exception:
+    print("")
+    raise SystemExit(0)
+try:
+    print((keyring.get_password("runpod", "RUNPOD_API_KEY") or "").strip())
+except Exception:
+    print("")
+PY
+}
+
+runpod_cycle_dotenv_token() {
+  local py_bin="$1"
+  local repo_root="$2"
+  CHESSBOT_REPO_ROOT="${repo_root}" "${py_bin}" - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+repo_root = Path(os.environ.get("CHESSBOT_REPO_ROOT", ".")).resolve()
+sys.path.insert(0, str(repo_root))
+from src.chessbot.secrets import default_dotenv_paths, lookup_dotenv_value
+
+paths = default_dotenv_paths(
+    repo_root=repo_root,
+    override_var_names=("RUNPOD_DOTENV_PATH", "CHESSBOT_DOTENV_PATH"),
+    fallback_filenames=(".env.runpod", ".env"),
+)
+print(lookup_dotenv_value(("RUNPOD_API_KEY",), paths))
 PY
 }
 
 runpod_cycle_api_token() {
   local py_bin="$1"
+  local repo_root="${2:-$(runpod_cycle_repo_root)}"
   if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
     printf '%s\n' "${RUNPOD_API_KEY}"
     return 0
   fi
-  runpod_cycle_keyring_token "${py_bin}"
+  local keyring_token
+  keyring_token="$(runpod_cycle_keyring_token "${py_bin}")"
+  if [[ -n "${keyring_token}" ]]; then
+    printf '%s\n' "${keyring_token}"
+    return 0
+  fi
+  runpod_cycle_dotenv_token "${py_bin}" "${repo_root}"
 }
 
 runpod_cycle_pod_field() {

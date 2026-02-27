@@ -15,8 +15,8 @@ runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd curl
 
 POD_ID="${RUNPOD_POD_ID:-$(runpod_cycle_pod_id "${PROVISION_JSON}")}"
-TOKEN="$(runpod_cycle_api_token "${PY_BIN}")"
-[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-terminate] missing RunPod API token" >&2; exit 1; }
+TOKEN="$(runpod_cycle_api_token "${PY_BIN}" "${REPO_ROOT}")"
+[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-terminate] missing RunPod API token (checked RUNPOD_API_KEY, keyring, and .env fallback)" >&2; exit 1; }
 [[ -n "${POD_ID}" ]] || { echo "[runpod-cycle-terminate] missing pod id" >&2; exit 1; }
 
 mkdir -p "${CYCLE_DIR}"

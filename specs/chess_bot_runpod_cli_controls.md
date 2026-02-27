@@ -36,6 +36,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   1. `--api-key`
   2. env `RUNPOD_API_KEY`
   3. keyring (`service=runpod`, `username=RUNPOD_API_KEY`)
+  4. dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.runpod`, then `.env`)
 
 ## RunPod Pod Lifecycle Terms (Do Not Conflate)
 - `provision` / `start`: create a new RunPod pod resource and start compute.
@@ -46,6 +47,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 ## Image Build / Push Control
 - `scripts/build_runpod_image.sh` builds the RunPod image from `deploy/runpod_cloud_training/Dockerfile`
 - `IMAGE_REPO` is required; script now normalizes it to lowercase before tagging (GHCR requires lowercase repository names)
+- project default image repo value: `ghcr.io/rareskey/chess-bot-runpod`
 - Default tags:
   - `<IMAGE_REPO>:<git-short-sha>`
   - `<IMAGE_REPO>:latest`
@@ -115,10 +117,17 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - readiness wait is controlled with `RUNPOD_REMOTE_READY_TIMEOUT_SECONDS` / `RUNPOD_REMOTE_READY_POLL_SECONDS`
 - `scripts/hf_dataset_publish.py`
   - publishes a validated dataset directory to a Hugging Face **dataset** repo using path versioning under `validated_datasets/<dataset_name>/<version>/`
+  - canonical HF keyring identity for publish/fetch:
+    - `service`: `huggingface`
+    - `username`: `codex_hf_write_token`
+  - equivalent explicit CLI flags:
+    - `--keyring-service huggingface`
+    - `--keyring-username codex_hf_write_token`
   - default token lookup order:
     1. `--token`
     2. env `HF_TOKEN`
     3. keyring (`service=huggingface`, `username=codex_hf_write_token`)
+    4. dotenv fallback (`HF_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.hf_dataset`, then `.env`)
   - writes `manifest.json` + `checksums.sha256` and uploads either:
     - a compressed `*.tar.gz` archive (default, faster for JSONL uploads), or
     - raw copied files (`--archive-format none`)
@@ -143,7 +152,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - runs local CPU inference (`scripts/infer_move.py`) on the collected `.pt` artifact and saves output
   - exports local `PYTHONPATH=${REPO_ROOT}` before invoking `scripts/infer_move.py` so direct script execution resolves `src.*` imports reliably on the host
 - `scripts/runpod_cycle_stop.sh`
-  - cleanly requests pod stop via RunPod GraphQL `podStop` using RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), plus saved `pod_id`
+  - cleanly requests pod stop via RunPod GraphQL `podStop` using RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), then dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, `.env.runpod`, `.env`), plus saved `pod_id`
   - stop mutation payload now requests object subfields (`id`, `desiredStatus`) to match the current GraphQL schema and avoid validation failures
   - appends a `STOPPED` record to the tracked pod registry for operator bookkeeping
   - note: `stop` halts compute but does not delete the pod; storage charges can still apply until termination
@@ -154,7 +163,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
   - safe cleanup utility to terminate (delete) all pods tracked by our scripts whose latest tracked state is not `TERMINATED`
   - requires explicit confirmation (`--yes` or `RUNPOD_CONFIRM_TERMINATE_ALL=YES`)
-  - uses RunPod REST `DELETE /pods/<id>` with RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), and appends `TERMINATED` registry records on success
+  - uses RunPod REST `DELETE /pods/<id>` with RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), then dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, `.env.runpod`, `.env`), and appends `TERMINATED` registry records on success
   - treats RunPod REST `404` responses that clearly indicate `pod not found to terminate` as an "already gone" reconciliation case (records local `TERMINATED` instead of failing the whole cleanup)
 - `scripts/runpod_cycle_full_smoke.sh`
   - orchestration wrapper that composes the modular scripts in order (start -> push -> train -> collect -> local-validate -> stop)
@@ -384,6 +393,23 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - For `scripts/runpod_cycle_*` and `scripts/runpod_full_train_easy*.sh` (direct SSH/rsync flows):
   - prefer `RUNPOD_CLOUD_TYPE=COMMUNITY`
   - or patch the provisioning/readiness logic before attempting `SECURE`
+
+## Compact Dataset Smoke Bottleneck (2026-02-26)
+- Full-easy smoke against `validated_datasets/elite_2025-11_game` (compact game dataset, full month) successfully reached:
+  - pod ready
+  - remote HF fetch (`elite_2025-11_game@latest`)
+  - schema detection/filter (`game_jsonl_runtime_splice_v1`)
+  - remote train launch
+- Observed bottleneck:
+  - remote `train_baseline.py` remained CPU-bound (~99%) for >8 minutes before any progress JSONL event beyond `script_start`
+  - GPU remained idle during this period (`~0% util`, only a few MiB VRAM used)
+- Interpretation:
+  - runtime-splice startup/index/phase-cache build on the full monthly compact dataset is too heavy for a "fast smoke" run
+- Practical smoke guidance (current):
+  - do not use a full-month compact `*_game` dataset as the default smoke target
+  - use a smaller compact dataset variant (recommended dedicated smoke publish) or add a remote subsetting step before training
+- Evidence saved for run:
+  - `artifacts/runpod_cycles/easy-smoke-retry-20260226T161214Z/reports/bottleneck_note.md`
 
 ## Observed Full Cycle Success (2026-02-26 host run, after fixes)
 - Successful end-to-end RunPod smoke run completed on `runpod-cycle-20260226T065518Z` after applying the following fixes:

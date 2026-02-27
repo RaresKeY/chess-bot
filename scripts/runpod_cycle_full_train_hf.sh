@@ -239,34 +239,25 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "bash -s" <<EOF 2>&1 | tee "${REM
 set -Eeuo pipefail
 mkdir -p '${REMOTE_RUN_DIR}'
 export PYTHONPATH='${REMOTE_REPO_DIR}'
+fetch_args=(
+  --repo-id '${HF_DATASET_REPO_ID}'
+  --repo-path-prefix '${HF_DATASET_PATH_PREFIX}'
+  --dest-dir '${REMOTE_REPO_DIR}/data/hf_datasets'
+  --output-manifest '${REMOTE_HF_FETCH_MANIFEST}'
+)
 if [[ -n "${HF_DATASET_NAME}" ]]; then
+  fetch_args+=( --dataset-name '${HF_DATASET_NAME}' )
   if [[ -n "${HF_DATASET_VERSION}" ]]; then
     echo "[runpod-cycle-full-train-hf] remote_hf_fetch_exec: single dataset ${HF_DATASET_NAME}@${HF_DATASET_VERSION}" >&2
-    '/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' \
-      --repo-id '${HF_DATASET_REPO_ID}' \
-      --repo-path-prefix '${HF_DATASET_PATH_PREFIX}' \
-      --dataset-name '${HF_DATASET_NAME}' \
-      --version '${HF_DATASET_VERSION}' \
-      --dest-dir '${REMOTE_REPO_DIR}/data/hf_datasets' \
-      --output-manifest '${REMOTE_HF_FETCH_MANIFEST}'
+    fetch_args+=( --version '${HF_DATASET_VERSION}' )
   else
     echo "[runpod-cycle-full-train-hf] remote_hf_fetch_exec: single dataset ${HF_DATASET_NAME}@latest" >&2
-    '/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' \
-      --repo-id '${HF_DATASET_REPO_ID}' \
-      --repo-path-prefix '${HF_DATASET_PATH_PREFIX}' \
-      --dataset-name '${HF_DATASET_NAME}' \
-      --dest-dir '${REMOTE_REPO_DIR}/data/hf_datasets' \
-      --output-manifest '${REMOTE_HF_FETCH_MANIFEST}'
   fi
 else
   echo "[runpod-cycle-full-train-hf] remote_hf_fetch_exec: all-latest under prefix ${HF_DATASET_PATH_PREFIX}" >&2
-  '/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' \
-    --repo-id '${HF_DATASET_REPO_ID}' \
-    --repo-path-prefix '${HF_DATASET_PATH_PREFIX}' \
-    --dest-dir '${REMOTE_REPO_DIR}/data/hf_datasets' \
-    --all-latest \
-    --output-manifest '${REMOTE_HF_FETCH_MANIFEST}'
+  fetch_args+=( --all-latest )
 fi
+'/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' "${fetch_args[@]}"
 EOF
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \

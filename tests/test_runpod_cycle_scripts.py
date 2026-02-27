@@ -157,6 +157,29 @@ OUT
         )
         self.assertEqual(proc.stdout, "env-token-123")
 
+    def test_common_api_token_falls_back_to_dotenv(self):
+        with tempfile.TemporaryDirectory() as td:
+            dotenv = Path(td) / ".env.runpod"
+            dotenv.write_text("RUNPOD_API_KEY=dotenv-token-999\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["RUNPOD_DOTENV_PATH"] = str(dotenv)
+            env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.fail.Keyring"
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-lc",
+                    "source scripts/runpod_cycle_common.sh && "
+                    "unset RUNPOD_API_KEY && "
+                    "out=\"$(runpod_cycle_api_token python3 /work)\" && "
+                    "printf '%s' \"$out\"",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.stdout, "dotenv-token-999")
+
     def test_cycle_ssh_scripts_use_batch_mode_and_connect_timeout(self):
         for name in [
             "scripts/runpod_cycle_push_dataset.sh",
@@ -247,6 +270,13 @@ OUT
         self.assertIn('cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"', text)
         self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"', text)
         self.assertIn("cpu_threads=${cpu_threads} auto_num_workers=${auto_num_workers}", text)
+
+    def test_full_train_hf_remote_fetch_uses_unified_args_builder(self):
+        text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
+        self.assertIn("fetch_args=(", text)
+        self.assertIn("fetch_args+=( --all-latest )", text)
+        self.assertIn("fetch_args+=( --dataset-name", text)
+        self.assertIn("hf_dataset_fetch.py' \"${fetch_args[@]}\"", text)
 
     def test_terminate_all_reconciles_pod_not_found_404_as_terminated(self):
         with tempfile.TemporaryDirectory() as td:
