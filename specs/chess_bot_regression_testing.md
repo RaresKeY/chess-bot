@@ -62,6 +62,8 @@ Do not skip the regression test when:
   - `.venv/bin/python -m unittest -q tests.test_...`
 - If a test file uses `pytest`, use:
   - `.venv/bin/python -m pytest -q tests/test_...py`
+- For full-suite convenience, use:
+  - `bash scripts/run_all_tests.sh`
 
 ## Anti-Patterns
 - Fixing the bug without a test when a local test is feasible
