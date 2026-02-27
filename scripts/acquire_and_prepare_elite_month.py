@@ -26,17 +26,30 @@ def _find_single_pgn(extract_dir: Path) -> Path:
     return pgns[0]
 
 
-def _is_completed_month_outputs(validated_dir: Path, dataset_dir: Path) -> bool:
-    return (
+def _is_completed_month_outputs(validated_dir: Path, dataset_dir: Path, game_dataset_dir: Path, build_legacy: bool) -> bool:
+    valid_ok = (
         validated_dir.exists()
-        and dataset_dir.exists()
         and (validated_dir / "summary.json").is_file()
         and (validated_dir / "valid_games.jsonl").is_file()
-        and (dataset_dir / "stats.json").is_file()
-        and (dataset_dir / "train.jsonl").is_file()
-        and (dataset_dir / "val.jsonl").is_file()
-        and (dataset_dir / "test.jsonl").is_file()
     )
+    legacy_ok = True
+    if build_legacy:
+        legacy_ok = (
+            dataset_dir.exists()
+            and (dataset_dir / "stats.json").is_file()
+            and (dataset_dir / "train.jsonl").is_file()
+            and (dataset_dir / "val.jsonl").is_file()
+            and (dataset_dir / "test.jsonl").is_file()
+        )
+    game_ok = (
+        game_dataset_dir.exists()
+        and (game_dataset_dir / "stats.json").is_file()
+        and (game_dataset_dir / "train.jsonl").is_file()
+        and (game_dataset_dir / "val.jsonl").is_file()
+        and (game_dataset_dir / "test.jsonl").is_file()
+        and (game_dataset_dir / "runtime_splice_cache" / "manifest.json").is_file()
+    )
+    return valid_ok and legacy_ok and game_ok
 
 
 def main() -> None:
@@ -46,7 +59,12 @@ def main() -> None:
     parser.add_argument(
         "--dataset-dir",
         default="",
-        help="Output dir for splice dataset (default data/dataset/elite_<month>_cap<max-samples-per-game>)",
+        help="Output dir for legacy splice dataset (default data/dataset/elite_<month>_cap<max-samples-per-game>)",
+    )
+    parser.add_argument(
+        "--game-dataset-dir",
+        default="",
+        help="Output dir for compact game dataset (default data/dataset/elite_<month>_game)",
     )
     parser.add_argument("--re-download", action="store_true", help="Force re-download ZIP even if already present")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into existing validated/dataset output dirs")
@@ -61,6 +79,7 @@ def main() -> None:
     parser.add_argument("--splice-workers", type=int, default=0, help="Splice pass-2 threads (0 uses all cores)")
     parser.add_argument("--splice-batch-size", type=int, default=256)
     parser.add_argument("--splice-progress-every", type=int, default=10000)
+    parser.add_argument("--no-legacy", action="store_true", help="Skip building legacy materialized dataset")
     args = parser.parse_args()
 
     month = args.month.strip()
@@ -73,27 +92,34 @@ def main() -> None:
         if args.dataset_dir
         else REPO_ROOT / "data" / "dataset" / f"elite_{month}_cap{args.max_samples_per_game}"
     )
+    game_dataset_dir = (
+        Path(args.game_dataset_dir)
+        if args.game_dataset_dir
+        else REPO_ROOT / "data" / "dataset" / f"elite_{month}_game"
+    )
+
     validated_dir = validated_dir.resolve()
     dataset_dir = dataset_dir.resolve()
+    game_dataset_dir = game_dataset_dir.resolve()
 
     if not args.overwrite:
-        if _is_completed_month_outputs(validated_dir, dataset_dir):
+        if _is_completed_month_outputs(validated_dir, dataset_dir, game_dataset_dir, not args.no_legacy):
             print(
                 {
                     "skip_existing_complete": {
                         "month": month,
                         "validated_dir": str(validated_dir),
-                        "dataset_dir": str(dataset_dir),
+                        "dataset_dir": str(dataset_dir) if not args.no_legacy else None,
+                        "game_dataset_dir": str(game_dataset_dir),
                         "validation_summary": str(validated_dir / "summary.json"),
-                        "dataset_stats": str(dataset_dir / "stats.json"),
                     }
                 }
             )
             return
-        if validated_dir.exists() or dataset_dir.exists():
+        if validated_dir.exists() or (not args.no_legacy and dataset_dir.exists()) or game_dataset_dir.exists():
             raise SystemExit(
                 "Output dir already exists but does not look complete "
-                f"(use --overwrite to rebuild): validated_dir={validated_dir} dataset_dir={dataset_dir}"
+                f"(use --overwrite to rebuild): validated_dir={validated_dir} dataset_dir={dataset_dir} game_dataset_dir={game_dataset_dir}"
             )
 
     py = str((REPO_ROOT / ".venv" / "bin" / "python") if (REPO_ROOT / ".venv" / "bin" / "python").exists() else sys.executable)
@@ -130,31 +156,67 @@ def main() -> None:
         ]
     )
 
-    splice_cmd = [
+    if not args.no_legacy:
+        splice_cmd = [
+            py,
+            "scripts/build_splice_dataset.py",
+            "--input",
+            str(valid_out),
+            "--output-dir",
+            str(dataset_dir),
+            "--k",
+            str(args.k),
+            "--min-context",
+            str(args.min_context),
+            "--min-target",
+            str(args.min_target),
+            "--max-samples-per-game",
+            str(args.max_samples_per_game),
+            "--workers",
+            str(args.splice_workers),
+            "--batch-size",
+            str(args.splice_batch_size),
+            "--progress-every",
+            str(args.splice_progress_every),
+        ]
+        if args.allow_draws:
+            splice_cmd.append("--allow-draws")
+        _run(splice_cmd)
+
+    # Build the preferred compact game-level dataset
+    game_dataset_cmd = [
         py,
-        "scripts/build_splice_dataset.py",
+        "scripts/build_game_dataset.py",
         "--input",
         str(valid_out),
         "--output-dir",
-        str(dataset_dir),
-        "--k",
-        str(args.k),
-        "--min-context",
+        str(game_dataset_dir),
+        "--runtime-min-context",
         str(args.min_context),
-        "--min-target",
+        "--runtime-min-target",
         str(args.min_target),
-        "--max-samples-per-game",
-        str(args.max_samples_per_game),
-        "--workers",
-        str(args.splice_workers),
-        "--batch-size",
-        str(args.splice_batch_size),
-        "--progress-every",
-        str(args.splice_progress_every),
     ]
     if args.allow_draws:
-        splice_cmd.append("--allow-draws")
-    _run(splice_cmd)
+        game_dataset_cmd.append("--allow-draws")
+    if args.overwrite and game_dataset_dir.exists():
+        # build_game_dataset inherently overwrites the JSONL outputs inside the directory
+        pass
+    _run(game_dataset_cmd)
+
+    # Generate the cache for the compact dataset
+    cache_cmd = [
+        py,
+        "scripts/build_runtime_splice_cache.py",
+        "--dataset-dir",
+        str(game_dataset_dir),
+        "--splits",
+        "train,val,test",
+        "--jobs",
+        "0"  # Will default to multiprocessing.cpu_count()
+    ]
+    if args.overwrite:
+        cache_cmd.append("--overwrite")
+    _run(cache_cmd)
 
     print(
         {
@@ -162,9 +224,9 @@ def main() -> None:
                 "month": month,
                 "pgn": str(pgn_path),
                 "validated_dir": str(validated_dir),
-                "dataset_dir": str(dataset_dir),
+                "dataset_dir": str(dataset_dir) if not args.no_legacy else None,
+                "game_dataset_dir": str(game_dataset_dir),
                 "validation_summary": str(summary_out),
-                "dataset_stats": str(dataset_dir / "stats.json"),
             }
         }
     )

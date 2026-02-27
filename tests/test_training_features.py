@@ -1,4 +1,8 @@
+from array import array
 import json
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -12,7 +16,9 @@ from src.chessbot.model import (
     side_to_move_id_from_context_len,
 )
 from src.chessbot.training import (
+    RuntimeSpliceConfig,
     _build_rollout_step_weights,
+    _index_game_jsonl_paths_cached_or_runtime,
     _prefix_match_len,
     _weighted_rollout_closeness,
     collate_train,
@@ -23,6 +29,47 @@ from src.chessbot.training import (
 
 
 class TrainingFeatureTests(unittest.TestCase):
+    @staticmethod
+    def _write_runtime_cache_split(
+        dataset_dir: Path,
+        split: str,
+        src_path: Path,
+        offsets: list[int],
+        splice_indices: list[int],
+        phase_ids: list[int],
+    ) -> None:
+        split_dir = dataset_dir / "runtime_splice_cache" / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+        (split_dir / "paths.json").write_text(json.dumps([str(src_path.resolve())]), encoding="utf-8")
+
+        def _write_arr(name: str, typecode: str, vals: list[int]) -> None:
+            arr = array(typecode, vals)
+            (split_dir / name).write_bytes(arr.tobytes())
+
+        _write_arr("path_ids.u32.bin", "I", [0 for _ in offsets])
+        _write_arr("offsets.u64.bin", "Q", offsets)
+        _write_arr("splice_indices.u32.bin", "I", splice_indices)
+        _write_arr("sample_phase_ids.u8.bin", "B", phase_ids)
+
+    @staticmethod
+    def _write_runtime_cache_manifest(dataset_dir: Path, *, min_context: int, min_target: int, max_samples_per_game: int, seed: int) -> None:
+        manifest = {
+            "schema_version": 1,
+            "kind": "runtime_splice_cache",
+            "config": {
+                "min_context": int(min_context),
+                "min_target": int(min_target),
+                "max_samples_per_game": int(max_samples_per_game),
+                "seed": int(seed),
+            },
+            "splits": {
+                "train": {"game_rows_total": 1, "sample_rows_total": 1},
+                "val": {"game_rows_total": 1, "sample_rows_total": 1},
+            },
+        }
+        (dataset_dir / "runtime_splice_cache").mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "runtime_splice_cache" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
     def test_side_to_move_id_from_context_len_parity_and_fallback(self):
         self.assertEqual(side_to_move_id_from_context_len(0), SIDE_TO_MOVE_WHITE)
         self.assertEqual(side_to_move_id_from_context_len(1), SIDE_TO_MOVE_BLACK)
@@ -223,6 +270,114 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertEqual(epoch_end_events[1]["epoch"], 2)
         self.assertIn("metrics", epoch_end_events[0])
         self.assertIn("val_loss", epoch_end_events[0]["metrics"])
+
+    def test_runtime_cache_index_loader_uses_cache_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp) / "dataset"
+            ds.mkdir(parents=True, exist_ok=True)
+            train_path = ds / "train.jsonl"
+            train_path.write_text('{"game_id":"g1","moves":["e2e4","e7e5","g1f3","b8c6","f1b5","a7a6","b5a4","g8f6","e1g1"]}\n', encoding="utf-8")
+            self._write_runtime_cache_manifest(ds, min_context=8, min_target=1, max_samples_per_game=0, seed=7)
+            self._write_runtime_cache_split(ds, "train", train_path, offsets=[0], splice_indices=[7], phase_ids=[1])
+
+            idx, used_cache, reason = _index_game_jsonl_paths_cached_or_runtime(
+                [str(train_path)],
+                RuntimeSpliceConfig(min_context=8, min_target=1, max_samples_per_game=0, seed=7),
+                expected_split="train",
+            )
+            self.assertTrue(used_cache)
+            self.assertEqual(reason, "loaded_runtime_splice_cache")
+            self.assertEqual(len(idx[1]), 1)
+            self.assertEqual(int(idx[3][0]), 7)
+            self.assertEqual(int(idx[4][0]), 1)
+
+    def test_runtime_cache_index_loader_falls_back_on_config_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp) / "dataset"
+            ds.mkdir(parents=True, exist_ok=True)
+            train_path = ds / "train.jsonl"
+            train_path.write_text(
+                '{"game_id":"g1","moves":["e2e4","e7e5","g1f3","b8c6","f1b5","a7a6","b5a4","g8f6","e1g1"]}\n',
+                encoding="utf-8",
+            )
+            # cache config mismatch: min_context differs from runtime cfg below.
+            self._write_runtime_cache_manifest(ds, min_context=4, min_target=1, max_samples_per_game=0, seed=7)
+            self._write_runtime_cache_split(ds, "train", train_path, offsets=[0], splice_indices=[3], phase_ids=[1])
+
+            idx, used_cache, reason = _index_game_jsonl_paths_cached_or_runtime(
+                [str(train_path)],
+                RuntimeSpliceConfig(min_context=8, min_target=1, max_samples_per_game=0, seed=7),
+                expected_split="train",
+            )
+            self.assertFalse(used_cache)
+            self.assertIn("cache_config_mismatch", reason)
+            # Fallback runtime indexing should still produce rows.
+            self.assertGreater(len(idx[1]), 0)
+
+    def test_game_training_uses_runtime_cache_when_cache_present(self):
+        rows = [
+            {"game_id": "g1", "moves": ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1"], "winner_side": "W"},
+            {"game_id": "g2", "moves": ["d2d4", "d7d5", "c2c4", "e7e6", "b1c3", "g8f6", "c1g5", "f8e7", "e2e3"], "winner_side": "B"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp) / "dataset"
+            ds.mkdir(parents=True, exist_ok=True)
+            train_path = ds / "train.jsonl"
+            val_path = ds / "val.jsonl"
+            with train_path.open("w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+            with val_path.open("w", encoding="utf-8") as f:
+                for row in rows[:1]:
+                    f.write(json.dumps(row) + "\n")
+            (ds / "stats.json").write_text(json.dumps({"dataset_format": "game_jsonl_runtime_splice_v1"}) + "\n", encoding="utf-8")
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/build_runtime_splice_cache.py",
+                    "--dataset-dir",
+                    str(ds),
+                    "--splits",
+                    "train,val",
+                    "--jobs",
+                    "1",
+                    "--no-progress-bar",
+                    "--no-verbose",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                check=True,
+            )
+
+            artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[str(train_path)],
+                val_paths=[str(val_path)],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+            )
+            self.assertEqual(dataset_info["dataset_schema"], "game")
+            self.assertEqual(dataset_info["data_loading"], "indexed_game_jsonl_runtime_splice_cache")
+            self.assertEqual(len(history), 1)
+            self.assertIn("runtime", artifact)
 
     def test_train_next_move_model_from_jsonl_paths_multistep_emits_rollout_metrics(self):
         train_rows = [

@@ -4,6 +4,7 @@ import os
 import random
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import chess
@@ -255,6 +256,7 @@ def _phase_ids_by_ply_prefix(moves: List[str]) -> List[int]:
 def _index_game_jsonl_paths(
     paths: List[str],
     runtime_cfg: RuntimeSpliceConfig,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[List[str], array, array, array, array, Dict[str, int], int, Dict[str, int], int]:
     path_strs = [os.fspath(p) for p in paths]
     path_ids = array("I")
@@ -268,6 +270,28 @@ def _index_game_jsonl_paths(
     for path_id, path in enumerate(path_strs):
         game_count = 0
         sample_count = 0
+        file_size_bytes = 0
+        try:
+            file_size_bytes = int(os.path.getsize(path))
+        except OSError:
+            file_size_bytes = 0
+        last_progress_game_count = 0
+        last_progress_bytes = 0
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "stage": "indexing",
+                    "path": path,
+                    "path_id": int(path_id),
+                    "file_size_bytes": int(file_size_bytes),
+                    "file_bytes_read": 0,
+                    "file_game_rows": 0,
+                    "file_sample_rows": 0,
+                    "total_game_rows": int(total_game_rows),
+                    "total_sample_rows": int(total_sample_rows),
+                    "done": False,
+                }
+            )
         with open(path, "rb") as f:
             while True:
                 offset = f.tell()
@@ -293,8 +317,45 @@ def _index_game_jsonl_paths(
                         sample_phase_ids.append(int(phase_ids_for_game[splice_i]))
                     else:
                         sample_phase_ids.append(int(phase_to_id(PHASE_UNKNOWN)))
+                if progress_cb is not None:
+                    bytes_read = int(offset + len(line))
+                    if (
+                        (game_count - last_progress_game_count) >= 1000
+                        or (bytes_read - last_progress_bytes) >= (8 * 1024 * 1024)
+                    ):
+                        last_progress_game_count = int(game_count)
+                        last_progress_bytes = int(bytes_read)
+                        progress_cb(
+                            {
+                                "stage": "indexing",
+                                "path": path,
+                                "path_id": int(path_id),
+                                "file_size_bytes": int(file_size_bytes),
+                                "file_bytes_read": bytes_read,
+                                "file_game_rows": int(game_count),
+                                "file_sample_rows": int(sample_count),
+                                "total_game_rows": int(total_game_rows),
+                                "total_sample_rows": int(total_sample_rows),
+                                "done": False,
+                            }
+                        )
         game_rows_by_file[path] = game_count
         sample_rows_by_file[path] = sample_count
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "stage": "indexing",
+                    "path": path,
+                    "path_id": int(path_id),
+                    "file_size_bytes": int(file_size_bytes),
+                    "file_bytes_read": int(file_size_bytes),
+                    "file_game_rows": int(game_count),
+                    "file_sample_rows": int(sample_count),
+                    "total_game_rows": int(total_game_rows),
+                    "total_sample_rows": int(total_sample_rows),
+                    "done": True,
+                }
+            )
     return (
         path_strs,
         path_ids,
@@ -306,6 +367,154 @@ def _index_game_jsonl_paths(
         sample_rows_by_file,
         total_sample_rows,
     )
+
+
+def _index_game_jsonl_paths_from_runtime_cache(
+    paths: List[str],
+    runtime_cfg: RuntimeSpliceConfig,
+    expected_split: Optional[str] = None,
+) -> Tuple[Optional[Tuple[List[str], array, array, array, array, Dict[str, int], int, Dict[str, int], int]], str]:
+    """Load precomputed runtime splice indexes from runtime_splice_cache.
+
+    Returns (index_tuple, reason). index_tuple is None when cache cannot be used.
+    """
+    path_strs = [os.fspath(p) for p in paths]
+    resolved_to_global: Dict[str, int] = {str(Path(p).resolve()): i for i, p in enumerate(path_strs)}
+    split_expected = str(expected_split or "").strip().lower()
+    if split_expected not in {"", "train", "val", "test"}:
+        return None, f"unsupported_expected_split:{split_expected}"
+
+    final_path_ids = array("I")
+    final_offsets = array("Q")
+    final_splice_indices = array("I")
+    final_sample_phase_ids = array("B")
+    game_rows_by_file: Dict[str, int] = {p: 0 for p in path_strs}
+    sample_rows_by_file: Dict[str, int] = {p: 0 for p in path_strs}
+    total_game_rows = 0
+    total_sample_rows = 0
+
+    def _load_arr(path: Path, typecode: str):
+        arr_obj = array(typecode)
+        with path.open("rb") as f:
+            arr_obj.frombytes(f.read())
+        return arr_obj
+
+    def _cache_cfg_matches(manifest_cfg: Dict[str, Any]) -> bool:
+        for key in ("min_context", "min_target", "max_samples_per_game", "seed"):
+            try:
+                if int(manifest_cfg.get(key, -10**9)) != int(getattr(runtime_cfg, key)):
+                    return False
+            except Exception:
+                return False
+        return True
+
+    for raw_path in path_strs:
+        p_resolved = Path(raw_path).resolve()
+        split = split_expected or p_resolved.stem.strip().lower()
+        if split not in {"train", "val", "test"}:
+            return None, f"cannot_infer_split:{raw_path}"
+
+        cache_root = p_resolved.parent / "runtime_splice_cache"
+        manifest_path = cache_root / "manifest.json"
+        if not manifest_path.is_file():
+            return None, f"cache_manifest_missing:{manifest_path}"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return None, f"cache_manifest_invalid:{exc}"
+        if str(manifest.get("kind", "")) != "runtime_splice_cache":
+            return None, f"cache_manifest_kind_invalid:{manifest.get('kind')}"
+        manifest_cfg = manifest.get("config")
+        if not isinstance(manifest_cfg, dict) or not _cache_cfg_matches(manifest_cfg):
+            return None, "cache_config_mismatch"
+
+        split_dir = cache_root / split
+        required = {
+            "paths": split_dir / "paths.json",
+            "path_ids": split_dir / "path_ids.u32.bin",
+            "offsets": split_dir / "offsets.u64.bin",
+            "splice_indices": split_dir / "splice_indices.u32.bin",
+            "sample_phase_ids": split_dir / "sample_phase_ids.u8.bin",
+        }
+        for fp in required.values():
+            if not fp.is_file():
+                return None, f"cache_file_missing:{fp}"
+
+        try:
+            cache_paths_raw = json.loads(required["paths"].read_text(encoding="utf-8"))
+        except Exception as exc:
+            return None, f"cache_paths_invalid:{exc}"
+        if not isinstance(cache_paths_raw, list) or not cache_paths_raw:
+            return None, "cache_paths_empty"
+        cache_paths_resolved = [str(Path(str(x)).resolve()) for x in cache_paths_raw]
+
+        local_path_ids = _load_arr(required["path_ids"], "I")
+        local_offsets = _load_arr(required["offsets"], "Q")
+        local_splice_indices = _load_arr(required["splice_indices"], "I")
+        local_sample_phase_ids = _load_arr(required["sample_phase_ids"], "B")
+        n_rows = len(local_offsets)
+        if not (n_rows == len(local_path_ids) == len(local_splice_indices) == len(local_sample_phase_ids)):
+            return None, "cache_row_count_mismatch"
+
+        local_to_global: List[int] = []
+        for cp in cache_paths_resolved:
+            gid = resolved_to_global.get(cp)
+            if gid is None:
+                return None, f"cache_path_not_in_input:{cp}"
+            local_to_global.append(int(gid))
+
+        for i in range(n_rows):
+            local_pid = int(local_path_ids[i])
+            if local_pid < 0 or local_pid >= len(local_to_global):
+                return None, "cache_path_id_out_of_range"
+            global_pid = int(local_to_global[local_pid])
+            final_path_ids.append(global_pid)
+            final_offsets.append(int(local_offsets[i]))
+            final_splice_indices.append(int(local_splice_indices[i]))
+            final_sample_phase_ids.append(int(local_sample_phase_ids[i]))
+            sample_rows_by_file[path_strs[global_pid]] += 1
+            total_sample_rows += 1
+
+        split_meta = (manifest.get("splits") or {}).get(split) or {}
+        if len(local_to_global) == 1:
+            gp = path_strs[int(local_to_global[0])]
+            try:
+                games = int(split_meta.get("game_rows_total", 0) or 0)
+            except Exception:
+                games = 0
+            if games > 0:
+                game_rows_by_file[gp] += games
+                total_game_rows += games
+
+    out = (
+        path_strs,
+        final_path_ids,
+        final_offsets,
+        final_splice_indices,
+        final_sample_phase_ids,
+        game_rows_by_file,
+        total_game_rows,
+        sample_rows_by_file,
+        total_sample_rows,
+    )
+    return out, "loaded_runtime_splice_cache"
+
+
+def _index_game_jsonl_paths_cached_or_runtime(
+    paths: List[str],
+    runtime_cfg: RuntimeSpliceConfig,
+    expected_split: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Tuple[Tuple[List[str], array, array, array, array, Dict[str, int], int, Dict[str, int], int], bool, str]:
+    cache_out, reason = _index_game_jsonl_paths_from_runtime_cache(
+        paths=paths,
+        runtime_cfg=runtime_cfg,
+        expected_split=expected_split,
+    )
+    if cache_out is not None:
+        return cache_out, True, reason
+    runtime_out = _index_game_jsonl_paths(paths=paths, runtime_cfg=runtime_cfg, progress_cb=progress_cb)
+    return runtime_out, False, reason
 
 
 class IndexedJsonlGameSpliceDataset(Dataset):
@@ -1374,8 +1583,16 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             val_game_rows_by_file,
             val_games_total,
         ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
-        train_index = _index_game_jsonl_paths(train_paths, runtime_cfg)
-        val_index = _index_game_jsonl_paths(val_paths, runtime_cfg)
+        train_index, train_cache_used, _train_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+            train_paths,
+            runtime_cfg,
+            expected_split="train",
+        )
+        val_index, val_cache_used, _val_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+            val_paths,
+            runtime_cfg,
+            expected_split="val",
+        )
         train_ds = IndexedJsonlGameRolloutDataset(
             train_index[0], train_index[1], train_index[2], train_index[3], train_index[4], vocab=vocab, rollout_horizon=rollout_horizon
         )
@@ -1384,7 +1601,12 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         )
         train_runtime_index_bytes = _runtime_index_memory_bytes(train_index[1], train_index[2], train_index[3], train_index[4])
         val_runtime_index_bytes = _runtime_index_memory_bytes(val_index[1], val_index[2], val_index[3], val_index[4])
-        data_loading_mode = "indexed_game_jsonl_runtime_splice"
+        if train_cache_used and val_cache_used:
+            data_loading_mode = "indexed_game_jsonl_runtime_splice_cache"
+        elif train_cache_used or val_cache_used:
+            data_loading_mode = "indexed_game_jsonl_runtime_splice_hybrid"
+        else:
+            data_loading_mode = "indexed_game_jsonl_runtime_splice"
     else:
         vocab, train_rows_by_file, train_rows_total = _build_vocab_and_count_rows_from_train_paths(train_paths)
         val_rows_by_file, val_rows_total = _count_rows_in_jsonl_paths(val_paths)
@@ -2021,8 +2243,16 @@ def train_next_move_model_from_jsonl_paths(
             val_game_rows_by_file,
             val_games_total,
         ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
-        train_index = _index_game_jsonl_paths(train_paths, runtime_cfg)
-        val_index = _index_game_jsonl_paths(val_paths, runtime_cfg)
+        train_index, train_cache_used, _train_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+            train_paths,
+            runtime_cfg,
+            expected_split="train",
+        )
+        val_index, val_cache_used, _val_cache_reason = _index_game_jsonl_paths_cached_or_runtime(
+            val_paths,
+            runtime_cfg,
+            expected_split="val",
+        )
         train_ds = IndexedJsonlGameSpliceDataset(
             train_index[0], train_index[1], train_index[2], train_index[3], train_index[4], vocab=vocab
         )
@@ -2031,7 +2261,12 @@ def train_next_move_model_from_jsonl_paths(
         )
         train_runtime_index_bytes = _runtime_index_memory_bytes(train_index[1], train_index[2], train_index[3], train_index[4])
         val_runtime_index_bytes = _runtime_index_memory_bytes(val_index[1], val_index[2], val_index[3], val_index[4])
-        data_loading_mode = "indexed_game_jsonl_runtime_splice"
+        if train_cache_used and val_cache_used:
+            data_loading_mode = "indexed_game_jsonl_runtime_splice_cache"
+        elif train_cache_used or val_cache_used:
+            data_loading_mode = "indexed_game_jsonl_runtime_splice_hybrid"
+        else:
+            data_loading_mode = "indexed_game_jsonl_runtime_splice"
     else:
         # Stream train files once to build vocabulary and exact row counts.
         vocab, train_rows_by_file, train_rows_total = _build_vocab_and_count_rows_from_train_paths(train_paths)

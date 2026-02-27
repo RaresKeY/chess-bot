@@ -10,8 +10,9 @@ Current repo supports two dataset architectures:
 ## Code Ownership
 - Compact game-level dataset CLI: `scripts/build_game_dataset.py`
 - Legacy splice dataset CLI: `scripts/build_splice_dataset.py`
-- End-to-end monthly prep orchestrator (legacy splice path): `scripts/acquire_and_prepare_elite_month.py`
+- End-to-end monthly prep orchestrator: `scripts/acquire_and_prepare_elite_month.py` (builds both legacy and compact game datasets by default, plus runtime caches)
 - Batch monthly prep orchestrator: `scripts/batch_prepare_elite_months.py`
+- Batch compact cache orchestrator: `scripts/batch_build_compact_caches.py`
 - Core splice logic (legacy + shared split/eligibility helpers): `src/chessbot/splicing.py`
 - Shared IO: `src/chessbot/io_utils.py`
 
@@ -72,6 +73,46 @@ For each valid game and splice index `i`:
   - Pass 2: write compact game rows directly to split JSONL outputs
 - This avoids holding all games or all splice samples in memory
 - Output `stats.json` records dataset format, split counts, average plies, and runtime splice defaults used for eligibility
+
+## Batch Cache Generation (`scripts/batch_build_compact_caches.py`)
+- Automatically scans a directory containing multiple validated month directories (e.g., `data/validated/elite_2025-01`).
+- For each month, generates the compact game-level dataset into a `_game` suffixed output directory using `scripts/build_game_dataset.py`.
+- Immediately runs `scripts/build_runtime_splice_cache.py` on that new dataset to produce the binary cache needed for high-performance training.
+- Intelligently skips directories that already have a complete cache unless `--overwrite` is specified.
+
+## End-to-end Orchestration updates (`scripts/acquire_and_prepare_elite_month.py`)
+- By default, it now builds **both** the legacy materialized dataset AND the new preferred compact game dataset (along with its runtime cache).
+- Supports `--no-legacy` to skip generating the huge, expanded legacy datasets completely.
+- Uses `scripts/batch_build_compact_caches.py` for massive, multi-month backwards-compatible processing.
+
+## Runtime Splice Cache Precompute (`scripts/build_runtime_splice_cache.py`)
+- Precomputes the CPU-heavy runtime-splice artifacts for compact game datasets and stores them under `runtime_splice_cache/` inside each dataset directory.
+- Per split (`train`, `val`, `test`) writes packed files:
+  - `paths.json`
+  - `path_ids.u32.bin`
+  - `offsets.u64.bin`
+  - `splice_indices.u32.bin`
+  - `sample_phase_ids.u8.bin`
+- Writes `runtime_splice_cache/manifest.json` with:
+  - config (`min_context`, `min_target`, `max_samples_per_game`, `seed`)
+  - per-split game/sample counts
+  - per-split and total cache byte sizes
+  - binary layout metadata
+- `--dataset-dir` is repeatable, so one invocation can build caches for multiple dataset directories.
+- Supports `--jobs N` for task-level parallelism across all scheduled `(dataset, split)` builds in one run (for example, two datasets x three splits can use up to six workers).
+- Supports a TTY-only progress bar via `--progress-bar/--no-progress-bar` (stderr output).
+- Supports `--verbose/--no-verbose` for per-split summary logs.
+- If process-based parallelism is unavailable in constrained environments (for example semaphore/socket restrictions), the script automatically falls back to single-process indexing instead of failing.
+
+## Runtime Cache Validation Utility (`scripts/validate_runtime_splice_cache.py`)
+- Validates cache presence and structure for one or many compact game datasets.
+- Supports direct dataset paths (`--dataset-dir` repeatable) or root scanning (`--dataset-root` + `--dataset-glob`).
+- For each required split (default `train,val,test`), verifies required cache files exist and packed binary row counts align across:
+  - `path_ids.u32.bin`
+  - `offsets.u64.bin`
+  - `splice_indices.u32.bin`
+  - `sample_phase_ids.u8.bin`
+- Ensures `paths.json` is readable and points to existing source split JSONL files.
 
 ## Legacy Materialized Splice Build Notes (`scripts/build_splice_dataset.py`)
 - Two-pass streaming build for large corpora

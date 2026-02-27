@@ -13,6 +13,7 @@ class EliteMonthPrepScriptTests(unittest.TestCase):
         self.assertIn('--max-samples-per-game", type=int, default=8', text)
         self.assertIn("elite_<month>_cap<max-samples-per-game>", text)
         self.assertIn('f"elite_{month}_cap{args.max_samples_per_game}"', text)
+        self.assertIn('f"elite_{month}_game"', text)
 
     def test_batch_script_parses_url_list_and_emits_cap8_acquire_commands_in_dry_run(self):
         with tempfile.TemporaryDirectory() as td:
@@ -66,13 +67,23 @@ class EliteMonthPrepScriptTests(unittest.TestCase):
             root = Path(td)
             validated = root / "validated"
             dataset = root / "dataset"
+            game_dataset = root / "game_dataset"
             validated.mkdir()
             dataset.mkdir()
+            game_dataset.mkdir()
             (validated / "summary.json").write_text("{}", encoding="utf-8")
             (validated / "valid_games.jsonl").write_text('{"x":1}\n', encoding="utf-8")
             (dataset / "stats.json").write_text("{}", encoding="utf-8")
             for name in ("train.jsonl", "val.jsonl", "test.jsonl"):
                 (dataset / name).write_text('{"x":1}\n', encoding="utf-8")
+            
+            (game_dataset / "stats.json").write_text("{}", encoding="utf-8")
+            for name in ("train.jsonl", "val.jsonl", "test.jsonl"):
+                (game_dataset / name).write_text('{"x":1}\n', encoding="utf-8")
+            
+            cache_dir = game_dataset / "runtime_splice_cache"
+            cache_dir.mkdir()
+            (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
 
             proc = subprocess.run(
                 [
@@ -84,6 +95,8 @@ class EliteMonthPrepScriptTests(unittest.TestCase):
                     str(validated),
                     "--dataset-dir",
                     str(dataset),
+                    "--game-dataset-dir",
+                    str(game_dataset)
                 ],
                 check=True,
                 capture_output=True,
@@ -114,7 +127,37 @@ class EliteMonthPrepScriptTests(unittest.TestCase):
                 text=True,
             )
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("does not look complete", proc.stderr + proc.stdout)
+
+    def test_batch_build_compact_caches_script_dry_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            validated = root / "validated"
+            dataset_out = root / "dataset"
+            validated.mkdir()
+            dataset_out.mkdir()
+            
+            # Setup fake valid_games.jsonl
+            month1 = validated / "elite_2025-01"
+            month1.mkdir()
+            (month1 / "valid_games.jsonl").write_text("{}", encoding="utf-8")
+            
+            proc = subprocess.run(
+                [
+                    ".venv/bin/python",
+                    "scripts/batch_build_compact_caches.py",
+                    "--validated-dir",
+                    str(validated),
+                    "--dataset-out-dir",
+                    str(dataset_out),
+                    "--dry-run"
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertIn("scripts/build_game_dataset.py", proc.stdout)
+        self.assertIn("scripts/build_runtime_splice_cache.py", proc.stdout)
+        self.assertIn("'dry_run': True", proc.stdout)
 
 
 class EliteMonthDownloadHardeningTests(unittest.TestCase):

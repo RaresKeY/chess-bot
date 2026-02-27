@@ -81,6 +81,8 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - Memory/loader safeguards:
   - legacy splice-row mode: streams train JSONL to build vocabulary/counts, indexes train/val line offsets, loads rows on-demand in `Dataset.__getitem__`
   - compact game-level mode: streams train JSONL to build vocabulary and runtime-splice sample counts, builds sample index `(game offset, splice_i)`, loads game rows on-demand and splices per sample in `Dataset.__getitem__`
+  - when compatible `runtime_splice_cache` artifacts are present for game-level train/val paths, training loads precomputed packed indexes from cache instead of rebuilding them from JSONL
+  - if cache files are missing/mismatched (for example runtime splice config mismatch), training safely falls back to runtime JSONL indexing
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
@@ -128,7 +130,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 
 ## Current Limitation
 - Training still stores per-row JSONL line offsets in RAM (much smaller than full row dicts/strings, but not fully streaming/iterable training).
-- Compact game-level runtime splicing currently recomputes phase labels from move prefixes in the loader, which is correct but CPU-heavy versus precomputed splice-row phase metadata.
+- Compact game-level runtime splicing still computes phase labels in-loader for fallback/no-cache paths; precomputed cache paths avoid index-build replay work but do not eliminate per-sample row decode/splice cost.
 - Runtime-splice optimization (current):
   - training now caches per-sample phase IDs during runtime splice-index construction (single replay pass per game at index-build time)
   - runtime splice indexes use packed arrays (`array`-backed path IDs / offsets / splice indices / phase IDs) instead of Python int lists to reduce RAM usage substantially
@@ -141,6 +143,8 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `collate_train_rollout()` rollout-target/mask tensor outputs for multistep batches
   - `NextMoveLSTM` forward path with phase/side feature head inputs enabled
   - scheduler/early-stopping runtime metadata and early-stop behavior in a tiny synthetic training run
+  - runtime splice cache index loading for game datasets, plus fallback to runtime indexing on cache config mismatch
+  - tiny game-dataset training path that confirms cache-backed data loading mode is used when cache is present
   - multistep file-backed training path emits rollout metrics/progress fields and multistep runtime metadata
 - `tests/test_game_dataset_architecture.py` covers:
   - compact game-dataset builder CLI output schema (`moves`, no duplicated splice rows)
