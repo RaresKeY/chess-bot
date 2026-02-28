@@ -181,6 +181,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - exports `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` so training fails on runtime-cache miss/mismatch instead of runtime index fallback
 - `scripts/runpod_cycle_collect.sh`
   - pulls remote run artifacts and timing logs into local `artifacts/runpod_cycles/<run_id>/collected/`
+  - automatically writes a best-effort runtime log bundle under `.../collected/logs_auto/`:
+    - `remote_state_snapshot.txt` (GPU/process/service + train/progress log tails)
+    - `train_log_indexing_summary.json` (keyword-based indexing/cache-miss detection across collected logs)
+    - `collection_manifest.json` (deterministic file inventory for the collected directory)
 - `scripts/runpod_cycle_local_validate.sh`
   - runs local CPU inference (`scripts/infer_move.py`) on the collected `.pt` artifact and saves output
   - exports local `PYTHONPATH=${REPO_ROOT}` before invoking `scripts/infer_move.py` so direct script execution resolves `src.*` imports reliably on the host

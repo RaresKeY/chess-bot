@@ -212,6 +212,14 @@ OUT
             self.assertIn("AddKeysToAgent=no", text, name)
             self.assertIn("IdentityAgent=none", text, name)
 
+    def test_cycle_collect_auto_log_bundle_outputs(self):
+        text = Path("scripts/runpod_cycle_collect.sh").read_text(encoding="utf-8")
+        self.assertIn('LOCAL_AUTO_LOGS_DIR="${LOCAL_COLLECT_DIR}/logs_auto"', text)
+        self.assertIn("remote_state_snapshot.txt", text)
+        self.assertIn("train_log_indexing_summary.json", text)
+        self.assertIn("collection_manifest.json", text)
+        self.assertIn("indexing_detected", text)
+
     def test_gateway_route_automation_removed(self):
         common = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
         self.assertNotIn("runpod_cycle_apply_gateway_overrides()", common)
