@@ -285,7 +285,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
-  - benchmark artifact pull prefers `rclone` SFTP (`RUNPOD_BENCH_TRANSFER_TOOL=rclone`) with automatic fallback to `rsync`
+  - benchmark artifact pull prefers `rclone` SFTP (`RUNPOD_BENCH_TRANSFER_TOOL=rclone`) with automatic fallback to `rsync`; set `RUNPOD_BENCH_TRANSFER_STRICT=1` to fail fast if `rclone` is unavailable on the host
+  - benchmark/fetch path enforces cloud token safety by clearing write-capable HF env vars on pod-side fetch/train shells (`HF_WRITE_TOKEN`, legacy `HF_TOKEN`)
   - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - propagates subset cap via both env (`TRAIN_MAX_TOTAL_ROWS`) and CLI (`--max-total-rows`) for deterministic logging and behavior checks

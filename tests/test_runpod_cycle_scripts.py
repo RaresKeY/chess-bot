@@ -294,8 +294,10 @@ OUT
         self.assertIn("RUNPOD_BENCH_DISTRIBUTED_BACKEND", text)
         self.assertIn("--distributed-backend", text)
         self.assertIn("RUNPOD_BENCH_TRANSFER_TOOL", text)
+        self.assertIn("RUNPOD_BENCH_TRANSFER_STRICT", text)
         self.assertIn("rclone copy", text)
-        self.assertIn(":sftp:${remote_trial_dir}", text)
+        self.assertIn(":sftp,host=${SSH_HOST}", text)
+        self.assertIn("rclone_missing_fallback_rsync", text)
 
     def test_benchmark_10k_sixpack_wrapper_defaults(self):
         text = Path("scripts/runpod_cycle_benchmark_10k_sixpack.sh").read_text(encoding="utf-8")

@@ -64,6 +64,7 @@ FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
 FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
 FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
 FLOW_TRANSFER_TOOL="${RUNPOD_BENCH_TRANSFER_TOOL:-rclone}"
+FLOW_TRANSFER_STRICT="${RUNPOD_BENCH_TRANSFER_STRICT:-0}"
 FLOW_EXPECTED_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
@@ -116,6 +117,7 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - num_workers_per_rank: \`${FLOW_NUM_WORKERS}\`
 - distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
 - transfer_tool: \`${FLOW_TRANSFER_TOOL}\`
+- transfer_strict: \`${FLOW_TRANSFER_STRICT}\`
 
 | trial | status | exit_code | local_dir |
 |---|---:|---:|---|
@@ -212,6 +214,9 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_DATASET_NAME='${FLOW_HF_DATASET_NAME}' FLOW_HF_DATASET_VERSION='${FLOW_HF_DATASET_VERSION}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' /bin/bash -s" <<'EOF_REMOTE_FETCH'
 set -Eeuo pipefail
 mkdir -p "$(dirname "${REMOTE_MANIFEST}")"
+export HF_READ_TOKEN="${HF_READ_TOKEN:-}"
+export HF_WRITE_TOKEN=""
+export HF_TOKEN=""
 fetch_args=(
   --repo-id "${FLOW_HF_REPO_ID}"
   --repo-path-prefix "${FLOW_HF_PREFIX}"
@@ -288,6 +293,8 @@ export HF_DATASET_PATH_PREFIX="${FLOW_HF_PREFIX}"
 export HF_DATASET_SCHEMA_FILTER="${FLOW_HF_SCHEMA_FILTER}"
 export HF_DATASET_FETCH_MANIFEST="${REMOTE_MANIFEST}"
 export HF_DATASET_CACHE_DIR="${REMOTE_REPO_DIR}/data/hf_datasets"
+export HF_WRITE_TOKEN=""
+export HF_TOKEN=""
 
 export OUTPUT_PATH="${REMOTE_TRIAL_DIR}/model_${TRIAL}.pt"
 export METRICS_OUT="${REMOTE_TRIAL_DIR}/metrics_${TRIAL}.json"
@@ -325,16 +332,19 @@ EOF_REMOTE
   fi
   telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
 
-  if [[ "${FLOW_TRANSFER_TOOL}" == "rclone" ]] && command -v rclone >/dev/null 2>&1; then
-    if ! rclone copy \
-      --sftp-host "${SSH_HOST}" \
-      --sftp-user "${SSH_USER}" \
-      --sftp-port "${SSH_PORT}" \
-      --sftp-key-file "${SSH_KEY}" \
-      --sftp-known-hosts-file "${SSH_KNOWN_HOSTS_FILE}" \
-      --create-empty-src-dirs \
-      ":sftp:${remote_trial_dir}" \
-      "${local_trial_dir}" >/dev/null 2>&1; then
+  if [[ "${FLOW_TRANSFER_TOOL}" == "rclone" ]]; then
+    if command -v rclone >/dev/null 2>&1; then
+      rclone_src=":sftp,host=${SSH_HOST},user=${SSH_USER},port=${SSH_PORT},key_file=${SSH_KEY},known_hosts_file=${SSH_KNOWN_HOSTS_FILE}:${remote_trial_dir}"
+      if ! rclone copy --create-empty-src-dirs "${rclone_src}" "${local_trial_dir}" >/dev/null 2>&1; then
+        telemetry_event "benchmark_transfer" "warn" "rclone_copy_failed_fallback_rsync" "{\"trial\":\"${trial}\"}"
+        rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
+          "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
+      fi
+    elif [[ "${FLOW_TRANSFER_STRICT}" == "1" ]]; then
+      echo "[runpod-bench-matrix] transfer tool rclone requested but command is missing on host" >&2
+      exit 1
+    else
+      telemetry_event "benchmark_transfer" "warn" "rclone_missing_fallback_rsync" "{\"trial\":\"${trial}\"}"
       rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
         "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
     fi
