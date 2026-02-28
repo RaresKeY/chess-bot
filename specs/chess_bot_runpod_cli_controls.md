@@ -20,9 +20,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_local_validate.sh`
 - `scripts/runpod_cycle_stop.sh`
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
+- `scripts/runpod_active_pods_full_status.sh`
 - `scripts/runpod_cycle_full_smoke.sh`
 - `scripts/runpod_cycle_watch_progress.sh`
 - `scripts/runpod_cycle_watchdog.sh`
+- `scripts/runpod_active_pods_full_status.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_cycle_report_style.py`
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
@@ -74,6 +76,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `gpu-search`: GraphQL `gpuTypes` query + local ranking/filtering by cloud/memory/price
   - `provision`: GraphQL GPU selection + REST pod creation
 - Template list can succeed while GPU search fails if the API key lacks GraphQL access/scopes (REST and GraphQL permissions may differ)
+- `provision` now supports explicit spot capacity control via `--interruptible/--no-interruptible` (default `--no-interruptible`)
 
 ## GraphQL GPU Search Failure Behavior (current)
 - `gpu-search` now converts raw GraphQL `HTTP 403` traces into an actionable error message
@@ -127,6 +130,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
   - provisions a pod from template using keyring-backed RunPod auth
+  - forwards `RUNPOD_INTERRUPTIBLE=1` to `runpod_provision.py --interruptible` for spot launches (default `0` / on-demand)
   - now injects a managed no-passphrase temp SSH key by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`), generated at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
   - managed key injection can be controlled with `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
   - now injects a unique per-run `REPO_DIR` by default (`/workspace/chess-bot-<run_id>`) to avoid stale/root-owned repo directories on reused persistent volumes
@@ -258,6 +262,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports `--watch` polling mode for continuous JSON snapshots
   - supports `--auto-collect` to trigger `scripts/runpod_cycle_collect.sh` once when a detected `manual_*` run reaches completed exit code (uses local marker files to avoid repeated collects)
   - traps `Ctrl-C`/`SIGTERM`, stops local child processes, restores terminal state, and exits `130` before running best-effort pod-stop cleanup
+- `scripts/runpod_active_pods_full_status.sh`
+  - host-side consolidated status snapshot for all locally tracked non-terminated pods
+  - merges latest local tracked registry rows with optional RunPod REST `/pods/<id>` lookups and optional SSH probes
+  - SSH probe reports remote hostname/uptime and `nvidia-smi` lines when reachable, using the managed temp SSH key flow
+  - writes a timestamped JSON report under `artifacts/reports/runpod_active_pods_full_status_<ts>.json` by default
+  - supports `--no-api`, `--no-ssh`, `--running-only`, and `--no-write` for lighter/safer diagnostics
   - operational caveat: if the local watcher step fails after remote training has started/completed, the wrapper's error trap can stop the pod before `collect`; this does not mutate/delete the source HF dataset repo, and remote run artifacts typically remain on the pod volume until the pod is terminated (restart the same pod and run `scripts/runpod_cycle_collect.sh` for the same `RUNPOD_CYCLE_RUN_ID`)
 - `scripts/runpod_cycle_report_style.py`
   - generates a concise operator-facing markdown/json progress report for one run id
@@ -322,6 +332,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - records `benchmark_image_used` telemetry event from provision metadata and writes image summary into trial markdown
   - runs a remote dependency freshness check against repo `requirements.txt` using pod venv, writes `artifacts/runpod_cycles/<run_id>/reports/dependency_check.json`, and emits `benchmark_dependencies` telemetry status
   - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
+  - runtime splice cache compatibility guard:
+    - `RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME` now defaults to `auto` (instead of fixed numeric)
+    - in `auto`, script inspects fetched dataset `runtime_splice_cache/manifest.json` files and resolves a single `max_samples_per_game` value when consistent
+    - if cache values cannot be resolved consistently, script falls back to `0` and emits a warning telemetry event (`benchmark_runtime_cfg`)
+    - explicit numeric `RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME=<int>` remains a hard override
+    - resolved value is passed to remote training via `TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` and recorded in benchmark summary markdown
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - propagates subset cap via both env (`TRAIN_MAX_TOTAL_ROWS`) and CLI (`--max-total-rows`) for deterministic logging and behavior checks
   - pulls each trial directory locally to `artifacts/runpod_cycles/<run_id>/benchmarks/<trial>/` and writes:

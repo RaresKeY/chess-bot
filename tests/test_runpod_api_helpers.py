@@ -124,6 +124,7 @@ class RunpodApiHelperTests(unittest.TestCase):
             env=[],
             use_runpod_training_preset_env=False,
             support_public_ip_auto=True,
+            interruptible=False,
             wait_ready=False,
             wait_timeout_seconds=30,
             wait_poll_seconds=5,
@@ -170,6 +171,7 @@ class RunpodApiHelperTests(unittest.TestCase):
             env=[],
             use_runpod_training_preset_env=False,
             support_public_ip_auto=True,
+            interruptible=False,
             wait_ready=False,
             wait_timeout_seconds=30,
             wait_poll_seconds=5,
@@ -206,6 +208,80 @@ class RunpodApiHelperTests(unittest.TestCase):
                     with mock.patch("scripts.runpod_provision.default_dotenv_paths", return_value=[dotenv]):
                         token = _resolve_api_key(args)
         self.assertEqual(token, "dotenv-token")
+
+    def test_resolve_api_key_precedence_explicit_over_env_keyring_dotenv(self):
+        args = argparse.Namespace(api_key="explicit-token", keyring_service="runpod", keyring_username="RUNPOD_API_KEY")
+        with mock.patch.dict("os.environ", {"RUNPOD_API_KEY": "env-token"}, clear=True):
+            with mock.patch("src.chessbot.secrets.token_from_keyring", return_value="keyring-token"):
+                with tempfile.TemporaryDirectory() as td:
+                    dotenv = Path(td) / ".env.runpod"
+                    dotenv.write_text("RUNPOD_API_KEY=dotenv-token\n", encoding="utf-8")
+                    with mock.patch("scripts.runpod_provision.default_dotenv_paths", return_value=[dotenv]):
+                        token = _resolve_api_key(args)
+        self.assertEqual(token, "explicit-token")
+
+    def test_resolve_api_key_precedence_env_over_keyring_dotenv(self):
+        args = argparse.Namespace(api_key="", keyring_service="runpod", keyring_username="RUNPOD_API_KEY")
+        with mock.patch.dict("os.environ", {"RUNPOD_API_KEY": "env-token"}, clear=True):
+            with mock.patch("src.chessbot.secrets.token_from_keyring", return_value="keyring-token"):
+                with tempfile.TemporaryDirectory() as td:
+                    dotenv = Path(td) / ".env.runpod"
+                    dotenv.write_text("RUNPOD_API_KEY=dotenv-token\n", encoding="utf-8")
+                    with mock.patch("scripts.runpod_provision.default_dotenv_paths", return_value=[dotenv]):
+                        token = _resolve_api_key(args)
+        self.assertEqual(token, "env-token")
+
+    def test_parser_interruptible_default_and_override(self):
+        parser = build_parser()
+        args_default = parser.parse_args(["provision"])
+        self.assertFalse(args_default.interruptible)
+        args_enabled = parser.parse_args(["provision", "--interruptible"])
+        self.assertTrue(args_enabled.interruptible)
+        args_disabled = parser.parse_args(["provision", "--interruptible", "--no-interruptible"])
+        self.assertFalse(args_disabled.interruptible)
+
+    def test_provision_passes_interruptible_to_create_pod(self):
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            rest_base="https://rest.runpod.io/v1",
+            graphql_endpoint="https://api.runpod.io/graphql",
+            verbose=False,
+            name="test-pod",
+            cloud_type="SECURE",
+            gpu_count=1,
+            gpu_type_id="gpu_explicit_123",
+            min_memory_gb=24,
+            max_hourly_price=3.0,
+            template_id="",
+            template_name="chess-bot-training",
+            include_runpod_templates=True,
+            include_public_templates=True,
+            ports=[],
+            volume_mount_path="/workspace",
+            volume_in_gb=40,
+            container_disk_in_gb=15,
+            env=[],
+            use_runpod_training_preset_env=False,
+            support_public_ip_auto=True,
+            interruptible=True,
+            wait_ready=False,
+            wait_timeout_seconds=30,
+            wait_poll_seconds=5,
+        )
+        with mock.patch("scripts.runpod_provision._resolve_api_key", return_value="SECRET"), mock.patch(
+            "scripts.runpod_provision._list_templates",
+            return_value=[{"id": "tpl1", "name": "chess-bot-training", "imageName": "ghcr.io/x/y:latest"}],
+        ), mock.patch(
+            "scripts.runpod_provision._create_pod",
+            return_value={"id": "pod_123"},
+        ) as create_mock, mock.patch(
+            "scripts.runpod_provision._print_json"
+        ):
+            rc = cmd_provision(args)
+        self.assertEqual(rc, 0)
+        self.assertTrue(create_mock.call_args.kwargs["interruptible"])
 
 
 if __name__ == "__main__":

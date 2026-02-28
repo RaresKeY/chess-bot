@@ -288,6 +288,7 @@ def _create_pod(
     container_disk_in_gb: Optional[int] = None,
     env_vars: Optional[Dict[str, str]] = None,
     support_public_ip: Optional[bool] = None,
+    interruptible: Optional[bool] = None,
 ) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "name": name,
@@ -310,6 +311,8 @@ def _create_pod(
         body["env"] = env_vars
     if support_public_ip is not None:
         body["supportPublicIp"] = bool(support_public_ip)
+    if interruptible is not None:
+        body["interruptible"] = bool(interruptible)
     return _http_json("POST", f"{rest_base.rstrip('/')}/pods", bearer_token=api_key, body=body)
 
 
@@ -433,6 +436,7 @@ def cmd_provision(args: argparse.Namespace) -> int:
         container_disk_in_gb=args.container_disk_in_gb,
         env_vars=env_vars or None,
         support_public_ip=(args.cloud_type.upper() == "COMMUNITY") if args.support_public_ip_auto else None,
+        interruptible=args.interruptible,
     )
 
     pod_id = str((create_resp or {}).get("id") or (create_resp or {}).get("podId") or "")
@@ -547,6 +551,12 @@ def build_parser() -> argparse.ArgumentParser:
         "support-public-ip-auto",
         True,
         "Set supportPublicIp=true automatically for COMMUNITY cloud",
+    )
+    _bool_arg(
+        p_prov,
+        "interruptible",
+        False,
+        "Request spot/interruptible pod capacity",
     )
     _bool_arg(p_prov, "wait-ready", True, "Poll pod until public IP appears")
     p_prov.add_argument("--wait-timeout-seconds", type=int, default=600)

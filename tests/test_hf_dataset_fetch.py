@@ -41,6 +41,28 @@ def test_resolve_token_falls_back_to_dotenv(tmp_path, monkeypatch) -> None:
     assert _resolve_token(None, "huggingface", "codex_hf_read_token") == "dotenv-hf-read-token"
 
 
+def test_resolve_token_precedence_explicit_then_env_then_keyring_then_dotenv(tmp_path, monkeypatch) -> None:
+    dotenv = tmp_path / ".env.hf_dataset"
+    dotenv.write_text("HF_READ_TOKEN=dotenv-hf-read-token\n", encoding="utf-8")
+    monkeypatch.setattr("scripts.hf_dataset_fetch.default_dotenv_paths", lambda **_: [dotenv])
+    monkeypatch.setattr("src.chessbot.secrets.token_from_keyring", lambda *_: "keyring-hf-read-token")
+
+    monkeypatch.setenv("HF_READ_TOKEN", "env-hf-read-token")
+    assert _resolve_token("explicit-hf-read-token", "huggingface", "codex_hf_read_token") == "explicit-hf-read-token"
+
+    assert _resolve_token(None, "huggingface", "codex_hf_read_token") == "env-hf-read-token"
+
+    monkeypatch.delenv("HF_READ_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert _resolve_token(None, "huggingface", "codex_hf_read_token") == "keyring-hf-read-token"
+
+
+def test_resolve_token_prefers_hf_read_token_over_hf_token(monkeypatch) -> None:
+    monkeypatch.setenv("HF_READ_TOKEN", "preferred-read-token")
+    monkeypatch.setenv("HF_TOKEN", "fallback-token")
+    assert _resolve_token(None, "huggingface", "codex_hf_read_token") == "preferred-read-token"
+
+
 def test_latest_version_prefers_newer_timestamp_even_with_mixed_prefixes() -> None:
     versions = [
         "validated-20260226T151127Z",

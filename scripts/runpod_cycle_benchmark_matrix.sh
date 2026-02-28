@@ -59,7 +59,8 @@ FLOW_EPOCHS="${RUNPOD_BENCH_EPOCHS:-1}"
 FLOW_BATCH_SIZE_RAW="${RUNPOD_BENCH_BATCH_SIZE:-auto}"
 FLOW_NUM_WORKERS="${RUNPOD_BENCH_NUM_WORKERS:-8}"
 FLOW_DISTRIBUTED_BACKEND="${RUNPOD_BENCH_DISTRIBUTED_BACKEND:-nccl}"
-FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-200000}"
+FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-auto}"
+FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED=""
 FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
 FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
@@ -120,6 +121,65 @@ build_batch_attempt_plan() {
   fi
 }
 
+resolve_runtime_max_samples_from_cache() {
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+    "REMOTE_MANIFEST='${REMOTE_MANIFEST}' /bin/bash -s" <<'EOF_REMOTE_CACHE'
+set -Eeuo pipefail
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+manifest_path = Path(str(os.environ.get("REMOTE_MANIFEST", "")))
+if not manifest_path.is_file():
+    print(json.dumps({"ok": False, "reason": "manifest_missing"}))
+    raise SystemExit(0)
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(json.dumps({"ok": False, "reason": f"manifest_invalid:{exc}"}))
+    raise SystemExit(0)
+
+agg = manifest.get("aggregate") or {}
+paths = []
+for p in list(agg.get("train_paths") or []) + list(agg.get("val_paths") or []):
+    if isinstance(p, str) and p:
+        paths.append(p)
+if not paths:
+    print(json.dumps({"ok": False, "reason": "aggregate_paths_missing"}))
+    raise SystemExit(0)
+
+dataset_roots = sorted({str(Path(p).resolve().parent) for p in paths})
+values = []
+missing = 0
+invalid = 0
+for root in dataset_roots:
+    cache_manifest = Path(root) / "runtime_splice_cache" / "manifest.json"
+    if not cache_manifest.is_file():
+        missing += 1
+        continue
+    try:
+        obj = json.loads(cache_manifest.read_text(encoding="utf-8"))
+    except Exception:
+        invalid += 1
+        continue
+    cfg = obj.get("config") or {}
+    try:
+        values.append(int(cfg.get("max_samples_per_game")))
+    except Exception:
+        invalid += 1
+
+uniq = sorted(set(values))
+if not uniq:
+    print(json.dumps({"ok": False, "reason": "cache_values_missing", "dataset_count": len(dataset_roots), "missing": missing, "invalid": invalid}))
+elif len(uniq) != 1:
+    print(json.dumps({"ok": False, "reason": "cache_values_mixed", "values": uniq, "dataset_count": len(dataset_roots), "missing": missing, "invalid": invalid}))
+else:
+    print(json.dumps({"ok": True, "value": uniq[0], "dataset_count": len(dataset_roots), "missing": missing, "invalid": invalid}))
+PY
+EOF_REMOTE_CACHE
+}
+
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
   telemetry_checkpoint "benchmark_provision" "running" "starting benchmark pod"
   RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
@@ -176,6 +236,7 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - batch_attempt_plan: \`${FLOW_BATCH_ATTEMPTS[*]}\`
 - num_workers_per_rank: \`${FLOW_NUM_WORKERS}\`
 - distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
+- runtime_max_samples_per_game_request: \`${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}\`
 - transfer_tool: \`${FLOW_TRANSFER_TOOL}\`
 - transfer_strict: \`${FLOW_TRANSFER_STRICT}\`
 - transfer_retries: \`${FLOW_TRANSFER_RETRIES}\`
@@ -508,6 +569,34 @@ fi
 "/opt/venvs/chessbot/bin/python" "${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py" "${fetch_args[@]}"
 EOF_REMOTE_FETCH
 
+if [[ "${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}" =~ ^[0-9]+$ ]]; then
+  FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}"
+  telemetry_event "benchmark_runtime_cfg" "info" "runtime max samples configured explicitly" "{\"request\":\"${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}\",\"resolved\":${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED},\"source\":\"explicit\"}"
+elif [[ "${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}" == "auto" ]]; then
+  cache_cfg_json="$(resolve_runtime_max_samples_from_cache 2>/dev/null || true)"
+  cache_cfg_ok="$(jq -r '.ok // false' <<<"${cache_cfg_json}" 2>/dev/null || echo false)"
+  if [[ "${cache_cfg_ok}" == "true" ]]; then
+    FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED="$(jq -r '.value // ""' <<<"${cache_cfg_json}" 2>/dev/null || true)"
+    telemetry_event "benchmark_runtime_cfg" "ok" "runtime max samples derived from cache config" "{\"request\":\"auto\",\"resolved\":${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED},\"source\":\"runtime_splice_cache\",\"cache\":${cache_cfg_json}}"
+  else
+    FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED="0"
+    cache_reason="$(jq -r '.reason // "unknown"' <<<"${cache_cfg_json}" 2>/dev/null || echo unknown)"
+    telemetry_event "benchmark_runtime_cfg" "warn" "runtime max samples auto resolve failed; defaulting to 0" "{\"request\":\"auto\",\"resolved\":0,\"source\":\"fallback_default\",\"reason\":\"${cache_reason}\",\"cache\":${cache_cfg_json:-{}}}"
+  fi
+else
+  echo "[runpod-bench-matrix] invalid RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}' (expected 'auto' or non-negative integer)" >&2
+  exit 2
+fi
+
+{
+  echo
+  echo "## Runtime Splice Cache Config"
+  echo
+  echo "- runtime_max_samples_per_game_request: \`${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW}\`"
+  echo "- runtime_max_samples_per_game_resolved: \`${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED}\`"
+  echo
+} >> "${LOCAL_SUMMARY_MD}"
+
 IFS=',' read -r -a FLOW_TRIALS_BASE <<<"${FLOW_TRIALS_RAW}"
 IFS=',' read -r -a FLOW_SPARSITY_LAMBDAS <<<"${FLOW_SPARSITY_L1_LAMBDAS_RAW}"
 FLOW_TRIALS=()
@@ -584,7 +673,7 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
       trial_batch_used="${batch_try}"
       telemetry_event "benchmark_trial_batch_attempt" "info" "starting trial batch attempt" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"batch_size\":${batch_try}}"
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE_TRY='${batch_try}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_DISTRIBUTED_BACKEND='${FLOW_DISTRIBUTED_BACKEND}' FLOW_NCCL_SAFE_FALLBACK_ENABLED='${FLOW_NCCL_SAFE_FALLBACK_ENABLED}' FLOW_NCCL_STALL_TIMEOUT_SECONDS='${FLOW_NCCL_STALL_TIMEOUT_SECONDS}' FLOW_NCCL_STALL_POLL_SECONDS='${FLOW_NCCL_STALL_POLL_SECONDS}' FLOW_NCCL_DEBUG='${FLOW_NCCL_DEBUG}' FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING='${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}' FLOW_TORCH_NCCL_ENABLE_MONITORING='${FLOW_TORCH_NCCL_ENABLE_MONITORING}' FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC='${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}' FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT='${FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT}' FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE='${FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
+      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE_TRY='${batch_try}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_DISTRIBUTED_BACKEND='${FLOW_DISTRIBUTED_BACKEND}' FLOW_NCCL_SAFE_FALLBACK_ENABLED='${FLOW_NCCL_SAFE_FALLBACK_ENABLED}' FLOW_NCCL_STALL_TIMEOUT_SECONDS='${FLOW_NCCL_STALL_TIMEOUT_SECONDS}' FLOW_NCCL_STALL_POLL_SECONDS='${FLOW_NCCL_STALL_POLL_SECONDS}' FLOW_NCCL_DEBUG='${FLOW_NCCL_DEBUG}' FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING='${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}' FLOW_TORCH_NCCL_ENABLE_MONITORING='${FLOW_TORCH_NCCL_ENABLE_MONITORING}' FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC='${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}' FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT='${FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT}' FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE='${FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
 set -Eeuo pipefail
 mkdir -p "${REMOTE_TRIAL_DIR}"
 cd "${REMOTE_REPO_DIR}"

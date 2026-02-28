@@ -131,6 +131,7 @@ OUT
             "scripts/runpod_cycle_benchmark_matrix.sh",
             "scripts/runpod_cycle_benchmark_10k_sixpack.sh",
             "scripts/runpod_file_transfer.sh",
+            "scripts/runpod_active_pods_full_status.sh",
             "scripts/runpod_cycle_full_smoke.sh",
             "scripts/runpod_full_train_easy.sh",
         ]
@@ -285,6 +286,14 @@ OUT
         text = Path("scripts/runpod_cycle_benchmark_matrix.sh").read_text(encoding="utf-8")
         self.assertIn("RUNPOD_BENCH_TRIALS", text)
         self.assertIn("fp32,tf32,fp16,bf16,sparsity", text)
+        self.assertIn('FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-auto}"', text)
+        self.assertIn('FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED=""', text)
+        self.assertIn("resolve_runtime_max_samples_from_cache()", text)
+        self.assertIn("runtime max samples derived from cache config", text)
+        self.assertIn("runtime max samples auto resolve failed; defaulting to 0", text)
+        self.assertIn('FLOW_RUNTIME_MAX_SAMPLES_PER_GAME=\'${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED}\'', text)
+        self.assertIn("runtime_max_samples_per_game_request", text)
+        self.assertIn("runtime_max_samples_per_game_resolved", text)
         self.assertIn("RUNPOD_BENCH_SPARSITY_L1_LAMBDAS", text)
         self.assertIn("FLOW_BATCH_SIZE_RAW", text)
         self.assertIn("FLOW_BATCH_SIZE_OVERRIDE", text)
@@ -401,12 +410,24 @@ OUT
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
         text = Path("scripts/runpod_cycle_start.sh").read_text(encoding="utf-8")
         self.assertIn('RUNPOD_INJECT_MANAGED_SSH_KEY_ENV', text)
+        self.assertIn('INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-0}"', text)
+        self.assertIn('cmd+=( --interruptible )', text)
+        self.assertIn('cmd+=( --no-interruptible )', text)
         self.assertIn('START_OTEL_COLLECTOR=0', text)
         self.assertIn('RUNPOD_REQUIRE_SSH_READY', text)
         self.assertIn('RUNPOD_SSH_READY_TIMEOUT_SECONDS', text)
         self.assertIn('RUNPOD_TERMINATE_ON_SSH_NOT_READY', text)
         self.assertIn('ssh readiness timed out', text)
         self.assertNotIn('RUNPOD_INJECT_LOCAL_SSH_KEY_ENV', text)
+
+    def test_active_pods_full_status_script_uses_registry_api_and_ssh_probe(self):
+        text = Path("scripts/runpod_active_pods_full_status.sh").read_text(encoding="utf-8")
+        self.assertIn('runpod_cycle_registry_file', text)
+        self.assertIn('runpod_cycle_api_token', text)
+        self.assertIn('"${REST_ENDPOINT%/}/pods/${pod_id}"', text)
+        self.assertIn("ssh_probe", text)
+        self.assertIn("nvidia-smi", text)
+        self.assertIn("runpod_active_pods_full_status_", text)
 
     def test_cycle_scripts_use_config_known_hosts_and_safer_default_host_key_checking(self):
         common = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")

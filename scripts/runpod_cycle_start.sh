@@ -22,6 +22,7 @@ GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 3090}"
 VOLUME_GB="${RUNPOD_VOLUME_GB:-40}"
 CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-15}"
 DEFAULT_REMOTE_REPO_DIR="${RUNPOD_DEFAULT_REMOTE_REPO_DIR:-/workspace/chess-bot-${RUN_ID}}"
+INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-0}"
 
 cmd=(
   "${PY_BIN}" "${REPO_ROOT}/scripts/runpod_provision.py"
@@ -37,6 +38,11 @@ cmd=(
   --container-disk-in-gb "${CONTAINER_DISK_GB}"
   --wait-ready
 )
+if [[ "${INTERRUPTIBLE}" == "1" ]]; then
+  cmd+=( --interruptible )
+else
+  cmd+=( --no-interruptible )
+fi
 
 if [[ "${RUNPOD_USE_PRESET_ENV:-0}" == "1" ]]; then
   cmd+=( --use-runpod-training-preset-env )
@@ -143,6 +149,7 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Pod name: \`${POD_NAME}\`" \
   "- Pod ID: \`${POD_ID}\`" \
   "- Cloud type: \`${CLOUD_TYPE}\`" \
+  "- Interruptible (spot): \`${INTERRUPTIBLE}\`" \
   "- Requested GPU type: \`${GPU_TYPE_ID}\`" \
   "- Public IP: \`${IP}\`" \
   "- SSH host (effective): \`${SSH_HOST}\`" \
