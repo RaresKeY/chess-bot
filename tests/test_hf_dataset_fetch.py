@@ -33,11 +33,12 @@ def test_select_versions_single_dataset_missing_raises() -> None:
 
 def test_resolve_token_falls_back_to_dotenv(tmp_path, monkeypatch) -> None:
     dotenv = tmp_path / ".env.hf_dataset"
-    dotenv.write_text("HF_TOKEN=dotenv-hf-token\n", encoding="utf-8")
+    dotenv.write_text("HF_READ_TOKEN=dotenv-hf-read-token\n", encoding="utf-8")
+    monkeypatch.delenv("HF_READ_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr("src.chessbot.secrets.token_from_keyring", lambda *_: "")
     monkeypatch.setattr("scripts.hf_dataset_fetch.default_dotenv_paths", lambda **_: [dotenv])
-    assert _resolve_token(None, "huggingface", "codex_hf_write_token") == "dotenv-hf-token"
+    assert _resolve_token(None, "huggingface", "codex_hf_read_token") == "dotenv-hf-read-token"
 
 
 def test_latest_version_prefers_newer_timestamp_even_with_mixed_prefixes() -> None:

@@ -9,6 +9,7 @@ def test_main_writes_env_file(tmp_path: Path, monkeypatch, capsys) -> None:
     out_path = tmp_path / ".env"
     values = {
         ("runpod", "RUNPOD_API_KEY"): "rp123",
+        ("huggingface", "codex_hf_read_token"): "hf-read-456",
         ("huggingface", "codex_hf_write_token"): "hf456",
         ("lichess", "lichess_api_token"): "li789",
     }
@@ -24,11 +25,13 @@ def test_main_writes_env_file(tmp_path: Path, monkeypatch, capsys) -> None:
     assert rc == 0
     text = out_path.read_text(encoding="utf-8")
     assert 'RUNPOD_API_KEY="rp123"' in text
-    assert 'HF_TOKEN="hf456"' in text
+    assert 'HF_READ_TOKEN="hf-read-456"' in text
+    assert 'HF_WRITE_TOKEN="hf456"' in text
     assert 'LICHESS_BOT_TOKEN="li789"' in text
     stdout = capsys.readouterr().out
     assert "Wrote" in stdout
     assert "rp123" not in stdout
+    assert "hf-read-456" not in stdout
     assert "hf456" not in stdout
     assert "li789" not in stdout
 
@@ -58,7 +61,8 @@ def test_main_allows_missing_entries_with_flag(tmp_path: Path, monkeypatch) -> N
     assert rc == 0
     text = out_path.read_text(encoding="utf-8")
     assert 'RUNPOD_API_KEY=""' in text
-    assert 'HF_TOKEN=""' in text
+    assert 'HF_READ_TOKEN=""' in text
+    assert 'HF_WRITE_TOKEN=""' in text
     assert 'LICHESS_BOT_TOKEN=""' in text
 
 

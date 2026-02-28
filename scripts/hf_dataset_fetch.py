@@ -35,10 +35,10 @@ def _resolve_token(explicit_token: str | None, service: str, username: str) -> s
     )
     token, _ = resolve_secret(
         explicit_value=str(explicit_token or ""),
-        env_var_names=("HF_TOKEN",),
+        env_var_names=("HF_READ_TOKEN", "HF_TOKEN"),
         keyring_service=service,
         keyring_username=username,
-        dotenv_keys=("HF_TOKEN",),
+        dotenv_keys=("HF_READ_TOKEN", "HF_TOKEN"),
         dotenv_paths=dotenv_paths,
         order=("explicit", "env", "keyring", "dotenv"),
     )
@@ -49,8 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Fetch a published validated dataset from a Hugging Face dataset repo")
     p.add_argument("--repo-id", default=os.environ.get("HF_DATASET_REPO_ID", os.environ.get("HF_REPO_ID", "")))
     p.add_argument("--token", default=None)
-    p.add_argument("--keyring-service", default=os.environ.get("HF_KEYRING_SERVICE", "huggingface"))
-    p.add_argument("--keyring-username", default=os.environ.get("HF_KEYRING_USERNAME", "codex_hf_write_token"))
+    p.add_argument(
+        "--keyring-service",
+        default=os.environ.get("HF_READ_KEYRING_SERVICE", os.environ.get("HF_KEYRING_SERVICE", "huggingface")),
+    )
+    p.add_argument(
+        "--keyring-username",
+        default=os.environ.get("HF_READ_KEYRING_USERNAME", os.environ.get("HF_KEYRING_USERNAME", "codex_hf_read_token")),
+    )
     p.add_argument("--dataset-name", default="")
     p.add_argument("--version", default="")
     p.add_argument("--repo-path-prefix", default=os.environ.get("HF_DATASET_PATH_PREFIX", "validated_datasets"))

@@ -50,10 +50,10 @@ def _resolve_token(explicit_token: str | None, service: str, username: str) -> s
     )
     token, _ = resolve_secret(
         explicit_value=str(explicit_token or ""),
-        env_var_names=("HF_TOKEN",),
+        env_var_names=("HF_WRITE_TOKEN", "HF_TOKEN"),
         keyring_service=service,
         keyring_username=username,
-        dotenv_keys=("HF_TOKEN",),
+        dotenv_keys=("HF_WRITE_TOKEN", "HF_TOKEN"),
         dotenv_paths=dotenv_paths,
         order=("explicit", "env", "keyring", "dotenv"),
     )
@@ -61,7 +61,7 @@ def _resolve_token(explicit_token: str | None, service: str, username: str) -> s
         return token
     dotenv_label = ", ".join(str(p) for p in dotenv_paths)
     raise SystemExit(
-        "Missing HF token. Checked --token, HF_TOKEN, "
+        "Missing HF token. Checked --token, HF_WRITE_TOKEN, HF_TOKEN, "
         f"keyring(service={service!r}, username={username!r}), "
         f"and dotenv paths [{dotenv_label}]."
     )
@@ -251,8 +251,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Publish a validated dataset directory to a Hugging Face dataset repo")
     p.add_argument("--repo-id", default=os.environ.get("HF_DATASET_REPO_ID", os.environ.get("HF_REPO_ID", "")))
     p.add_argument("--token", default=None)
-    p.add_argument("--keyring-service", default=os.environ.get("HF_KEYRING_SERVICE", "huggingface"))
-    p.add_argument("--keyring-username", default=os.environ.get("HF_KEYRING_USERNAME", "codex_hf_write_token"))
+    p.add_argument(
+        "--keyring-service",
+        default=os.environ.get("HF_WRITE_KEYRING_SERVICE", os.environ.get("HF_KEYRING_SERVICE", "huggingface")),
+    )
+    p.add_argument(
+        "--keyring-username",
+        default=os.environ.get("HF_WRITE_KEYRING_USERNAME", os.environ.get("HF_KEYRING_USERNAME", "codex_hf_write_token")),
+    )
     p.add_argument("--dataset-dir", default="", help="Local dataset directory (typically contains train.jsonl and val.jsonl)")
     p.add_argument("--dataset-root", default="", help="Optional root directory for multi-dataset publish")
     p.add_argument("--dataset-glob", default="elite_*_game", help="Glob pattern under --dataset-root")

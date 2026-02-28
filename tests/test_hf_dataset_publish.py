@@ -53,7 +53,8 @@ def test_validate_runtime_splice_cache_accepts_valid_layout(tmp_path: Path) -> N
 
 def test_resolve_token_publish_uses_dotenv_fallback(tmp_path: Path, monkeypatch) -> None:
     dotenv = tmp_path / ".env.hf_dataset"
-    dotenv.write_text("HF_TOKEN=publish-dotenv-token\n", encoding="utf-8")
+    dotenv.write_text("HF_WRITE_TOKEN=publish-dotenv-token\n", encoding="utf-8")
+    monkeypatch.delenv("HF_WRITE_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr("src.chessbot.secrets.token_from_keyring", lambda *_: "")
     monkeypatch.setattr("scripts.hf_dataset_publish.default_dotenv_paths", lambda **_: [dotenv])
@@ -62,6 +63,7 @@ def test_resolve_token_publish_uses_dotenv_fallback(tmp_path: Path, monkeypatch)
 
 def test_resolve_token_publish_missing_includes_dotenv_paths(tmp_path: Path, monkeypatch) -> None:
     dotenv = tmp_path / ".env.hf_dataset"
+    monkeypatch.delenv("HF_WRITE_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr("src.chessbot.secrets.token_from_keyring", lambda *_: "")
     monkeypatch.setattr("scripts.hf_dataset_publish.default_dotenv_paths", lambda **_: [dotenv])

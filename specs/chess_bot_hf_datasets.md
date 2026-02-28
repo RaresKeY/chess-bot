@@ -21,9 +21,9 @@ Define the canonical Hugging Face dataset repo layout, publish/fetch auth contra
   2. env `HF_TOKEN`
   3. keyring lookup
   4. dotenv fallback (`HF_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.hf_dataset`, then `.env`)
-- Canonical HF keyring identity:
-  - `service`: `huggingface`
-  - `username`: `codex_hf_write_token`
+- Canonical HF keyring identities:
+  - read/fetch: `service=huggingface`, `username=codex_hf_read_token`
+  - write/publish: `service=huggingface`, `username=codex_hf_write_token`
 - Equivalent explicit CLI flags:
   - `--keyring-service huggingface`
   - `--keyring-username codex_hf_write_token`
@@ -32,6 +32,7 @@ Define the canonical Hugging Face dataset repo layout, publish/fetch auth contra
 - Script: `scripts/hf_dataset_publish.py`
 - Multi-dataset publish command (new structure):
   - `.venv/bin/python scripts/hf_dataset_publish.py --repo-id LogicLark-QuantumQuill/chess-bot-datasets --repo-path-prefix validated_datasets --dataset-root data/dataset --dataset-glob 'elite_*_game' --keyring-service huggingface --keyring-username codex_hf_write_token`
+  - `scripts/hf_dataset_fetch.py` defaults to read profile (`HF_READ_TOKEN` / `codex_hf_read_token`) and only falls back to legacy `HF_TOKEN` for compatibility
 - Behavior:
   - validates `train.jsonl`/`val.jsonl` by default
   - for compact game datasets, validates `runtime_splice_cache` by default

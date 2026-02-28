@@ -63,6 +63,7 @@ FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
 FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
 FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
+FLOW_TRANSFER_TOOL="${RUNPOD_BENCH_TRANSFER_TOOL:-rclone}"
 FLOW_EXPECTED_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
@@ -114,6 +115,7 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - batch_size: \`${FLOW_BATCH_SIZE}\`
 - num_workers_per_rank: \`${FLOW_NUM_WORKERS}\`
 - distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
+- transfer_tool: \`${FLOW_TRANSFER_TOOL}\`
 
 | trial | status | exit_code | local_dir |
 |---|---:|---:|---|
@@ -323,8 +325,23 @@ EOF_REMOTE
   fi
   telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
 
-  rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
-    "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
+  if [[ "${FLOW_TRANSFER_TOOL}" == "rclone" ]] && command -v rclone >/dev/null 2>&1; then
+    if ! rclone copy \
+      --sftp-host "${SSH_HOST}" \
+      --sftp-user "${SSH_USER}" \
+      --sftp-port "${SSH_PORT}" \
+      --sftp-key-file "${SSH_KEY}" \
+      --sftp-known-hosts-file "${SSH_KNOWN_HOSTS_FILE}" \
+      --create-empty-src-dirs \
+      ":sftp:${remote_trial_dir}" \
+      "${local_trial_dir}" >/dev/null 2>&1; then
+      rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
+        "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
+    fi
+  else
+    rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
+      "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
+  fi
 
   trial_metrics_json="$(extract_trial_metrics_json "${local_trial_dir}")"
   printf '{"trial":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \

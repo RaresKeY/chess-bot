@@ -24,9 +24,14 @@ Define one canonical contract for secret/token resolution so all CLI and runtime
   2. environment
   3. keyring (`service=runpod`, `username=RUNPOD_API_KEY`)
   4. dotenv fallback
-- HF token (`HF_TOKEN`):
+- HF read token (fetch/cloud-safe; preferred):
   1. explicit CLI (`--token`)
-  2. environment
+  2. environment (`HF_READ_TOKEN`, legacy fallback `HF_TOKEN`)
+  3. keyring (`service=huggingface`, `username=codex_hf_read_token`)
+  4. dotenv fallback
+- HF write token (publish-only; do not use on cloud training pods):
+  1. explicit CLI (`--token`)
+  2. environment (`HF_WRITE_TOKEN`, legacy fallback `HF_TOKEN`)
   3. keyring (`service=huggingface`, `username=codex_hf_write_token`)
   4. dotenv fallback
 - Lichess token (`LICHESS_BOT_TOKEN`):
@@ -42,7 +47,8 @@ Define one canonical contract for secret/token resolution so all CLI and runtime
   - username/key: `RUNPOD_API_KEY`
 - Hugging Face datasets:
   - service: `huggingface`
-  - username/key: `codex_hf_write_token`
+  - username/key (read): `codex_hf_read_token`
+  - username/key (write): `codex_hf_write_token`
 - Lichess:
   - service: `lichess`
   - username/key: `lichess_api_token`
@@ -50,7 +56,7 @@ Define one canonical contract for secret/token resolution so all CLI and runtime
 
 ## Layout Rules
 - `.env` is secrets-only:
-  - allowed keys: secret values used by runtime resolution (currently `RUNPOD_API_KEY`, `HF_TOKEN`, `LICHESS_BOT_TOKEN`)
+  - allowed keys: secret values used by runtime resolution (currently `RUNPOD_API_KEY`, `HF_READ_TOKEN`, `HF_WRITE_TOKEN`, legacy `HF_TOKEN`, `LICHESS_BOT_TOKEN`)
   - values should default to empty placeholders in repo-local setup unless explicitly populated by the operator
 - Do not place non-sensitive operational metadata in `.env`:
   - keyring service names/usernames
@@ -81,7 +87,8 @@ Define one canonical contract for secret/token resolution so all CLI and runtime
 - Purpose: generate a repo-local secrets-only dotenv file from canonical keyring entries.
 - Canonical mapping:
   - `RUNPOD_API_KEY` <- keyring `runpod` / `RUNPOD_API_KEY`
-  - `HF_TOKEN` <- keyring `huggingface` / `codex_hf_write_token`
+  - `HF_READ_TOKEN` <- keyring `huggingface` / `codex_hf_read_token`
+  - `HF_WRITE_TOKEN` <- keyring `huggingface` / `codex_hf_write_token`
   - `LICHESS_BOT_TOKEN` <- keyring `lichess` / `lichess_api_token`
 - Behavior:
   - default output path: `.env`

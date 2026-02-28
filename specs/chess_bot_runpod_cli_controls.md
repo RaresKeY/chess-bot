@@ -148,16 +148,16 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - readiness wait is controlled with `RUNPOD_REMOTE_READY_TIMEOUT_SECONDS` / `RUNPOD_REMOTE_READY_POLL_SECONDS`
 - `scripts/hf_dataset_publish.py`
   - publishes a validated dataset directory to a Hugging Face **dataset** repo using path versioning under `validated_datasets/<dataset_name>/<version>/`
-  - canonical HF keyring identity for publish/fetch:
-    - `service`: `huggingface`
-    - `username`: `codex_hf_write_token`
+  - canonical HF keyring identities:
+    - read/fetch: `service=huggingface`, `username=codex_hf_read_token`
+    - write/publish: `service=huggingface`, `username=codex_hf_write_token` (do not use in cloud training pods)
   - equivalent explicit CLI flags:
-    - `--keyring-service huggingface`
-    - `--keyring-username codex_hf_write_token`
+    - publish: `--keyring-service huggingface --keyring-username codex_hf_write_token`
+    - fetch: `--keyring-service huggingface --keyring-username codex_hf_read_token`
   - default token lookup order:
     1. `--token`
-    2. env `HF_TOKEN`
-    3. keyring (`service=huggingface`, `username=codex_hf_write_token`)
+    2. env (`HF_WRITE_TOKEN` for publish, `HF_READ_TOKEN` for fetch, legacy `HF_TOKEN` fallback)
+    3. keyring (`codex_hf_write_token` for publish, `codex_hf_read_token` for fetch)
     4. dotenv fallback (`HF_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.hf_dataset`, then `.env`)
   - writes `manifest.json` + `checksums.sha256` and uploads either:
     - a compressed `*.tar.gz` archive (default, faster for JSONL uploads), or
@@ -285,6 +285,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
+  - benchmark artifact pull prefers `rclone` SFTP (`RUNPOD_BENCH_TRANSFER_TOOL=rclone`) with automatic fallback to `rsync`
   - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - propagates subset cap via both env (`TRAIN_MAX_TOTAL_ROWS`) and CLI (`--max-total-rows`) for deterministic logging and behavior checks
