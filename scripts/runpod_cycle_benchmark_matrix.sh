@@ -58,6 +58,8 @@ FLOW_NUM_WORKERS="${RUNPOD_BENCH_NUM_WORKERS:-8}"
 FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-200000}"
 FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
+FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
+FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
   telemetry_checkpoint "benchmark_provision" "running" "starting benchmark pod"
@@ -109,6 +111,71 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 |---|---:|---:|---|
 MD
 
+extract_trial_metrics_json() {
+  local trial_dir="$1"
+  python3 - "$trial_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+trial_dir = Path(sys.argv[1])
+out = {
+    "duration_seconds": None,
+    "rows_per_second": None,
+    "epochs_completed": None,
+    "train_rows": None,
+    "last_train_loss": None,
+    "last_val_loss": None,
+    "last_top1": None,
+    "last_top5": None,
+}
+metrics_files = sorted(trial_dir.glob("metrics_*.json"))
+progress_files = sorted(trial_dir.glob("progress_*.jsonl"))
+if metrics_files:
+    try:
+        m = json.loads(metrics_files[-1].read_text(encoding="utf-8"))
+        out["train_rows"] = int(m.get("train_rows", 0) or 0)
+        history = list(m.get("history", []) or [])
+        out["epochs_completed"] = int(len(history))
+        if history:
+            last = history[-1]
+            out["last_train_loss"] = float(last.get("train_loss", 0.0))
+            out["last_val_loss"] = float(last.get("val_loss", 0.0))
+            out["last_top1"] = float(last.get("top1", 0.0))
+            out["last_top5"] = float(last.get("top5", 0.0))
+    except Exception:
+        pass
+if progress_files:
+    first_ts = None
+    last_ts = None
+    try:
+        with progress_files[-1].open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                ts = row.get("ts_epoch_ms")
+                if isinstance(ts, int):
+                    if first_ts is None:
+                        first_ts = ts
+                    last_ts = ts
+    except Exception:
+        pass
+    if isinstance(first_ts, int) and isinstance(last_ts, int) and last_ts >= first_ts:
+        dur = (last_ts - first_ts) / 1000.0
+        out["duration_seconds"] = float(dur)
+        tr = out["train_rows"]
+        ep = out["epochs_completed"]
+        if isinstance(tr, int) and tr > 0 and isinstance(ep, int) and ep > 0 and dur > 0:
+            out["rows_per_second"] = float((tr * ep) / dur)
+print(json.dumps(out, ensure_ascii=True))
+PY
+}
+
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "mkdir -p '${REMOTE_RUN_DIR}' '${REMOTE_MATRIX_DIR}'"
 
@@ -135,9 +202,14 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
     bf16)
       train_extra_args+=" --amp --amp-dtype bf16 --tf32 on"
       ;;
-    sparsity)
-      trial_status="skipped"
-      trial_exit=125
+    fp32_sparse)
+      train_extra_args+=" --no-amp --tf32 off --sparsity-mode l1 --sparsity-l1-lambda ${FLOW_SPARSITY_L1_LAMBDA}"
+      ;;
+    fp16_sparse)
+      train_extra_args+=" --amp --amp-dtype fp16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${FLOW_SPARSITY_L1_LAMBDA}"
+      ;;
+    bf16_sparse|sparsity)
+      train_extra_args+=" --amp --amp-dtype bf16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${FLOW_SPARSITY_L1_LAMBDA}"
       ;;
     *)
       trial_status="skipped"
@@ -201,14 +273,32 @@ EOF_REMOTE
   fi
   telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
 
-  printf '{"trial":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s"}\n' \
-    "${trial}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" >> "${LOCAL_SUMMARY_JSONL}"
-
   rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
     "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
 
+  trial_metrics_json="$(extract_trial_metrics_json "${local_trial_dir}")"
+  printf '{"trial":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \
+    "${trial}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" "${trial_metrics_json}" >> "${LOCAL_SUMMARY_JSONL}"
+
   printf '| %s | %s | %s | `%s` |\n' "${trial}" "${trial_status}" "${trial_exit}" "${local_trial_dir}" >> "${LOCAL_SUMMARY_MD}"
 done
+
+cat >> "${LOCAL_SUMMARY_MD}" <<'MD'
+
+## Trial Metrics
+
+| trial | rows_per_second | last_val_loss | last_top1 | last_top5 |
+|---|---:|---:|---:|---:|
+MD
+while IFS= read -r row || [[ -n "${row}" ]]; do
+  [[ -n "${row}" ]] || continue
+  t="$(printf '%s\n' "${row}" | jq -r '.trial')"
+  s="$(printf '%s\n' "${row}" | jq -r '.metrics.rows_per_second // "n/a"')"
+  vl="$(printf '%s\n' "${row}" | jq -r '.metrics.last_val_loss // "n/a"')"
+  t1="$(printf '%s\n' "${row}" | jq -r '.metrics.last_top1 // "n/a"')"
+  t5="$(printf '%s\n' "${row}" | jq -r '.metrics.last_top5 // "n/a"')"
+  printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "${t}" "${s}" "${vl}" "${t1}" "${t5}" >> "${LOCAL_SUMMARY_MD}"
+done < "${LOCAL_SUMMARY_JSONL}"
 
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh" || true
 
@@ -220,7 +310,11 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Local benchmark root: \`${LOCAL_BENCH_ROOT}\`" \
   ""
 
-if [[ "${FLOW_STOP_POD}" == "1" ]]; then
+if [[ "${FLOW_TERMINATE_POD}" == "1" ]]; then
+  telemetry_checkpoint "benchmark_terminate_pod" "running" "terminating benchmark pod"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_terminate.sh"
+  telemetry_checkpoint "benchmark_terminate_pod" "done" "benchmark pod terminated"
+elif [[ "${FLOW_STOP_POD}" == "1" ]]; then
   telemetry_checkpoint "benchmark_stop_pod" "running" "stopping benchmark pod"
   RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_stop.sh"
   telemetry_checkpoint "benchmark_stop_pod" "done" "benchmark pod stopped"

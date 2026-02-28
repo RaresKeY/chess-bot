@@ -28,6 +28,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/runpod_cycle_benchmark_matrix.sh`
+- `scripts/runpod_cycle_benchmark_10k_sixpack.sh`
 - `scripts/runpod_file_transfer.sh`
 - `scripts/telemetry/telemetry_common.sh`
 - `scripts/telemetry_control.sh`
@@ -130,7 +131,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - now injects a unique per-run `REPO_DIR` by default (`/workspace/chess-bot-<run_id>`) to avoid stale/root-owned repo directories on reused persistent volumes
   - unique `REPO_DIR` injection can be controlled with `RUNPOD_SET_UNIQUE_REPO_DIR` and `RUNPOD_DEFAULT_REMOTE_REPO_DIR`
   - now injects smoke-safe service env defaults by default (`START_SSHD=1`, `START_JUPYTER=0`, `START_INFERENCE_API=0`, `START_HF_WATCH=0`, `START_IDLE_WATCHDOG=0`) to keep `sshd` stable during lifecycle smoke tests
+  - smoke-safe service defaults also set `START_OTEL_COLLECTOR=0` by default to avoid collector startup failures cascading into `sshd` teardown under entrypoint `wait -n` supervision
   - smoke-service default injection can be controlled with `RUNPOD_SET_SMOKE_SERVICE_ENVS`
+  - now verifies direct SSH login readiness before returning success (`RUNPOD_REQUIRE_SSH_READY=1` default)
+  - SSH readiness wait controls:
+    - `RUNPOD_SSH_READY_TIMEOUT_SECONDS` (default `240`)
+    - `RUNPOD_SSH_READY_POLL_SECONDS` (default `8`)
+  - on SSH readiness timeout, start script can auto-terminate the just-created pod to avoid stalled-cost leaks (`RUNPOD_TERMINATE_ON_SSH_NOT_READY=1` default)
   - saves provisioning JSON to `artifacts/runpod_cycles/<run_id>/provision.json`
   - initializes a per-run markdown report under `artifacts/runpod_cycles/<run_id>/reports/observations.md`
   - appends a `RUNNING` record to the tracked pod registry (`config/runpod_tracked_pods.jsonl`)
@@ -270,12 +277,20 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_benchmark_matrix.sh`
   - one-pod matrix runner for repeated training trials across precision modes on the same provisioned pod
   - defaults to `RUNPOD_GPU_TYPE_ID=NVIDIA A40`, `RUNPOD_GPU_COUNT=2`, and trial list `fp32,tf32,fp16,bf16,sparsity`
+  - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - pulls each trial directory locally to `artifacts/runpod_cycles/<run_id>/benchmarks/<trial>/` and writes:
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.jsonl`
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.md`
-  - notes: sparse Tensor Core mode is currently marked `skipped` (no 2:4 sparse training path wired in baseline trainer yet)
+  - trial summary now includes extracted speed/loss/top-k fields from local metrics/progress artifacts for quick comparison
+  - supports graceful cleanup mode toggle:
+    - `RUNPOD_BENCH_STOP_POD=1` to stop compute
+    - `RUNPOD_BENCH_TERMINATE_POD=1` to terminate/delete pod after collection
   - emits benchmark/trial telemetry checkpoints and events under `artifacts/runpod_cycles/<run_id>/telemetry/`
+- `scripts/runpod_cycle_benchmark_10k_sixpack.sh`
+  - opinionated wrapper for quick throughput comparisons on one pod
+  - defaults to 6 trials (`fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse`), `RUNPOD_BENCH_MAX_TOTAL_ROWS=10000`, and `RUNPOD_BENCH_EPOCHS=5`
+  - defaults to pod termination (`RUNPOD_BENCH_TERMINATE_POD=1`) after artifact collection and writes final telemetry snapshot JSON
 - `scripts/runpod_file_transfer.sh`
   - host-side file transfer utility for RunPod pods using managed SSH metadata from `provision.json`
   - modes:

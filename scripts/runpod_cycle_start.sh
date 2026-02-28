@@ -68,6 +68,7 @@ if [[ "${RUNPOD_SET_SMOKE_SERVICE_ENVS:-1}" == "1" ]]; then
   cmd+=( --env "START_INFERENCE_API=0" )
   cmd+=( --env "START_HF_WATCH=0" )
   cmd+=( --env "START_IDLE_WATCHDOG=0" )
+  cmd+=( --env "START_OTEL_COLLECTOR=0" )
 fi
 
 for extra_env in ${RUNPOD_START_ENVS:-}; do
@@ -86,6 +87,41 @@ SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
 SSH_USER="$(runpod_cycle_ssh_user)"
 POD_ID="$(runpod_cycle_pod_id "${PROVISION_JSON}")"
 POD_NAME_RECORDED="$(runpod_cycle_pod_name "${PROVISION_JSON}")"
+
+SSH_READY_REQUIRED="${RUNPOD_REQUIRE_SSH_READY:-1}"
+if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then
+  SSH_KEY="$(runpod_cycle_ssh_key)"
+  SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
+  SSH_READY_TIMEOUT_SECONDS="${RUNPOD_SSH_READY_TIMEOUT_SECONDS:-240}"
+  SSH_READY_POLL_SECONDS="${RUNPOD_SSH_READY_POLL_SECONDS:-8}"
+  SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
+  SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
+  SSH_READY_DEADLINE=$(( $(date +%s) + SSH_READY_TIMEOUT_SECONDS ))
+  while true; do
+    if ssh \
+      -i "${SSH_KEY}" \
+      -p "${SSH_PORT}" \
+      -o BatchMode=yes \
+      -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" \
+      -o IdentitiesOnly=yes \
+      -o AddKeysToAgent=no \
+      -o IdentityAgent=none \
+      -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" \
+      -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
+      "${SSH_USER}@${SSH_HOST}" "echo ready" >/dev/null 2>&1; then
+      break
+    fi
+    if (( $(date +%s) >= SSH_READY_DEADLINE )); then
+      echo "[runpod-cycle-start] ssh readiness timed out for ${SSH_USER}@${SSH_HOST}:${SSH_PORT}" >&2
+      if [[ "${RUNPOD_TERMINATE_ON_SSH_NOT_READY:-1}" == "1" ]]; then
+        echo "[runpod-cycle-start] terminating pod after ssh readiness timeout: ${POD_ID}" >&2
+        RUNPOD_CYCLE_RUN_ID="${RUN_ID}" RUNPOD_POD_ID="${POD_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_terminate.sh" >/dev/null 2>&1 || true
+      fi
+      exit 1
+    fi
+    sleep "${SSH_READY_POLL_SECONDS}"
+  done
+fi
 
 runpod_cycle_registry_record \
   "${REPO_ROOT}" \

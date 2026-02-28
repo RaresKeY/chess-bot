@@ -1100,6 +1100,43 @@ def _example_loss_weights(
     return winner_weights * phase_weights
 
 
+def _iter_sparsity_parameters(model: nn.Module, include_bias: bool = False):
+    base = _unwrap_model(model)
+    for name, param in base.named_parameters():
+        if not param.requires_grad:
+            continue
+        is_bias = name.endswith(".bias") or name == "bias"
+        if not include_bias and is_bias:
+            continue
+        if param.dim() < 2 and not is_bias:
+            # Skip scalar/1D tensors by default; these are typically embeddings norms/bias-like stats.
+            continue
+        yield name, param
+
+
+def _sparsity_l1_penalty(model: nn.Module, include_bias: bool = False) -> torch.Tensor:
+    total_abs = None
+    total_count = 0
+    for _, param in _iter_sparsity_parameters(model, include_bias=include_bias):
+        cur_abs = param.abs().sum()
+        total_abs = cur_abs if total_abs is None else (total_abs + cur_abs)
+        total_count += int(param.numel())
+    if total_abs is None or total_count <= 0:
+        return torch.tensor(0.0, device=next(_unwrap_model(model).parameters()).device)
+    return total_abs / float(total_count)
+
+
+def _compute_model_sparsity_stats(model: nn.Module, include_bias: bool = False) -> Dict[str, float]:
+    zero = 0
+    total = 0
+    with torch.no_grad():
+        for _, param in _iter_sparsity_parameters(model, include_bias=include_bias):
+            total += int(param.numel())
+            zero += int((param == 0).sum().item())
+    frac = (float(zero) / float(total)) if total > 0 else 0.0
+    return {"tracked_params": int(total), "zero_params": int(zero), "zero_fraction": float(frac)}
+
+
 def _metric_value(row: Dict, metric_name: str) -> float:
     if metric_name not in ("val_loss", "top1"):
         raise ValueError(f"Unsupported metric: {metric_name}")
@@ -1630,6 +1667,10 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     distributed_world_size: int = 1,
 ):
     is_primary = _is_primary_process(distributed_enabled=distributed_enabled, distributed_rank=distributed_rank)
+    sparsity_mode_norm = "off"
+    sparsity_l1_lambda_value = 0.0
+    sparsity_enabled = False
+    sparsity_include_bias = False
     random.seed(seed)
     torch.manual_seed(seed)
     train_paths = [os.fspath(p) for p in train_paths]
@@ -1889,6 +1930,12 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                         "world_size": int(distributed_world_size),
                         "rank": int(distributed_rank),
                     },
+                    "sparsity": {
+                        "mode": str(sparsity_mode_norm),
+                        "enabled": bool(sparsity_enabled),
+                        "l1_lambda": float(sparsity_l1_lambda_value),
+                        "include_bias": bool(sparsity_include_bias),
+                    },
                 }
             }
         )
@@ -1914,6 +1961,12 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                     "enabled": bool(distributed_enabled),
                     "world_size": int(distributed_world_size),
                     "rank": int(distributed_rank),
+                },
+                "sparsity": {
+                    "mode": str(sparsity_mode_norm),
+                    "enabled": bool(sparsity_enabled),
+                    "l1_lambda": float(sparsity_l1_lambda_value),
+                    "include_bias": bool(sparsity_include_bias),
                 },
             }
         )
@@ -2179,6 +2232,11 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     elif verbose and is_primary:
         print({"best_checkpoint_restored": best_checkpoint_info})
 
+    sparsity_stats = _compute_model_sparsity_stats(
+        train_model,
+        include_bias=bool(sparsity_include_bias),
+    )
+
     artifact = {
         "artifact_format_version": 2,
         "model_family": "next_move_lstm",
@@ -2333,8 +2391,18 @@ def train_next_move_model_from_jsonl_paths(
     distributed_enabled: bool = False,
     distributed_rank: int = 0,
     distributed_world_size: int = 1,
+    sparsity_mode: str = "off",
+    sparsity_l1_lambda: float = 0.0,
+    sparsity_include_bias: bool = False,
 ):
+    sparsity_mode_norm = str(sparsity_mode or "off").strip().lower()
+    if sparsity_mode_norm not in {"off", "l1"}:
+        raise ValueError(f"Unsupported sparsity_mode: {sparsity_mode}")
+    sparsity_l1_lambda_value = max(0.0, float(sparsity_l1_lambda))
+    sparsity_enabled = bool(sparsity_mode_norm != "off" and sparsity_l1_lambda_value > 0.0)
     if int(rollout_horizon) > 1:
+        if sparsity_enabled:
+            raise ValueError("sparsity_mode is currently supported only for rollout_horizon=1")
         return _train_next_move_model_from_jsonl_paths_multistep(
             train_paths=train_paths,
             val_paths=val_paths,
@@ -2769,6 +2837,12 @@ def train_next_move_model_from_jsonl_paths(
                     "endgame": float(phase_weight_vector[3].item()),
                 },
                 "training_objective": "single_step_next_move",
+                "sparsity": {
+                    "mode": str(sparsity_mode_norm),
+                    "enabled": bool(sparsity_enabled),
+                    "l1_lambda": float(sparsity_l1_lambda_value),
+                    "include_bias": bool(sparsity_include_bias),
+                },
             },
         }
 
@@ -2789,6 +2863,7 @@ def train_next_move_model_from_jsonl_paths(
             )
         train_model.train()
         running_loss = 0.0
+        running_l1_penalty = 0.0
         seen = 0
         total_batches = len(train_loader)
         for batch_idx, (tokens, lengths, labels, winners, phases, side_to_moves) in enumerate(train_loader, start=1):
@@ -2809,6 +2884,14 @@ def train_next_move_model_from_jsonl_paths(
                     phase_weight_vector=phase_weight_vector,
                 )
                 loss = (losses * weights).mean()
+                l1_penalty_value = 0.0
+                if sparsity_enabled:
+                    l1_penalty = _sparsity_l1_penalty(
+                        train_model,
+                        include_bias=bool(sparsity_include_bias),
+                    )
+                    l1_penalty_value = float(l1_penalty.detach().item())
+                    loss = loss + (sparsity_l1_lambda_value * l1_penalty)
 
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -2818,6 +2901,7 @@ def train_next_move_model_from_jsonl_paths(
             bs = labels.size(0)
             seen += bs
             running_loss += loss.item() * bs
+            running_l1_penalty += l1_penalty_value * bs
             if verbose and show_progress and is_primary:
                 _print_epoch_progress(epoch, epochs, batch_idx, total_batches, running_loss, seen)
         if verbose and show_progress and total_batches > 0 and is_primary:
@@ -2837,6 +2921,7 @@ def train_next_move_model_from_jsonl_paths(
         row = {
             "epoch": epoch,
             "train_loss": train_loss,
+            "train_l1_penalty": (running_l1_penalty / max(seen, 1)),
             "device": str(device),
             "amp": use_amp,
             "lr": float(optimizer.param_groups[0]["lr"]),
@@ -2851,6 +2936,7 @@ def train_next_move_model_from_jsonl_paths(
                     "epochs": int(epochs),
                     "metrics": {
                         "train_loss": float(train_loss),
+                        "train_l1_penalty": float(row.get("train_l1_penalty", 0.0)),
                         "val_loss": float(row.get("val_loss", 0.0)),
                         "top1": float(row.get("top1", 0.0)),
                         "top5": float(row.get("top5", 0.0)),
@@ -2863,6 +2949,7 @@ def train_next_move_model_from_jsonl_paths(
                 {
                     "epoch": epoch,
                     "train_loss": round(float(train_loss), 6),
+                    "train_l1_penalty": round(float(row.get("train_l1_penalty", 0.0)), 6),
                     "val_loss": round(float(row.get("val_loss", 0.0)), 6),
                     "top1": round(float(row.get("top1", 0.0)), 6),
                     "top5": round(float(row.get("top5", 0.0)), 6),
@@ -3000,6 +3087,11 @@ def train_next_move_model_from_jsonl_paths(
     elif verbose and is_primary:
         print({"best_checkpoint_restored": best_checkpoint_info})
 
+    sparsity_stats = _compute_model_sparsity_stats(
+        train_model,
+        include_bias=bool(sparsity_include_bias),
+    )
+
     artifact = {
         "artifact_format_version": 2,
         "model_family": "next_move_lstm",
@@ -3044,6 +3136,13 @@ def train_next_move_model_from_jsonl_paths(
                 "world_size": int(distributed_world_size),
                 "rank": int(distributed_rank),
             },
+            "sparsity": {
+                "mode": str(sparsity_mode_norm),
+                "enabled": bool(sparsity_enabled),
+                "l1_lambda": float(sparsity_l1_lambda_value),
+                "include_bias": bool(sparsity_include_bias),
+                **sparsity_stats,
+            },
         },
     }
 
@@ -3070,6 +3169,13 @@ def train_next_move_model_from_jsonl_paths(
             "max_val_rows": int(max_val_rows),
             "train_subset_applied": bool(train_subset_applied),
             "val_subset_applied": bool(val_subset_applied),
+        },
+        "sparsity": {
+            "mode": str(sparsity_mode_norm),
+            "enabled": bool(sparsity_enabled),
+            "l1_lambda": float(sparsity_l1_lambda_value),
+            "include_bias": bool(sparsity_include_bias),
+            **sparsity_stats,
         },
     }
     if schema_kind == "game":

@@ -128,6 +128,8 @@ OUT
             "scripts/runpod_cycle_collect.sh",
             "scripts/runpod_cycle_local_validate.sh",
             "scripts/runpod_cycle_stop.sh",
+            "scripts/runpod_cycle_benchmark_matrix.sh",
+            "scripts/runpod_cycle_benchmark_10k_sixpack.sh",
             "scripts/runpod_file_transfer.sh",
             "scripts/runpod_cycle_full_smoke.sh",
             "scripts/runpod_full_train_easy.sh",
@@ -273,12 +275,26 @@ OUT
         text = Path("scripts/runpod_cycle_benchmark_matrix.sh").read_text(encoding="utf-8")
         self.assertIn("RUNPOD_BENCH_TRIALS", text)
         self.assertIn("fp32,tf32,fp16,bf16,sparsity", text)
+        self.assertIn("fp32_sparse", text)
+        self.assertIn("fp16_sparse", text)
+        self.assertIn("bf16_sparse", text)
         self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA A40", text)
         self.assertIn("RUNPOD_GPU_COUNT:-2", text)
         self.assertIn("TRAIN_NPROC_PER_NODE", text)
         self.assertIn("--amp-dtype bf16", text)
         self.assertIn("--no-amp --tf32 off", text)
         self.assertIn("runpod_cycle_collect.sh", text)
+        self.assertIn("RUNPOD_BENCH_TERMINATE_POD", text)
+        self.assertIn("runpod_cycle_terminate.sh", text)
+
+    def test_benchmark_10k_sixpack_wrapper_defaults(self):
+        text = Path("scripts/runpod_cycle_benchmark_10k_sixpack.sh").read_text(encoding="utf-8")
+        self.assertIn("RUNPOD_BENCH_EPOCHS", text)
+        self.assertIn("RUNPOD_BENCH_MAX_TOTAL_ROWS", text)
+        self.assertIn("fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse", text)
+        self.assertIn("RUNPOD_BENCH_TERMINATE_POD", text)
+        self.assertIn("scripts/runpod_cycle_benchmark_matrix.sh", text)
+        self.assertIn("scripts/telemetry_status.sh", text)
 
     def test_file_transfer_script_has_retries_and_rsync_hardening(self):
         text = Path("scripts/runpod_file_transfer.sh").read_text(encoding="utf-8")
@@ -313,6 +329,11 @@ OUT
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
         text = Path("scripts/runpod_cycle_start.sh").read_text(encoding="utf-8")
         self.assertIn('RUNPOD_INJECT_MANAGED_SSH_KEY_ENV', text)
+        self.assertIn('START_OTEL_COLLECTOR=0', text)
+        self.assertIn('RUNPOD_REQUIRE_SSH_READY', text)
+        self.assertIn('RUNPOD_SSH_READY_TIMEOUT_SECONDS', text)
+        self.assertIn('RUNPOD_TERMINATE_ON_SSH_NOT_READY', text)
+        self.assertIn('ssh readiness timed out', text)
         self.assertNotIn('RUNPOD_INJECT_LOCAL_SSH_KEY_ENV', text)
 
     def test_cycle_scripts_use_config_known_hosts_and_safer_default_host_key_checking(self):

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runpod_cycle_common.sh"
+
+REPO_ROOT="$(runpod_cycle_repo_root)"
+RUN_ID="${RUNPOD_CYCLE_RUN_ID:-runpod-bench-10k6-$(date -u +%Y%m%dT%H%M%SZ)}"
+export RUNPOD_CYCLE_RUN_ID="${RUN_ID}"
+
+export RUNPOD_BENCH_EPOCHS="${RUNPOD_BENCH_EPOCHS:-5}"
+export RUNPOD_BENCH_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-10000}"
+export RUNPOD_BENCH_TRIALS="${RUNPOD_BENCH_TRIALS:-fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse}"
+export RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-0}"
+export RUNPOD_BENCH_STOP_POD="${RUNPOD_BENCH_STOP_POD:-0}"
+export RUNPOD_BENCH_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-1}"
+export RUNPOD_GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA A40}"
+export RUNPOD_GPU_COUNT="${RUNPOD_GPU_COUNT:-2}"
+export RUNPOD_FULL_TRAIN_NPROC_PER_NODE="${RUNPOD_FULL_TRAIN_NPROC_PER_NODE:-${RUNPOD_GPU_COUNT}}"
+
+echo "[runpod-bench-10k6] run_id=${RUN_ID}"
+echo "[runpod-bench-10k6] gpu_type_id=${RUNPOD_GPU_TYPE_ID} gpu_count=${RUNPOD_GPU_COUNT} nproc=${RUNPOD_FULL_TRAIN_NPROC_PER_NODE}"
+echo "[runpod-bench-10k6] trials=${RUNPOD_BENCH_TRIALS}"
+echo "[runpod-bench-10k6] epochs=${RUNPOD_BENCH_EPOCHS} max_total_rows=${RUNPOD_BENCH_MAX_TOTAL_ROWS} terminate_pod=${RUNPOD_BENCH_TERMINATE_POD}"
+
+bash "${REPO_ROOT}/scripts/runpod_cycle_benchmark_matrix.sh"
+
+SUMMARY_MD="${REPO_ROOT}/artifacts/runpod_cycles/${RUN_ID}/benchmarks/trial_summary.md"
+SUMMARY_JSONL="${REPO_ROOT}/artifacts/runpod_cycles/${RUN_ID}/benchmarks/trial_summary.jsonl"
+TELEMETRY_STATUS="${REPO_ROOT}/artifacts/runpod_cycles/${RUN_ID}/reports/telemetry_status_end.json"
+mkdir -p "$(dirname "${TELEMETRY_STATUS}")"
+RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_status.sh" --json > "${TELEMETRY_STATUS}" || true
+
+echo "[runpod-bench-10k6] summary_md=${SUMMARY_MD}"
+echo "[runpod-bench-10k6] summary_jsonl=${SUMMARY_JSONL}"
+echo "[runpod-bench-10k6] telemetry_status=${TELEMETRY_STATUS}"

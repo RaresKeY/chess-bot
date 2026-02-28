@@ -45,8 +45,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Entrypoint now explicitly unlocks the `runner` account (while keeping password auth disabled) so Ubuntu/Debian `sshd` accepts public-key auth for direct mapped SSH
 - Direct mapped SSH is intended for the `runner` user; `entrypoint.sh` configures `PermitRootLogin no` and `AllowUsers runner`, so `root@<public-ip>:<mapped-port>` public-key login is expected to fail
 - Entrypoint uses `wait -n` to supervise services; if any enabled child process exits, cleanup can stop the remaining services (including `sshd`)
-
 ## Repo Bootstrap Behavior
+- Cloud-run preflight requirement: push the intended local code changes to the GitHub repo/branch before starting cloud provisioning or training flows, so remote clone/pull uses the latest committed code.
 - Repo clone/pull at startup is supported and enabled by environment defaults (`CLONE_REPO_ON_START=1`, `GIT_AUTO_PULL=1`)
 - Public GitHub repo flow only (no private clone token bootstrap logic)
 - Startup requirement sync compares repo `requirements.txt` hash against a venv stamp and runs `pip install -r` when changed (or forced)

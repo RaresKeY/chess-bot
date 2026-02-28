@@ -49,6 +49,9 @@ Define the Vast.ai host-side provisioning and lifecycle workflow added as a para
 - `vast_cycle_status.sh`
 : dumps current instance list to `artifacts/vast_cycles/<run_id>/status_response.json`.
 
+## Cloud-Run Preflight
+- Before running Vast cloud provisioning/training lifecycle scripts, push the intended local code changes to the GitHub repo/branch so remote clone/pull uses the latest committed code.
+
 ## Token Resolution
 Vast scripts resolve API key in this order:
 1. explicit `--api-key`

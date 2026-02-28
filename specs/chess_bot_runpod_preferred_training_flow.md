@@ -63,18 +63,23 @@ The flow runs `train_baseline.py` via preset (or direct fallback when needed) wi
 - progress output enabled (machine-readable JSONL progress stream enabled for watcher)
 
 ## Start-To-Finish Operator Steps
-1. Validate host tooling and RunPod auth:
+1. Push code changes first:
+```bash
+git push
+```
+
+2. Validate host tooling and RunPod auth:
 ```bash
 bash scripts/runpod_cli_doctor.sh
 ```
 
-2. Optional cleanup of stale locally tracked pods:
+3. Optional cleanup of stale locally tracked pods:
 ```bash
 RUNPOD_CONFIRM_TERMINATE_ALL=YES \
 bash scripts/runpod_cycle_terminate_all_tracked.sh --yes
 ```
 
-3. Launch preferred full training flow:
+4. Launch preferred full training flow:
 ```bash
 export RUNPOD_HF_DATASET_REPO_ID="LogicLark-QuantumQuill/chess-bot-datasets"
 export RUNPOD_HF_DATASET_PATH_PREFIX="validated_datasets"
@@ -93,7 +98,7 @@ unset RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE
 bash scripts/runpod_full_train_easy.sh
 ```
 
-4. Follow progress:
+5. Follow progress:
 - Full flow already launches watcher and tracks remote `train_exit_code.txt`.
 - For the concise operator summary format used in status updates, use:
 ```bash
@@ -107,7 +112,7 @@ bash scripts/telemetry_control.sh status --json
 - Per-run logs/artifacts are stored under:
   - `artifacts/runpod_cycles/<run_id>/`
 
-5. Validate result artifacts locally:
+6. Validate result artifacts locally:
 - Collected artifacts path:
   - `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/`
 - Quick play command file:

@@ -67,6 +67,10 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--amp/--no-amp` (CUDA mixed precision via `torch.amp`)
   - `--amp-dtype {auto,fp16,bf16}` (autocast dtype selection when AMP is enabled)
   - `--tf32 {auto,on,off}` (controls `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` before train startup)
+  - sparsity regularization controls:
+    - `--sparsity-mode {off,l1}` (`l1` enables L1 regularization on trainable weights)
+    - `--sparsity-l1-lambda` (L1 multiplier; `0` disables even when mode is set)
+    - `--sparsity-include-bias/--no-sparsity-include-bias` (include bias terms in sparsity tracking/penalty)
 - Model/training controls:
   - `--rollout-horizon` (future plies predicted during training objective; `1` preserves baseline behavior)
   - `--closeness-horizon` (validation continuation-closeness horizon; clamped to rollout horizon)
@@ -131,6 +135,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - when multistep mode is enabled (`rollout_horizon > 1`), epoch history additionally includes rollout metrics such as `rollout_step{n}_acc`, `rollout_prefix_match_len_avg`, `rollout_legal_rate`, and `rollout_weighted_continuation_score`
 - model path
 - runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)
+- sparsity request/runtime fields (`sparsity_mode`, `sparsity_l1_lambda`, `sparsity_include_bias`, `sparsity_runtime`)
 - requested `phase_weights`
 - feature-toggle and embedding-dim settings for phase/side-to-move head inputs
 - LR scheduler request fields and runtime scheduler summary (including final LR)

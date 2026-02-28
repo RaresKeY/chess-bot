@@ -491,6 +491,24 @@ def main() -> None:
         help="Toggle CUDA TF32 matmul/cuDNN math mode (auto keeps runtime defaults)",
     )
     parser.add_argument(
+        "--sparsity-mode",
+        choices=["off", "l1"],
+        default="off",
+        help="Optional sparsity regularization mode (l1 adds L1 penalty during training).",
+    )
+    parser.add_argument(
+        "--sparsity-l1-lambda",
+        type=float,
+        default=0.0,
+        help="L1 penalty multiplier when --sparsity-mode=l1 (0 disables).",
+    )
+    parser.add_argument(
+        "--sparsity-include-bias",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Include bias terms in sparsity/L1 tracking.",
+    )
+    parser.add_argument(
         "--restore-best",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -651,6 +669,9 @@ def main() -> None:
                 "runtime_min_target": int(args.runtime_min_target),
                 "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),
                 "require_runtime_splice_cache": bool(args.require_runtime_splice_cache),
+                "sparsity_mode": str(args.sparsity_mode),
+                "sparsity_l1_lambda": float(args.sparsity_l1_lambda),
+                "sparsity_include_bias": bool(args.sparsity_include_bias),
             },
         }
     )
@@ -727,6 +748,9 @@ def main() -> None:
                     "runtime_min_target": args.runtime_min_target,
                     "runtime_max_samples_per_game": args.runtime_max_samples_per_game,
                     "require_runtime_splice_cache": args.require_runtime_splice_cache,
+                    "sparsity_mode": args.sparsity_mode,
+                    "sparsity_l1_lambda": args.sparsity_l1_lambda,
+                    "sparsity_include_bias": args.sparsity_include_bias,
                     "restore_best": args.restore_best,
                     "lr_scheduler": args.lr_scheduler,
                     "lr_scheduler_metric": args.lr_scheduler_metric,
@@ -844,6 +868,9 @@ def main() -> None:
             distributed_enabled=distributed_enabled,
             distributed_rank=distributed_rank,
             distributed_world_size=distributed_world_size,
+            sparsity_mode=args.sparsity_mode,
+            sparsity_l1_lambda=args.sparsity_l1_lambda,
+            sparsity_include_bias=args.sparsity_include_bias,
         )
     except Exception as exc:
         emit_progress({"event": "script_error", "error_type": type(exc).__name__, "message": str(exc)})
@@ -956,6 +983,10 @@ def main() -> None:
         "amp": args.amp,
         "amp_dtype": args.amp_dtype,
         "tf32": tf32_state,
+        "sparsity_mode": args.sparsity_mode,
+        "sparsity_l1_lambda": args.sparsity_l1_lambda,
+        "sparsity_include_bias": args.sparsity_include_bias,
+        "sparsity_runtime": artifact.get("runtime", {}).get("sparsity"),
         "rollout_horizon": args.rollout_horizon,
         "closeness_horizon": args.closeness_horizon,
         "rollout_loss_decay": args.rollout_loss_decay,
@@ -1002,6 +1033,7 @@ def main() -> None:
                 "runtime_splice": dataset_info.get("runtime_splice"),
                 "runtime_splice_index_bytes_train": dataset_info.get("runtime_splice_index_bytes_train"),
                 "runtime_splice_index_bytes_val": dataset_info.get("runtime_splice_index_bytes_val"),
+                "sparsity": dataset_info.get("sparsity"),
             },
             "model_final": {
                 "param_count": int(param_count),
