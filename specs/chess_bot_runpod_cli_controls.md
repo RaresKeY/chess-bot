@@ -295,6 +295,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - resolves an aggressive per-rank batch target from remote GPU VRAM (`8192/2048/1024/512` tiers; >=44 GB now starts at `8192` and relies on OOM downshift)
     - builds a descending retry plan and reruns the same trial at lower batches when OOM signatures are detected in train logs
     - explicit numeric `RUNPOD_BENCH_BATCH_SIZE` remains a hard override (no auto downgrade plan)
+  - NCCL stall guard + safer fallback:
+    - if a trial is still pre-epoch (no `train_setup`/`train_loop_start`/`epoch_start`/`batch_progress`) for `RUNPOD_BENCH_NCCL_STALL_TIMEOUT_SECONDS` (default `120`), the run is terminated as stalled
+    - with `RUNPOD_BENCH_NCCL_SAFE_FALLBACK_ENABLED=1` (default), the same trial retries once with safer NCCL env overrides (`NCCL_IB_DISABLE=1`, `NCCL_P2P_DISABLE=1`, `NCCL_P2P_LEVEL=LOC`, `TORCH_NCCL_BLOCKING_WAIT=1`, `TORCH_NCCL_ASYNC_ERROR_HANDLING=1`)
+    - stall poll interval is controlled by `RUNPOD_BENCH_NCCL_STALL_POLL_SECONDS` (default `5`)
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
   - benchmark trial artifact pull defaults to a fast filtered copy (metrics/progress/logs/models/telemetry), excluding `epoch_checkpoints/**` unless explicitly enabled with `RUNPOD_BENCH_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS=1`
   - transfer controls:

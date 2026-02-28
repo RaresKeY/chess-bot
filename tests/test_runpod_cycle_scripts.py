@@ -325,6 +325,9 @@ OUT
         self.assertIn("RUNPOD_BENCH_TRANSFER_TIMEOUT_SECONDS", text)
         self.assertIn("RUNPOD_BENCH_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS", text)
         self.assertIn("RUNPOD_BENCH_SKIP_FINAL_COLLECT", text)
+        self.assertIn("RUNPOD_BENCH_NCCL_SAFE_FALLBACK_ENABLED", text)
+        self.assertIn("RUNPOD_BENCH_NCCL_STALL_TIMEOUT_SECONDS", text)
+        self.assertIn("RUNPOD_BENCH_NCCL_STALL_POLL_SECONDS", text)
         self.assertIn("rclone copy", text)
         self.assertIn(":sftp,host=${SSH_HOST}", text)
         self.assertIn("rclone_missing_fallback_rsync", text)
@@ -336,6 +339,10 @@ OUT
         self.assertIn("dependency_check.json", text)
         self.assertIn("benchmark_dependencies", text)
         self.assertIn("requirements.txt", text)
+        self.assertIn("stall_detected_pre_epoch", text)
+        self.assertIn("retrying trial with safer NCCL env overrides", text)
+        self.assertIn("NCCL_IB_DISABLE=1", text)
+        self.assertIn("NCCL_P2P_DISABLE=1", text)
 
     def test_benchmark_10k_sixpack_wrapper_defaults(self):
         text = Path("scripts/runpod_cycle_benchmark_10k_sixpack.sh").read_text(encoding="utf-8")

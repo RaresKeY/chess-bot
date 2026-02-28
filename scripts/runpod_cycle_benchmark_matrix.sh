@@ -75,6 +75,9 @@ FLOW_RCLONE_CHECKERS="${RUNPOD_BENCH_RCLONE_CHECKERS:-16}"
 FLOW_RCLONE_MULTI_THREAD_STREAMS="${RUNPOD_BENCH_RCLONE_MULTI_THREAD_STREAMS:-4}"
 FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_BENCH_COLLECT_INCLUDE_EPOCH_CHECKPOINTS:-0}"
 FLOW_SKIP_FINAL_COLLECT="${RUNPOD_BENCH_SKIP_FINAL_COLLECT:-0}"
+FLOW_NCCL_SAFE_FALLBACK_ENABLED="${RUNPOD_BENCH_NCCL_SAFE_FALLBACK_ENABLED:-1}"
+FLOW_NCCL_STALL_TIMEOUT_SECONDS="${RUNPOD_BENCH_NCCL_STALL_TIMEOUT_SECONDS:-120}"
+FLOW_NCCL_STALL_POLL_SECONDS="${RUNPOD_BENCH_NCCL_STALL_POLL_SECONDS:-5}"
 FLOW_EXPECTED_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
 FLOW_BATCH_SIZE_OVERRIDE=""
@@ -174,6 +177,9 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - transfer_include_epoch_checkpoints: \`${FLOW_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS}\`
 - final_collect_include_epoch_checkpoints: \`${FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS}\`
 - skip_final_collect: \`${FLOW_SKIP_FINAL_COLLECT}\`
+- nccl_safe_fallback_enabled: \`${FLOW_NCCL_SAFE_FALLBACK_ENABLED}\`
+- nccl_stall_timeout_seconds: \`${FLOW_NCCL_STALL_TIMEOUT_SECONDS}\`
+- nccl_stall_poll_seconds: \`${FLOW_NCCL_STALL_POLL_SECONDS}\`
 - sparsity_l1_lambda_default: \`${FLOW_SPARSITY_L1_LAMBDA}\`
 - sparsity_l1_lambdas: \`${FLOW_SPARSITY_L1_LAMBDAS_RAW:-<default-only>}\`
 - image_used: \`${IMAGE_USED:-<unknown>}\`
@@ -566,7 +572,7 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
       trial_batch_used="${batch_try}"
       telemetry_event "benchmark_trial_batch_attempt" "info" "starting trial batch attempt" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"batch_size\":${batch_try}}"
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE_TRY='${batch_try}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
+      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE_TRY='${batch_try}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_DISTRIBUTED_BACKEND='${FLOW_DISTRIBUTED_BACKEND}' FLOW_NCCL_SAFE_FALLBACK_ENABLED='${FLOW_NCCL_SAFE_FALLBACK_ENABLED}' FLOW_NCCL_STALL_TIMEOUT_SECONDS='${FLOW_NCCL_STALL_TIMEOUT_SECONDS}' FLOW_NCCL_STALL_POLL_SECONDS='${FLOW_NCCL_STALL_POLL_SECONDS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
 set -Eeuo pipefail
 mkdir -p "${REMOTE_TRIAL_DIR}"
 cd "${REMOTE_REPO_DIR}"
@@ -597,8 +603,78 @@ export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"
 export TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS} --max-total-rows ${FLOW_MAX_TOTAL_ROWS} --telemetry-dir ${REMOTE_TRIAL_DIR}/telemetry"
 
 log_path="${REMOTE_TRIAL_DIR}/train_stdout_${TRIAL}.log"
-rc=0
-bash "${REMOTE_REPO_DIR}/deploy/runpod_cloud_training/train_baseline_preset.sh" >"${log_path}" 2>&1 || rc=$?
+progress_path="${REMOTE_TRIAL_DIR}/progress_${TRIAL}.jsonl"
+stall_timeout="${FLOW_NCCL_STALL_TIMEOUT_SECONDS:-120}"
+stall_poll="${FLOW_NCCL_STALL_POLL_SECONDS:-5}"
+if ! [[ "${stall_timeout}" =~ ^[0-9]+$ ]] || (( stall_timeout < 1 )); then
+  stall_timeout=120
+fi
+if ! [[ "${stall_poll}" =~ ^[0-9]+$ ]] || (( stall_poll < 1 )); then
+  stall_poll=5
+fi
+
+nccl_modes=("normal")
+if [[ "${FLOW_DISTRIBUTED_BACKEND}" == "nccl" && "${FLOW_NCCL_SAFE_FALLBACK_ENABLED}" == "1" ]]; then
+  nccl_modes+=("safe")
+fi
+
+rc=99
+> "${log_path}"
+for nccl_mode in "${nccl_modes[@]}"; do
+  mode_log="${REMOTE_TRIAL_DIR}/train_stdout_${TRIAL}.${nccl_mode}.log"
+  rm -f "${mode_log}"
+  if [[ "${nccl_mode}" == "safe" ]]; then
+    export NCCL_IB_DISABLE=1
+    export NCCL_P2P_DISABLE=1
+    export NCCL_P2P_LEVEL=LOC
+    export TORCH_NCCL_BLOCKING_WAIT=1
+    export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+  else
+    unset NCCL_IB_DISABLE NCCL_P2P_DISABLE NCCL_P2P_LEVEL TORCH_NCCL_BLOCKING_WAIT TORCH_NCCL_ASYNC_ERROR_HANDLING || true
+  fi
+  printf '[runpod-bench-matrix] nccl_mode=%s stall_timeout=%s stall_poll=%s\n' "${nccl_mode}" "${stall_timeout}" "${stall_poll}" | tee -a "${mode_log}" >> "${log_path}"
+  bash "${REMOTE_REPO_DIR}/deploy/runpod_cloud_training/train_baseline_preset.sh" >>"${mode_log}" 2>&1 &
+  train_pid=$!
+  started_epoch="$(date +%s)"
+  progress_seen=0
+  while kill -0 "${train_pid}" >/dev/null 2>&1; do
+    if [[ -f "${progress_path}" ]] && grep -Eq '"event": "(train_setup|train_loop_start|epoch_start|batch_progress|epoch_end)"' "${progress_path}"; then
+      progress_seen=1
+      break
+    fi
+    now_epoch="$(date +%s)"
+    if (( now_epoch - started_epoch >= stall_timeout )); then
+      printf '[runpod-bench-matrix] stall_detected_pre_epoch mode=%s timeout=%s; terminating pid=%s\n' "${nccl_mode}" "${stall_timeout}" "${train_pid}" | tee -a "${mode_log}" >> "${log_path}"
+      kill -TERM "${train_pid}" >/dev/null 2>&1 || true
+      sleep 3
+      kill -KILL "${train_pid}" >/dev/null 2>&1 || true
+      break
+    fi
+    sleep "${stall_poll}"
+  done
+  wait "${train_pid}" >/dev/null 2>&1 || rc=$?
+  if [[ "${progress_seen}" == "1" && "${rc}" == "99" ]]; then
+    rc=0
+  fi
+  cat "${mode_log}" >> "${log_path}"
+  if [[ "${rc}" == "0" ]]; then
+    break
+  fi
+  if [[ "${nccl_mode}" == "normal" && "${rc}" == "143" ]] && [[ "${FLOW_DISTRIBUTED_BACKEND}" == "nccl" && "${FLOW_NCCL_SAFE_FALLBACK_ENABLED}" == "1" ]]; then
+    printf '[runpod-bench-matrix] retrying trial with safer NCCL env overrides\n' | tee -a "${log_path}"
+    rc=99
+    continue
+  fi
+  if [[ "${nccl_mode}" == "normal" && "${rc}" == "137" ]] && [[ "${FLOW_DISTRIBUTED_BACKEND}" == "nccl" && "${FLOW_NCCL_SAFE_FALLBACK_ENABLED}" == "1" ]]; then
+    printf '[runpod-bench-matrix] retrying trial with safer NCCL env overrides (killed)\n' | tee -a "${log_path}"
+    rc=99
+    continue
+  fi
+  break
+done
+if [[ "${rc}" == "99" ]]; then
+  rc=124
+fi
 printf '%s\n' "${rc}" > "${REMOTE_TRIAL_DIR}/train_exit_code.txt"
 exit 0
 EOF_REMOTE
