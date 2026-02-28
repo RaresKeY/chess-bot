@@ -498,6 +498,13 @@ OUT
         self.assertIn('TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-1}"', text)
         self.assertIn('cmd=( "${VENV_DIR}/bin/torchrun" --standalone --nnodes=1 --nproc-per-node "${TRAIN_NPROC_PER_NODE}" "${train_args[@]}" )', text)
 
+    def test_entrypoint_workspace_chown_is_best_effort(self):
+        text = Path("deploy/runpod_cloud_training/entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn('RUNPOD_CHOWN_WORKSPACE_ON_START="${RUNPOD_CHOWN_WORKSPACE_ON_START:-1}"', text)
+        self.assertIn('if ! chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace; then', text)
+        self.assertIn("continuing; likely restricted volume permissions", text)
+        self.assertIn('Skipping /workspace chown on start', text)
+
     def test_cycle_train_prefers_repo_train_preset_over_image_copy(self):
         text = Path("scripts/runpod_cycle_train.sh").read_text(encoding="utf-8")
         self.assertIn("TRAIN_PRESET_REPO", text)

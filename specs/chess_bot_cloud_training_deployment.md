@@ -44,6 +44,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Host-side SSH invocations now force `AddKeysToAgent=no` and `IdentityAgent=none` to prevent desktop keyring/gpg-agent import passphrase prompts for managed temp keys
 - Managed key env injection toggle is `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
 - Entrypoint now explicitly unlocks the `runner` account (while keeping password auth disabled) so Ubuntu/Debian `sshd` accepts public-key auth for direct mapped SSH
+- Entrypoint `/workspace` ownership normalization is now best-effort (non-fatal) to tolerate provider-managed mounts that deny `chown`; optional toggle `RUNPOD_CHOWN_WORKSPACE_ON_START=0` skips the workspace ownership pass entirely
 - Direct mapped SSH is intended for the `runner` user; `entrypoint.sh` configures `PermitRootLogin no` and `AllowUsers runner`, so `root@<public-ip>:<mapped-port>` public-key login is expected to fail
 - Entrypoint uses `wait -n` to supervise services; if any enabled child process exits, cleanup can stop the remaining services (including `sshd`)
 ## Repo Bootstrap Behavior

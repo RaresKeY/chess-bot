@@ -17,6 +17,7 @@ START_INFERENCE_API="${START_INFERENCE_API:-1}"
 START_HF_WATCH="${START_HF_WATCH:-0}"
 START_IDLE_WATCHDOG="${START_IDLE_WATCHDOG:-0}"
 START_OTEL_COLLECTOR="${START_OTEL_COLLECTOR:-1}"
+RUNPOD_CHOWN_WORKSPACE_ON_START="${RUNPOD_CHOWN_WORKSPACE_ON_START:-1}"
 JUPYTER_PORT="${JUPYTER_PORT:-8888}"
 JUPYTER_TOKEN="${JUPYTER_TOKEN:-}"
 INFERENCE_API_HOST="${INFERENCE_API_HOST:-0.0.0.0}"
@@ -271,7 +272,16 @@ trap 'healthchecks_ping fail "runpod entrypoint error"' ERR
 healthchecks_ping start "runpod entrypoint boot"
 
 mkdir -p /workspace
-chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace "${RUNNER_HOME}"
+if [[ "${RUNPOD_CHOWN_WORKSPACE_ON_START}" == "1" ]]; then
+  if ! chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace; then
+    log "Warning: failed to chown /workspace (continuing; likely restricted volume permissions)"
+  fi
+else
+  log "Skipping /workspace chown on start (RUNPOD_CHOWN_WORKSPACE_ON_START=${RUNPOD_CHOWN_WORKSPACE_ON_START})"
+fi
+if ! chown -R "${RUNNER_USER}:${RUNNER_USER}" "${RUNNER_HOME}"; then
+  log "Warning: failed to chown ${RUNNER_HOME} (continuing)"
+fi
 
 run_timed_phase "ensure_ssh_keys" ensure_ssh_keys
 run_timed_phase "ensure_runner_ssh_account" ensure_runner_ssh_account
