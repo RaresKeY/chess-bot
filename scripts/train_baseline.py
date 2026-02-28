@@ -126,6 +126,27 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _configure_tf32(mode: str) -> Dict[str, Any]:
+    requested = str(mode or "auto").strip().lower()
+    if requested not in {"auto", "on", "off"}:
+        raise ValueError(f"Unsupported tf32 mode: {mode}")
+    matmul_before = bool(getattr(torch.backends.cuda.matmul, "allow_tf32", False))
+    cudnn_before = bool(getattr(torch.backends.cudnn, "allow_tf32", False))
+    if requested == "on":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    elif requested == "off":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    return {
+        "requested": requested,
+        "matmul_allow_tf32_before": matmul_before,
+        "cudnn_allow_tf32_before": cudnn_before,
+        "matmul_allow_tf32_after": bool(getattr(torch.backends.cuda.matmul, "allow_tf32", False)),
+        "cudnn_allow_tf32_after": bool(getattr(torch.backends.cudnn, "allow_tf32", False)),
+    }
+
+
 def _resolve_distributed_context(mode: str) -> Dict[str, int | bool]:
     normalized = str(mode or "auto").strip().lower()
     if normalized not in {"auto", "off", "on"}:
@@ -458,6 +479,18 @@ def main() -> None:
         help="Enable CUDA mixed precision when training on GPU",
     )
     parser.add_argument(
+        "--amp-dtype",
+        choices=["auto", "fp16", "bf16"],
+        default="auto",
+        help="CUDA autocast dtype when AMP is enabled (auto keeps PyTorch default)",
+    )
+    parser.add_argument(
+        "--tf32",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Toggle CUDA TF32 matmul/cuDNN math mode (auto keeps runtime defaults)",
+    )
+    parser.add_argument(
         "--restore-best",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -529,6 +562,7 @@ def main() -> None:
         help="Base directory for per-run telemetry logs (gitignored local folder)",
     )
     args = parser.parse_args()
+    tf32_state = _configure_tf32(args.tf32)
     dist_ctx = _resolve_distributed_context(args.distributed)
     distributed_enabled = bool(dist_ctx["enabled"])
     distributed_rank = int(dist_ctx["rank"])
@@ -684,6 +718,8 @@ def main() -> None:
                     "num_workers": args.num_workers,
                     "pin_memory_requested": args.pin_memory,
                     "amp_requested": args.amp,
+                    "amp_dtype": str(args.amp_dtype),
+                    "tf32": tf32_state,
                     "rollout_horizon": args.rollout_horizon,
                     "closeness_horizon": args.closeness_horizon,
                     "rollout_loss_decay": args.rollout_loss_decay,
@@ -729,6 +765,8 @@ def main() -> None:
             "batch_size": int(args.batch_size),
             "num_workers": int(args.num_workers),
             "amp_requested": bool(args.amp),
+            "amp_dtype": str(args.amp_dtype),
+            "tf32": tf32_state,
             "rollout_horizon": int(args.rollout_horizon),
             "closeness_horizon": int(args.closeness_horizon),
             "rollout_loss_decay": float(args.rollout_loss_decay),
@@ -777,6 +815,7 @@ def main() -> None:
             num_workers=args.num_workers,
             pin_memory=args.pin_memory,
             amp=args.amp,
+            amp_dtype=args.amp_dtype,
             restore_best=args.restore_best,
             lr_scheduler=args.lr_scheduler,
             lr_scheduler_metric=args.lr_scheduler_metric,
@@ -915,6 +954,8 @@ def main() -> None:
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory,
         "amp": args.amp,
+        "amp_dtype": args.amp_dtype,
+        "tf32": tf32_state,
         "rollout_horizon": args.rollout_horizon,
         "closeness_horizon": args.closeness_horizon,
         "rollout_loss_decay": args.rollout_loss_decay,

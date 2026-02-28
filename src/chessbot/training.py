@@ -1179,6 +1179,22 @@ def _print_epoch_progress(epoch: int, epochs: int, batch_idx: int, total_batches
     sys.stdout.flush()
 
 
+def _resolve_amp_autocast_dtype(amp_dtype: str, *, use_amp: bool, device: torch.device) -> Optional[torch.dtype]:
+    if not use_amp or device.type != "cuda":
+        return None
+    mode = str(amp_dtype or "auto").strip().lower()
+    if mode in {"", "auto"}:
+        return None
+    if mode == "fp16":
+        return torch.float16
+    if mode == "bf16":
+        supports_bf16 = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+        if not supports_bf16:
+            raise RuntimeError("amp_dtype=bf16 requested but CUDA bf16 is not supported on this runtime")
+        return torch.bfloat16
+    raise ValueError(f"Unsupported amp_dtype: {amp_dtype}")
+
+
 def train_next_move_model(
     train_rows: List[Dict],
     val_rows: List[Dict],
@@ -1197,6 +1213,7 @@ def train_next_move_model(
     num_workers: int = 0,
     pin_memory: bool = True,
     amp: bool = False,
+    amp_dtype: str = "auto",
     restore_best: bool = True,
     use_phase_feature: bool = True,
     phase_embed_dim: int = 8,
@@ -1282,6 +1299,7 @@ def train_next_move_model(
         )
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
+    amp_autocast_dtype = _resolve_amp_autocast_dtype(amp_dtype, use_amp=use_amp, device=device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
     best_state_dict = None
@@ -1369,7 +1387,7 @@ def train_next_move_model(
             phases = phases.to(device, non_blocking=True)
             side_to_moves = side_to_moves.to(device, non_blocking=True)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_autocast_dtype):
                 logits = model(tokens, lengths, winners, phases, side_to_moves)
                 losses = criterion(logits, labels)
                 weights = _example_loss_weights(
@@ -1582,6 +1600,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     num_workers: int = 0,
     pin_memory: bool = True,
     amp: bool = False,
+    amp_dtype: str = "auto",
     restore_best: bool = True,
     use_phase_feature: bool = True,
     phase_embed_dim: int = 8,
@@ -1789,6 +1808,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         )
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
+    amp_autocast_dtype = _resolve_amp_autocast_dtype(amp_dtype, use_amp=use_amp, device=device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
     best_state_dict = None
@@ -1949,7 +1969,7 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             current_lengths = lengths
             total_batch_loss = None
             total_batch_weight = None
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_autocast_dtype):
                 for step_idx in range(rollout_horizon):
                     logits = train_model(current_tokens, current_lengths, winners, phases, side_to_moves)
                     losses = criterion(logits, rollout_targets[:, step_idx])
@@ -2280,6 +2300,7 @@ def train_next_move_model_from_jsonl_paths(
     num_workers: int = 0,
     pin_memory: bool = True,
     amp: bool = False,
+    amp_dtype: str = "auto",
     restore_best: bool = True,
     use_phase_feature: bool = True,
     phase_embed_dim: int = 8,
@@ -2332,6 +2353,7 @@ def train_next_move_model_from_jsonl_paths(
             num_workers=num_workers,
             pin_memory=pin_memory,
             amp=amp,
+            amp_dtype=amp_dtype,
             restore_best=restore_best,
             use_phase_feature=use_phase_feature,
             phase_embed_dim=phase_embed_dim,
@@ -2577,6 +2599,7 @@ def train_next_move_model_from_jsonl_paths(
         )
     criterion = nn.CrossEntropyLoss(reduction="none")
     use_amp = bool(amp and device.type == "cuda")
+    amp_autocast_dtype = _resolve_amp_autocast_dtype(amp_dtype, use_amp=use_amp, device=device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     phase_weight_vector = _build_phase_weight_vector(device=device, phase_weights=phase_weights)
     best_state_dict = None
@@ -2776,7 +2799,7 @@ def train_next_move_model_from_jsonl_paths(
             phases = phases.to(device, non_blocking=True)
             side_to_moves = side_to_moves.to(device, non_blocking=True)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_autocast_dtype):
                 logits = train_model(tokens, lengths, winners, phases, side_to_moves)
                 losses = criterion(logits, labels)
                 weights = _example_loss_weights(

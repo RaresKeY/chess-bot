@@ -501,26 +501,39 @@ cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || ech
 if ! [[ "${cpu_threads}" =~ ^[0-9]+$ ]]; then
   cpu_threads=0
 fi
-cpu_based_num_workers=1
-if (( cpu_threads > 1 )); then
-  cpu_based_num_workers=$((cpu_threads - 1))
+if (( cpu_threads < 1 )); then
+  cpu_threads=1
 fi
-ddp_based_num_workers=$((TRAIN_NPROC_PER_NODE * suggested_num_workers))
-if (( ddp_based_num_workers < 1 )); then
-  ddp_based_num_workers=1
+cpu_reserve_threads="${RUNPOD_FULL_TRAIN_CPU_RESERVE_THREADS:-0}"
+if ! [[ "${cpu_reserve_threads}" =~ ^[0-9]+$ ]]; then
+  cpu_reserve_threads=0
 fi
+cpu_worker_budget_total=$((cpu_threads - TRAIN_NPROC_PER_NODE - cpu_reserve_threads))
+if (( cpu_worker_budget_total < 0 )); then
+  cpu_worker_budget_total=0
+fi
+cpu_based_num_workers_per_rank=$((cpu_worker_budget_total / TRAIN_NPROC_PER_NODE))
+ddp_suggested_num_workers_per_rank="${suggested_num_workers}"
 hard_cap_num_workers="${RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP:-32}"
 if ! [[ "${hard_cap_num_workers}" =~ ^[0-9]+$ ]] || (( hard_cap_num_workers < 1 )); then
   hard_cap_num_workers=32
 fi
-auto_num_workers="${cpu_based_num_workers}"
-if (( ddp_based_num_workers < auto_num_workers )); then
-  auto_num_workers="${ddp_based_num_workers}"
+hard_cap_num_workers_per_rank=$((hard_cap_num_workers / TRAIN_NPROC_PER_NODE))
+auto_num_workers_per_rank="${cpu_based_num_workers_per_rank}"
+if (( ddp_suggested_num_workers_per_rank < auto_num_workers_per_rank )); then
+  auto_num_workers_per_rank="${ddp_suggested_num_workers_per_rank}"
 fi
-if (( hard_cap_num_workers < auto_num_workers )); then
-  auto_num_workers="${hard_cap_num_workers}"
+if (( hard_cap_num_workers_per_rank < auto_num_workers_per_rank )); then
+  auto_num_workers_per_rank="${hard_cap_num_workers_per_rank}"
 fi
-TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"
+if (( auto_num_workers_per_rank < 0 )); then
+  auto_num_workers_per_rank=0
+fi
+TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers_per_rank}}"
+if ! [[ "${TRAIN_NUM_WORKERS}" =~ ^[0-9]+$ ]]; then
+  TRAIN_NUM_WORKERS="${auto_num_workers_per_rank}"
+fi
+effective_total_num_workers=$((TRAIN_NUM_WORKERS * TRAIN_NPROC_PER_NODE))
 export REPO_DIR="${REMOTE_REPO_DIR}"
 export OUTPUT_PATH="${REMOTE_RUN_DIR}/model_${RUN_ID}.pt"
 export METRICS_OUT="${REMOTE_RUN_DIR}/metrics_${RUN_ID}.json"
@@ -562,8 +575,8 @@ fi
 {
   echo "[runpod-cycle-full-train-hf] training launch"
   echo "[runpod-cycle-full-train-hf] override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>} override_num_workers=${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-<unset>}"
-  echo "[runpod-cycle-full-train-hf] cpu_threads=${cpu_threads} cpu_based_num_workers=${cpu_based_num_workers} ddp_based_num_workers=${ddp_based_num_workers} hard_cap_num_workers=${hard_cap_num_workers} auto_num_workers=${auto_num_workers} vram_suggested_num_workers=${suggested_num_workers}"
-  echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers=${TRAIN_NUM_WORKERS} epochs=${FLOW_EPOCHS}"
+  echo "[runpod-cycle-full-train-hf] cpu_threads=${cpu_threads} cpu_reserve_threads=${cpu_reserve_threads} train_nproc_per_node=${TRAIN_NPROC_PER_NODE} cpu_worker_budget_total=${cpu_worker_budget_total} cpu_based_num_workers_per_rank=${cpu_based_num_workers_per_rank} ddp_suggested_num_workers_per_rank=${ddp_suggested_num_workers_per_rank} hard_cap_total_num_workers=${hard_cap_num_workers} hard_cap_num_workers_per_rank=${hard_cap_num_workers_per_rank} auto_num_workers_per_rank=${auto_num_workers_per_rank} vram_suggested_num_workers_per_rank=${suggested_num_workers}"
+  echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers_per_rank=${TRAIN_NUM_WORKERS} effective_total_num_workers=${effective_total_num_workers} epochs=${FLOW_EPOCHS}"
   echo "[runpod-cycle-full-train-hf] train_nproc_per_node=${TRAIN_NPROC_PER_NODE}"
   echo "[runpod-cycle-full-train-hf] hf_dataset_schema_filter=${HF_DATASET_SCHEMA_FILTER}"
   echo "[runpod-cycle-full-train-hf] runtime_min_context=${TRAIN_RUNTIME_MIN_CONTEXT} runtime_min_target=${TRAIN_RUNTIME_MIN_TARGET} runtime_max_samples_per_game=${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"

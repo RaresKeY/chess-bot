@@ -13,11 +13,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     python3-pip \
     git \
+    git-lfs \
     openssh-server \
     rsync \
     rclone \
     curl \
+    wget \
     jq \
+    pigz \
+    zstd \
+    lz4 \
+    pv \
+    aria2 \
+    unzip \
     ca-certificates \
     tini \
     procps \

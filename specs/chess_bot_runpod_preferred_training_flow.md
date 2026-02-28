@@ -24,7 +24,12 @@ Define the current preferred end-to-end RunPod training flow, including exact op
   - `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` enforced by flow (fail on cache miss/mismatch; no runtime index build fallback)
 - Workers/batch sizing:
   - no override envs set (`RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` unset, `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` unset)
-  - remote auto logic chooses `num_workers=min(max(nproc-1,1), TRAIN_NPROC_PER_NODE*vram_suggested_num_workers, RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP)` (default hard cap `32`)
+  - remote auto logic computes per-rank workers, then passes that per-rank value to training:
+    - `cpu_worker_budget_total = max(nproc - TRAIN_NPROC_PER_NODE - RUNPOD_FULL_TRAIN_CPU_RESERVE_THREADS, 0)` (reserve default `0`)
+    - `cpu_based_per_rank = floor(cpu_worker_budget_total / TRAIN_NPROC_PER_NODE)`
+    - `ddp_suggested_per_rank = vram_suggested_num_workers`
+    - `hard_cap_per_rank = floor(RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP / TRAIN_NPROC_PER_NODE)` (default hard cap `32`, interpreted as total cap)
+    - `num_workers_per_rank = min(cpu_based_per_rank, ddp_suggested_per_rank, hard_cap_per_rank)`
   - batch size chosen by remote VRAM tier heuristic
   - on RTX 5090 without explicit batch override, flow now uses an auto retry ladder (`4096 -> 3072 -> 2048`) and falls back on OOM
 - Fast-stage subset option:

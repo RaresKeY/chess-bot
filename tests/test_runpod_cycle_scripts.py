@@ -114,11 +114,13 @@ OUT
             "scripts/runpod_cycle_report_style.py",
             "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_start.sh",
+            "scripts/runpod_cycle_watchdog.sh",
             "scripts/runpod_cycle_push_dataset.sh",
             "scripts/runpod_cycle_train.sh",
             "scripts/runpod_cycle_collect.sh",
             "scripts/runpod_cycle_local_validate.sh",
             "scripts/runpod_cycle_stop.sh",
+            "scripts/runpod_file_transfer.sh",
             "scripts/runpod_cycle_full_smoke.sh",
             "scripts/runpod_full_train_easy.sh",
         ]
@@ -256,6 +258,36 @@ OUT
         self.assertIn("final_report=artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md", text)
         self.assertIn("scripts/runpod_cycle_full_train_hf.sh", text)
 
+    def test_benchmark_matrix_script_exists_and_covers_precision_trials(self):
+        text = Path("scripts/runpod_cycle_benchmark_matrix.sh").read_text(encoding="utf-8")
+        self.assertIn("RUNPOD_BENCH_TRIALS", text)
+        self.assertIn("fp32,tf32,fp16,bf16,sparsity", text)
+        self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA A40", text)
+        self.assertIn("RUNPOD_GPU_COUNT:-2", text)
+        self.assertIn("TRAIN_NPROC_PER_NODE", text)
+        self.assertIn("--amp-dtype bf16", text)
+        self.assertIn("--no-amp --tf32 off", text)
+        self.assertIn("runpod_cycle_collect.sh", text)
+
+    def test_file_transfer_script_has_retries_and_rsync_hardening(self):
+        text = Path("scripts/runpod_file_transfer.sh").read_text(encoding="utf-8")
+        self.assertIn("RUNPOD_TRANSFER_RETRIES", text)
+        self.assertIn("pull|push|sync", text)
+        self.assertIn("--append-verify", text)
+        self.assertIn("BatchMode=yes", text)
+        self.assertIn("AddKeysToAgent=no", text)
+        self.assertIn("IdentityAgent=none", text)
+
+    def test_watchdog_script_supports_stall_actions(self):
+        text = Path("scripts/runpod_cycle_watchdog.sh").read_text(encoding="utf-8")
+        self.assertIn("--on-stall", text)
+        self.assertIn("collect-stop", text)
+        self.assertIn("collect-terminate", text)
+        self.assertIn("scripts/runpod_cycle_status.sh", text)
+        self.assertIn("scripts/runpod_cycle_collect.sh", text)
+        self.assertIn("scripts/runpod_cycle_stop.sh", text)
+        self.assertIn("scripts/runpod_cycle_terminate.sh", text)
+
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
         text = Path("scripts/runpod_cycle_start.sh").read_text(encoding="utf-8")
         self.assertIn('RUNPOD_INJECT_MANAGED_SSH_KEY_ENV', text)
@@ -294,9 +326,13 @@ OUT
         self.assertIn("override_batch_size=${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-<unset>}", text)
         self.assertIn('cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"', text)
         self.assertIn('suggested_num_workers="${suggested[1]:-6}"', text)
+        self.assertIn('cpu_reserve_threads="${RUNPOD_FULL_TRAIN_CPU_RESERVE_THREADS:-0}"', text)
+        self.assertIn("cpu_worker_budget_total=$((cpu_threads - TRAIN_NPROC_PER_NODE - cpu_reserve_threads))", text)
+        self.assertIn("cpu_based_num_workers_per_rank=$((cpu_worker_budget_total / TRAIN_NPROC_PER_NODE))", text)
+        self.assertIn('ddp_suggested_num_workers_per_rank="${suggested_num_workers}"', text)
         self.assertIn('hard_cap_num_workers="${RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP:-32}"', text)
-        self.assertIn("ddp_based_num_workers=$((TRAIN_NPROC_PER_NODE * suggested_num_workers))", text)
-        self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers}}"', text)
+        self.assertIn("hard_cap_num_workers_per_rank=$((hard_cap_num_workers / TRAIN_NPROC_PER_NODE))", text)
+        self.assertIn('TRAIN_NUM_WORKERS="${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-${auto_num_workers_per_rank}}"', text)
         self.assertIn('TRAIN_NPROC_PER_NODE="${FLOW_TRAIN_NPROC_PER_NODE:-1}"', text)
         self.assertIn('export TRAIN_NPROC_PER_NODE', text)
         self.assertIn('export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0"', text)
@@ -307,12 +343,18 @@ OUT
         self.assertIn('FLOW_MAX_TOTAL_ROWS="${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-0}"', text)
         self.assertIn('export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"', text)
         self.assertIn('RUNPOD_REMOTE_BEST_CHECKPOINT="${REMOTE_BEST_CHECKPOINT}"', text)
-        self.assertIn("cpu_threads=${cpu_threads} cpu_based_num_workers=${cpu_based_num_workers} ddp_based_num_workers=${ddp_based_num_workers} hard_cap_num_workers=${hard_cap_num_workers} auto_num_workers=${auto_num_workers}", text)
+        self.assertIn("cpu_threads=${cpu_threads} cpu_reserve_threads=${cpu_reserve_threads} train_nproc_per_node=${TRAIN_NPROC_PER_NODE} cpu_worker_budget_total=${cpu_worker_budget_total} cpu_based_num_workers_per_rank=${cpu_based_num_workers_per_rank} ddp_suggested_num_workers_per_rank=${ddp_suggested_num_workers_per_rank} hard_cap_total_num_workers=${hard_cap_num_workers} hard_cap_num_workers_per_rank=${hard_cap_num_workers_per_rank} auto_num_workers_per_rank=${auto_num_workers_per_rank} vram_suggested_num_workers_per_rank=${suggested_num_workers}", text)
 
     def test_train_preset_supports_torchrun_nproc(self):
         text = Path("deploy/runpod_cloud_training/train_baseline_preset.sh").read_text(encoding="utf-8")
         self.assertIn('TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-1}"', text)
         self.assertIn('cmd=( "${VENV_DIR}/bin/torchrun" --standalone --nnodes=1 --nproc-per-node "${TRAIN_NPROC_PER_NODE}" "${train_args[@]}" )', text)
+
+    def test_cycle_train_prefers_repo_train_preset_over_image_copy(self):
+        text = Path("scripts/runpod_cycle_train.sh").read_text(encoding="utf-8")
+        self.assertIn("TRAIN_PRESET_REPO", text)
+        self.assertIn("TRAIN_PRESET_IMAGE", text)
+        self.assertIn('if [[ -f "${TRAIN_PRESET_REPO}" ]]; then', text)
 
     def test_watch_progress_syncs_remote_checkpoints_and_writes_epoch_eta_report(self):
         text = Path("scripts/runpod_cycle_watch_progress.sh").read_text(encoding="utf-8")

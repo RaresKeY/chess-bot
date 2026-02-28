@@ -84,7 +84,7 @@ run_container_smoke() {
     -e TRAIN_NUM_WORKERS="${SMOKE_NUM_WORKERS}" \
     -e TRAIN_PROGRESS_JSONL_OUT="${SMOKE_PROGRESS_JSONL_OUT}" \
     -e TRAIN_EXTRA_ARGS="--epochs ${SMOKE_EPOCHS} --no-progress" \
-    "${IMAGE_NAME}" /bin/bash -lc 'bash /opt/runpod_cloud_training/train_baseline_preset.sh'
+    "${IMAGE_NAME}" /bin/bash -lc 'if [[ -f /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh ]]; then bash /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh; else bash /opt/runpod_cloud_training/train_baseline_preset.sh; fi'
 }
 
 echo "[local-smoke] image=${IMAGE_NAME}"

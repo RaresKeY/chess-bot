@@ -12,6 +12,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional host-side RunPod regression checks wrapper: `scripts/runpod_regression_checks.sh`
 - Optional host-side quick launch wrapper: `scripts/runpod_quick_launch.sh`
 - Optional host-side modular RunPod lifecycle scripts: `scripts/runpod_cycle_*.sh`
+- Optional host-side transfer/watchdog helpers: `scripts/runpod_file_transfer.sh`, `scripts/runpod_cycle_watchdog.sh`
 - Optional host-side HF dataset publish/fetch helpers: `scripts/hf_dataset_publish.py`, `scripts/hf_dataset_fetch.py`
 - Optional host-side RunPod full-cycle artifact verifier: `scripts/runpod_cycle_verify_full_hf_run.py`, `src/chessbot/runpod_cycle_verify.py`
 - Container image build: `deploy/runpod_cloud_training/Dockerfile`
@@ -46,6 +47,10 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Repo clone/pull at startup is supported and enabled by environment defaults (`CLONE_REPO_ON_START=1`, `GIT_AUTO_PULL=1`)
 - Public GitHub repo flow only (no private clone token bootstrap logic)
 - Startup requirement sync compares repo `requirements.txt` hash against a venv stamp and runs `pip install -r` when changed (or forced)
+- Entrypoint resolves module script path at runtime:
+  - preferred: `${REPO_DIR}/deploy/runpod_cloud_training` (freshly pulled repo copy)
+  - fallback: `/opt/runpod_cloud_training` (image-baked copy)
+  - this keeps old images aligned with latest repo scripts after startup pull
 - If `REPO_DIR` exists but is non-git:
   - existing empty dir: clone into it
   - existing non-empty dir with `requirements.txt`: treat as mounted checkout and skip clone/pull
@@ -54,6 +59,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 ## Environment / Deployment Decisions (current)
 - Prebuilt Python venv in image (`/opt/venvs/chessbot`)
 - `rclone` installed for generic high-throughput transfers
+- image also includes transfer/debug packages for large artifact handling (`aria2`, `pigz`, `zstd`, `lz4`, `pv`, `wget`, `git-lfs`, `unzip`)
 - `huggingface_hub` + `hf_transfer` installed for HF artifact uploads
 - Inference access supported via both SSH CLI (repo scripts) and HTTP API service
 - Idle autostop watchdog script included for RunPod-style workflows

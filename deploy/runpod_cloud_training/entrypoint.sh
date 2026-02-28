@@ -36,6 +36,8 @@ IDLE_WATCHDOG_VERBOSE="${IDLE_WATCHDOG_VERBOSE:-1}"
 RUNPOD_PHASE_TIMING_ENABLED="${RUNPOD_PHASE_TIMING_ENABLED:-1}"
 RUNPOD_PHASE_TIMING_LOG="${RUNPOD_PHASE_TIMING_LOG:-${REPO_DIR}/artifacts/timings/runpod_phase_times.jsonl}"
 RUNPOD_PHASE_TIMING_RUN_ID="${RUNPOD_PHASE_TIMING_RUN_ID:-runpod-entrypoint-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+RUNPOD_MODULE_IMAGE_DIR="${RUNPOD_MODULE_IMAGE_DIR:-/opt/runpod_cloud_training}"
+RUNPOD_MODULE_DIR="${RUNPOD_MODULE_DIR:-}"
 
 PIDS=()
 
@@ -79,6 +81,21 @@ run_timed_phase() {
 
 run_as_runner() {
   su -s /bin/bash "${RUNNER_USER}" -c "$*"
+}
+
+resolve_module_dir() {
+  local repo_module_dir="${REPO_DIR}/deploy/runpod_cloud_training"
+  if [[ -n "${RUNPOD_MODULE_DIR}" ]]; then
+    log "Using explicit RUNPOD_MODULE_DIR=${RUNPOD_MODULE_DIR}"
+    return
+  fi
+  if [[ -d "${repo_module_dir}" ]]; then
+    RUNPOD_MODULE_DIR="${repo_module_dir}"
+    log "Using repo module directory (latest from git pull): ${RUNPOD_MODULE_DIR}"
+    return
+  fi
+  RUNPOD_MODULE_DIR="${RUNPOD_MODULE_IMAGE_DIR}"
+  log "Repo module directory missing; falling back to image module directory: ${RUNPOD_MODULE_DIR}"
 }
 
 ensure_ssh_keys() {
@@ -238,6 +255,7 @@ run_timed_phase "ensure_runner_ssh_account" ensure_runner_ssh_account
 run_timed_phase "configure_sshd" configure_sshd
 run_timed_phase "clone_or_update_repo" clone_or_update_repo
 run_timed_phase "sync_repo_requirements" sync_repo_requirements
+run_timed_phase "resolve_module_dir" resolve_module_dir
 
 if [[ ! -d "${REPO_DIR}" ]]; then
   log "Repo dir ${REPO_DIR} is missing. Set CLONE_REPO_ON_START=1 or mount the repo."
@@ -283,7 +301,7 @@ if [[ "${START_INFERENCE_API}" == "1" ]]; then
     inference_verbose_flag="--verbose"
   fi
   run_timed_phase "start_inference_api" start_runner_bg "inference-api" \
-    "cd '${REPO_DIR}' && '${VENV_DIR}/bin/python' /opt/runpod_cloud_training/inference_api.py \
+    "cd '${REPO_DIR}' && '${VENV_DIR}/bin/python' '${RUNPOD_MODULE_DIR}/inference_api.py' \
       --repo-dir '${REPO_DIR}' \
       --model '${INFERENCE_API_MODEL_PATH}' \
       --host '${INFERENCE_API_HOST}' \
@@ -299,7 +317,7 @@ if [[ "${START_HF_WATCH}" == "1" ]]; then
     hf_watch_verbose_flag="--verbose"
   fi
   run_timed_phase "start_hf_watch" start_runner_bg "hf-auto-sync" \
-    "cd '${REPO_DIR}' && '${VENV_DIR}/bin/python' /opt/runpod_cloud_training/hf_auto_sync_watch.py \
+    "cd '${REPO_DIR}' && '${VENV_DIR}/bin/python' '${RUNPOD_MODULE_DIR}/hf_auto_sync_watch.py' \
       --source-dir '${HF_SYNC_SOURCE_DIR}' \
       --patterns '${HF_SYNC_PATTERNS}' \
       --interval-seconds '${HF_SYNC_INTERVAL_SECONDS}' \
@@ -312,7 +330,7 @@ if [[ "${START_IDLE_WATCHDOG}" == "1" ]]; then
     idle_watchdog_verbose_flag="--verbose"
   fi
   run_timed_phase "start_idle_watchdog" start_bg "idle-watchdog" \
-    "${VENV_DIR}/bin/python" /opt/runpod_cloud_training/idle_watchdog.py \
+    "${VENV_DIR}/bin/python" "${RUNPOD_MODULE_DIR}/idle_watchdog.py" \
       --idle-seconds "${IDLE_TIMEOUT_SECONDS}" \
       --check-interval-seconds "${IDLE_CHECK_INTERVAL_SECONDS}" \
       --gpu-util-threshold "${IDLE_GPU_UTIL_THRESHOLD}" \

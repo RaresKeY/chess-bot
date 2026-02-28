@@ -19,10 +19,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
 - `scripts/runpod_cycle_full_smoke.sh`
 - `scripts/runpod_cycle_watch_progress.sh`
+- `scripts/runpod_cycle_watchdog.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_cycle_report_style.py`
 - `scripts/runpod_cycle_summarize_gpu_observations.py`
 - `scripts/runpod_full_train_easy.sh`
+- `scripts/runpod_cycle_benchmark_matrix.sh`
+- `scripts/runpod_file_transfer.sh`
 - `scripts/hf_dataset_publish.py`
 - `scripts/hf_dataset_fetch.py`
 - Runtime pod interfaces used by operators:
@@ -142,6 +145,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports `--dry-run` to print the planned repo path and snapshot patterns without downloading
 - `scripts/runpod_cycle_train.sh`
   - runs `train_baseline_preset.sh` on the pod with explicit output/metrics paths under `artifacts/runpod_cycles/<run_id>/`
+  - prefers repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over image-baked `/opt/...` copy (fallback only) so long-lived pods/old images still use latest pulled training script
   - runs a short remote inference smoke command (`scripts/infer_move.py`) against the produced model
   - waits for remote repo scripts/readiness before launching training (same timeout/poll env controls as dataset push)
   - exports `REPO_DIR`, `RUNPOD_PHASE_TIMING_LOG`, and `PYTHONPATH` inside the remote SSH command so per-run `REPO_DIR` overrides work end-to-end
@@ -180,6 +184,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - scans snapshot tails for the latest valid JSON progress event (avoids getting stuck when the newest tailed line is partial/non-JSON)
   - supports manual PTY allocation via `RUNPOD_SSH_FORCE_TTY=1` when a host environment requires it
   - handles `Ctrl-C`/`SIGTERM` by restoring TTY state and stopping local child watcher processes to reduce terminal corruption/noisy leftover streams
+- `scripts/runpod_cycle_watchdog.sh`
+  - host-side stall watchdog for active runs (`RUNPOD_CYCLE_RUN_ID`)
+  - polls `scripts/runpod_cycle_status.sh --no-write` and treats stage/progress/log growth as activity
+  - configurable stall action (`--on-stall`) with options:
+    - `none`, `collect`, `stop`, `terminate`, `collect-stop`, `collect-terminate`
+  - optional auto-collect on normal completion (`RUNPOD_WATCHDOG_AUTO_COLLECT_ON_FINISH=1`)
 - `scripts/runpod_cycle_full_train_hf.sh`
   - sequential host-side orchestration for a full HF-backed training run: GPU selection (`gpu-search` with fallback), start pod, remote HF fetch, remote context probe/spec suggestions, async remote training, local progress watch, collect artifacts, stop pod
   - runs a remote GPU sampler during training and writes per-run pre-train and post-run GPU/dataset/parameter observation artifacts for tuning future runs
@@ -192,10 +202,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
   - local quick-play command/model retrieval now uses robust collected-artifact lookup (prefers `model_<run_id>.pt`, falls back to latest `.pt`) to tolerate naming variations while preserving run-id preference
   - default remote `num_workers` now uses a safer capped auto policy unless `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` is set:
-    - `cpu_based = max(nproc-1, 1)`
-    - `ddp_based = TRAIN_NPROC_PER_NODE * vram_suggested_num_workers`
-    - `hard_cap = RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP` (default `32`)
-    - `auto_num_workers = min(cpu_based, ddp_based, hard_cap)`
+    - policy now computes per-rank workers (the value passed to `--num-workers` under torchrun):
+    - `cpu_worker_budget_total = max(nproc - TRAIN_NPROC_PER_NODE - RUNPOD_FULL_TRAIN_CPU_RESERVE_THREADS, 0)` (reserve default `0`)
+    - `cpu_based_per_rank = floor(cpu_worker_budget_total / TRAIN_NPROC_PER_NODE)`
+    - `ddp_suggested_per_rank = vram_suggested_num_workers`
+    - `hard_cap_per_rank = floor(RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP / TRAIN_NPROC_PER_NODE)` (default total cap `32`)
+    - `auto_num_workers_per_rank = min(cpu_based_per_rank, ddp_suggested_per_rank, hard_cap_per_rank)`
+    - effective total workers = `auto_num_workers_per_rank * TRAIN_NPROC_PER_NODE`
   - supports subset caps for fast-stage runs:
     - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS`
     - `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`
@@ -231,6 +244,25 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, runtime-splice sample cap)
   - verifies local collected artifacts with `scripts/runpod_cycle_verify_full_hf_run.py`
   - terminates the pod after verification and re-verifies termination markers
+- `scripts/runpod_cycle_benchmark_matrix.sh`
+  - one-pod matrix runner for repeated training trials across precision modes on the same provisioned pod
+  - defaults to `RUNPOD_GPU_TYPE_ID=NVIDIA A40`, `RUNPOD_GPU_COUNT=2`, and trial list `fp32,tf32,fp16,bf16,sparsity`
+  - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
+  - pulls each trial directory locally to `artifacts/runpod_cycles/<run_id>/benchmarks/<trial>/` and writes:
+    - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.jsonl`
+    - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.md`
+  - notes: sparse Tensor Core mode is currently marked `skipped` (no 2:4 sparse training path wired in baseline trainer yet)
+- `scripts/runpod_file_transfer.sh`
+  - host-side file transfer utility for RunPod pods using managed SSH metadata from `provision.json`
+  - modes:
+    - `pull <remote_path> <local_path>`
+    - `push <local_path> <remote_path>`
+    - `sync <local_dir> <remote_dir>` (rsync with `--delete`)
+  - transfer hardening:
+    - retry loop (`RUNPOD_TRANSFER_RETRIES`, `RUNPOD_TRANSFER_RETRY_SLEEP_SECONDS`)
+    - resumable mode (`--partial --append-verify`) enabled by default
+    - optional checksum mode (`RUNPOD_TRANSFER_CHECKSUM=1`) and bandwidth cap (`RUNPOD_TRANSFER_BWLIMIT_KBPS`)
+  - writes transfer logs under `artifacts/runpod_cycles/<run_id>/logs/`
 - `scripts/runpod_cycle_verify_full_hf_run.py` / `src/chessbot/runpod_cycle_verify.py`
   - verifies full-HF cycle local artifacts (`provision.json`, `stop_response.json`, collected model/metrics/logs/progress/GPU samples/HF fetch manifest/context probe)
   - optional `--require-terminated` also checks `terminate_response.json`
@@ -286,7 +318,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_GPU_COUNT=2` and `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=2` (default multi-process train launch)
     - temporary no-passphrase SSH key under `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
     - progress output enabled by default (plus JSONL progress stream for watcher)
-    - remote training `num_workers` defaults to `min(max(nproc-1,1), TRAIN_NPROC_PER_NODE*vram_suggested_num_workers, RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP)` (default hard cap `32`) when no override is set
+    - remote training `num_workers` defaults to a per-rank value from the policy above (effective total remains capped by CPU budget and `RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP`, default `32`) when no override is set
   - operator can still override by env, but no flags/params are required for the default path
   - compact-dataset / runtime-splice-friendly env overrides (useful for smoke runs):
     - `RUNPOD_HF_DATASET_PATH_PREFIX` (for example `validated_datasets/elite_2025-11_game`)

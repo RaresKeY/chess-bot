@@ -65,6 +65,8 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--num-workers` (DataLoader workers)
   - `--pin-memory/--no-pin-memory` (auto-disabled on CPU)
   - `--amp/--no-amp` (CUDA mixed precision via `torch.amp`)
+  - `--amp-dtype {auto,fp16,bf16}` (autocast dtype selection when AMP is enabled)
+  - `--tf32 {auto,on,off}` (controls `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` before train startup)
 - Model/training controls:
   - `--rollout-horizon` (future plies predicted during training objective; `1` preserves baseline behavior)
   - `--closeness-horizon` (validation continuation-closeness horizon; clamped to rollout horizon)

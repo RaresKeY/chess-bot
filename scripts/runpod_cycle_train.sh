@@ -88,7 +88,13 @@ fi
 
 REMOTE_CMD+=$(cat <<EOF
 
-bash /opt/runpod_cloud_training/train_baseline_preset.sh
+TRAIN_PRESET_REPO='${REMOTE_REPO_DIR}/deploy/runpod_cloud_training/train_baseline_preset.sh'
+TRAIN_PRESET_IMAGE='/opt/runpod_cloud_training/train_baseline_preset.sh'
+TRAIN_PRESET_SCRIPT='${TRAIN_PRESET_IMAGE}'
+if [[ -f "${TRAIN_PRESET_REPO}" ]]; then
+  TRAIN_PRESET_SCRIPT="${TRAIN_PRESET_REPO}"
+fi
+bash "${TRAIN_PRESET_SCRIPT}"
 cd '${REMOTE_REPO_DIR}'
 export PYTHONPATH='${REMOTE_REPO_DIR}'
 '/opt/venvs/chessbot/bin/python' scripts/infer_move.py --model '${REMOTE_MODEL_PATH}' --context '${INFER_CONTEXT}' --winner-side W --device cpu > '${REMOTE_INFER_OUT}'

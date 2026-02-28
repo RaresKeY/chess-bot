@@ -128,8 +128,11 @@ The API now computes phase + side-to-move features explicitly so inference match
 On a pod shell (SSH or Jupyter terminal), run:
 
 ```bash
-bash /opt/runpod_cloud_training/train_baseline_preset.sh
+bash /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh
 ```
+
+The repo copy is preferred so an older image still runs the latest script after startup `git pull`.
+Image-baked fallback remains available at `/opt/runpod_cloud_training/train_baseline_preset.sh`.
 
 This launcher:
 - auto-detects the latest dataset dir under `data/dataset/` containing `train.jsonl` + `val.jsonl` (unless overridden)
@@ -148,14 +151,14 @@ TRAIN_BATCH_SIZE=2048 \
 TRAIN_NUM_WORKERS=6 \
 OUTPUT_PATH=/workspace/chess-bot/artifacts/model_runpod.pt \
 METRICS_OUT=/workspace/chess-bot/artifacts/model_runpod_metrics.json \
-bash /opt/runpod_cloud_training/train_baseline_preset.sh
+bash /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh
 ```
 
 Extra CLI args can be appended via `TRAIN_EXTRA_ARGS`, for example:
 
 ```bash
 TRAIN_EXTRA_ARGS="--phase-weight-endgame 2.5 --lr-plateau-patience 4" \
-bash /opt/runpod_cloud_training/train_baseline_preset.sh
+bash /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh
 ```
 
 ## Local RunPod-Style Smoke Test (Docker)
@@ -175,6 +178,7 @@ Records include a `source` field (for example `local_runpod_smoke`, `runpod_entr
 - JupyterLab file browser download/upload
 - `rclone` (S3/GCS/Drive/etc.)
 - Hugging Face auto-sync (`hf_auto_sync_watch.py`) for model artifacts
+- host utility: `bash scripts/runpod_file_transfer.sh` (`push`/`pull`/`sync` with retries, resume, optional checksum/bw limit)
 
 ## SSH Notes (Observed 2026-02-26)
 - If direct mapped SSH (`runner@<public-ip> -p <mapped-port>`) fails with `Permission denied (publickey)`, verify template `AUTHORIZED_KEYS` formatting and the resulting `/home/runner/.ssh/authorized_keys` on the pod.
