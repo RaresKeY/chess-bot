@@ -290,6 +290,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - supports sparse lambda sweeps in one run via `RUNPOD_BENCH_SPARSITY_L1_LAMBDAS` (comma-separated); sparse base trials are expanded into trial ids like `<base>@<lambda>` and each variant is executed independently
+  - benchmark batch sizing now supports auto mode (`RUNPOD_BENCH_BATCH_SIZE=auto` default path):
+    - resolves an aggressive per-rank batch target from remote GPU VRAM (`8192/4096/2048/1024/512` tiers)
+    - builds a descending retry plan and reruns the same trial at lower batches when OOM signatures are detected in train logs
+    - explicit numeric `RUNPOD_BENCH_BATCH_SIZE` remains a hard override (no auto downgrade plan)
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
   - benchmark trial artifact pull defaults to a fast filtered copy (metrics/progress/logs/models/telemetry), excluding `epoch_checkpoints/**` unless explicitly enabled with `RUNPOD_BENCH_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS=1`
   - transfer controls:
@@ -318,6 +322,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_benchmark_10k_sixpack.sh`
   - opinionated wrapper for quick throughput comparisons on one pod
   - defaults to 6 base trials (`fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse`) with sparse lambda sweep `RUNPOD_BENCH_SPARSITY_L1_LAMBDAS=1e-5,5e-5,1e-4`
+  - defaults benchmark batch mode to auto (`RUNPOD_BENCH_BATCH_SIZE=auto`) so the matrix can push higher VRAM-efficient batches per GPU SKU with OOM fallback
   - defaults to `RUNPOD_BENCH_MAX_TOTAL_ROWS=100000` and `RUNPOD_BENCH_EPOCHS=10` for stronger precision/sparsity differentiation
   - defaults to single-dataset fetch mode for speed (`RUNPOD_BENCH_HF_DATASET_NAME=elite_2025-11_game`, `RUNPOD_HF_DATASET_PATH_PREFIX=validated_datasets`)
   - defaults to pod termination (`RUNPOD_BENCH_TERMINATE_POD=1`) after artifact collection and writes final telemetry snapshot JSON

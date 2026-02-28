@@ -56,7 +56,7 @@ FLOW_HF_DATASET_NAME="${RUNPOD_BENCH_HF_DATASET_NAME:-}"
 FLOW_HF_DATASET_VERSION="${RUNPOD_BENCH_HF_DATASET_VERSION:-}"
 FLOW_HF_SCHEMA_FILTER="${RUNPOD_HF_DATASET_SCHEMA_FILTER:-game_jsonl_runtime_splice_v1}"
 FLOW_EPOCHS="${RUNPOD_BENCH_EPOCHS:-1}"
-FLOW_BATCH_SIZE="${RUNPOD_BENCH_BATCH_SIZE:-2048}"
+FLOW_BATCH_SIZE_RAW="${RUNPOD_BENCH_BATCH_SIZE:-auto}"
 FLOW_NUM_WORKERS="${RUNPOD_BENCH_NUM_WORKERS:-8}"
 FLOW_DISTRIBUTED_BACKEND="${RUNPOD_BENCH_DISTRIBUTED_BACKEND:-nccl}"
 FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-200000}"
@@ -76,6 +76,40 @@ FLOW_RCLONE_MULTI_THREAD_STREAMS="${RUNPOD_BENCH_RCLONE_MULTI_THREAD_STREAMS:-4}
 FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_BENCH_COLLECT_INCLUDE_EPOCH_CHECKPOINTS:-0}"
 FLOW_SKIP_FINAL_COLLECT="${RUNPOD_BENCH_SKIP_FINAL_COLLECT:-0}"
 FLOW_EXPECTED_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+
+FLOW_BATCH_SIZE_OVERRIDE=""
+if [[ "${FLOW_BATCH_SIZE_RAW}" =~ ^[0-9]+$ ]] && (( FLOW_BATCH_SIZE_RAW > 0 )); then
+  FLOW_BATCH_SIZE_OVERRIDE="${FLOW_BATCH_SIZE_RAW}"
+fi
+FLOW_BATCH_SIZE_RESOLVED="${FLOW_BATCH_SIZE_OVERRIDE:-2048}"
+FLOW_BATCH_ATTEMPTS=("${FLOW_BATCH_SIZE_RESOLVED}")
+
+build_batch_attempt_plan() {
+  local base="$1"
+  local -a raw=()
+  if (( base >= 8192 )); then
+    raw=(8192 6144 4096 3072 2048 1536 1024)
+  elif (( base >= 4096 )); then
+    raw=(4096 3072 2048 1536 1024 768 512)
+  elif (( base >= 2048 )); then
+    raw=(2048 1536 1024 768 512)
+  elif (( base >= 1024 )); then
+    raw=(1024 768 512)
+  else
+    raw=("${base}")
+  fi
+  declare -A seen=()
+  FLOW_BATCH_ATTEMPTS=()
+  for b in "${raw[@]}"; do
+    if [[ "${b}" =~ ^[0-9]+$ ]] && (( b > 0 )) && [[ -z "${seen[${b}]:-}" ]]; then
+      seen["${b}"]=1
+      FLOW_BATCH_ATTEMPTS+=("${b}")
+    fi
+  done
+  if (( ${#FLOW_BATCH_ATTEMPTS[@]} == 0 )); then
+    FLOW_BATCH_ATTEMPTS=("${base}")
+  fi
+}
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
   telemetry_checkpoint "benchmark_provision" "running" "starting benchmark pod"
@@ -128,7 +162,9 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - hf_schema_filter: \`${FLOW_HF_SCHEMA_FILTER}\`
 - expected_git_sha: \`${FLOW_EXPECTED_GIT_SHA}\`
 - epochs_per_trial: \`${FLOW_EPOCHS}\`
-- batch_size: \`${FLOW_BATCH_SIZE}\`
+- batch_size_request: \`${FLOW_BATCH_SIZE_RAW}\`
+- batch_size_resolved: \`${FLOW_BATCH_SIZE_RESOLVED}\`
+- batch_attempt_plan: \`${FLOW_BATCH_ATTEMPTS[*]}\`
 - num_workers_per_rank: \`${FLOW_NUM_WORKERS}\`
 - distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
 - transfer_tool: \`${FLOW_TRANSFER_TOOL}\`
@@ -303,6 +339,36 @@ fi
 echo "[runpod-bench-matrix] remote_repo_synced sha=${remote_sha}"
 EOF_REMOTE_SYNC
 
+if [[ -z "${FLOW_BATCH_SIZE_OVERRIDE}" ]]; then
+  remote_vram_mib="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+    "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n 1 | awk '{print int(\$1)}'" \
+    2>/dev/null || true)"
+  if [[ "${remote_vram_mib}" =~ ^[0-9]+$ ]]; then
+    if (( remote_vram_mib >= 70000 )); then
+      FLOW_BATCH_SIZE_RESOLVED=8192
+    elif (( remote_vram_mib >= 44000 )); then
+      FLOW_BATCH_SIZE_RESOLVED=4096
+    elif (( remote_vram_mib >= 22000 )); then
+      FLOW_BATCH_SIZE_RESOLVED=2048
+    elif (( remote_vram_mib >= 15000 )); then
+      FLOW_BATCH_SIZE_RESOLVED=1024
+    else
+      FLOW_BATCH_SIZE_RESOLVED=512
+    fi
+  fi
+fi
+build_batch_attempt_plan "${FLOW_BATCH_SIZE_RESOLVED}"
+telemetry_event "benchmark_batch_plan" "info" "resolved benchmark batch plan" "{\"batch_size_request\":\"${FLOW_BATCH_SIZE_RAW}\",\"batch_size_resolved\":${FLOW_BATCH_SIZE_RESOLVED},\"batch_attempt_plan\":\"${FLOW_BATCH_ATTEMPTS[*]}\"}"
+{
+  echo
+  echo "## Runtime Batch Plan"
+  echo
+  echo "- batch_size_request: \`${FLOW_BATCH_SIZE_RAW}\`"
+  echo "- batch_size_resolved: \`${FLOW_BATCH_SIZE_RESOLVED}\`"
+  echo "- batch_attempt_plan: \`${FLOW_BATCH_ATTEMPTS[*]}\`"
+  echo
+} >> "${LOCAL_SUMMARY_MD}"
+
 telemetry_checkpoint "benchmark_dependencies" "running" "checking pod dependency freshness"
 REMOTE_DEP_CHECK_JSON="${REMOTE_RUN_DIR}/dependency_check.json"
 LOCAL_DEP_CHECK_JSON="${CYCLE_DIR}/reports/dependency_check.json"
@@ -458,6 +524,7 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
 
   trial_status="ok"
   trial_exit=0
+  trial_batch_used=""
   train_extra_args="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0 --progress --verbose"
 
   case "${trial_base}" in
@@ -495,8 +562,11 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
   if [[ "${trial_status}" == "ok" ]]; then
     telemetry_checkpoint "trial_${trial_slug}" "running" "trial started"
     train_extra_args+=" --distributed-backend ${FLOW_DISTRIBUTED_BACKEND}"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE='${FLOW_BATCH_SIZE}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
+    for batch_try in "${FLOW_BATCH_ATTEMPTS[@]}"; do
+      trial_batch_used="${batch_try}"
+      telemetry_event "benchmark_trial_batch_attempt" "info" "starting trial batch attempt" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"batch_size\":${batch_try}}"
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE_TRY='${batch_try}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
 set -Eeuo pipefail
 mkdir -p "${REMOTE_TRIAL_DIR}"
 cd "${REMOTE_REPO_DIR}"
@@ -519,7 +589,7 @@ export TRAIN_BEST_CHECKPOINT_OUT="${REMOTE_TRIAL_DIR}/model_best_${TRIAL}.pt"
 export TRAIN_EPOCH_CHECKPOINT_DIR="${REMOTE_TRIAL_DIR}/epoch_checkpoints"
 
 export TRAIN_NPROC_PER_NODE="${FLOW_TRAIN_NPROC_PER_NODE}"
-export TRAIN_BATCH_SIZE="${FLOW_BATCH_SIZE}"
+export TRAIN_BATCH_SIZE="${FLOW_BATCH_SIZE_TRY}"
 export TRAIN_NUM_WORKERS="${FLOW_NUM_WORKERS}"
 export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
 export TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1
@@ -533,10 +603,24 @@ printf '%s\n' "${rc}" > "${REMOTE_TRIAL_DIR}/train_exit_code.txt"
 exit 0
 EOF_REMOTE
 
-    trial_exit="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "cat '${remote_trial_dir}/train_exit_code.txt' 2>/dev/null || echo 99")"
-    if [[ "${trial_exit}" != "0" ]]; then
+      trial_exit="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "cat '${remote_trial_dir}/train_exit_code.txt' 2>/dev/null || echo 99")"
+      if [[ "${trial_exit}" == "0" ]]; then
+        trial_status="ok"
+        break
+      fi
+      if [[ -n "${FLOW_BATCH_SIZE_OVERRIDE}" ]]; then
+        trial_status="failed"
+        break
+      fi
+      if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+        "tail -n 220 '${remote_trial_dir}/train_stdout_${trial_slug}.log' 2>/dev/null | grep -Eiq 'cuda out of memory|out of memory|cublas_status_alloc_failed|cuda error: out of memory'"; then
+        trial_status="failed"
+        telemetry_event "benchmark_trial_batch_attempt" "warn" "oom detected; retrying lower batch" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"failed_batch\":${batch_try}}"
+        continue
+      fi
       trial_status="failed"
-    fi
+      break
+    done
   fi
 
   if [[ "${trial_status}" == "ok" ]]; then
@@ -546,13 +630,13 @@ EOF_REMOTE
   else
     telemetry_checkpoint "trial_${trial_slug}" "done" "trial skipped"
   fi
-  telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"sparsity_l1_lambda\":\"${trial_sparse_lambda}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
+  telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"sparsity_l1_lambda\":\"${trial_sparse_lambda}\",\"batch_size_used\":\"${trial_batch_used}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
 
   transfer_trial_artifacts "${trial_slug}" "${remote_trial_dir}" "${local_trial_dir}" || true
 
   trial_metrics_json="$(extract_trial_metrics_json "${local_trial_dir}")"
-  printf '{"trial":"%s","trial_slug":"%s","sparsity_l1_lambda":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \
-    "${trial_name}" "${trial_slug}" "${trial_sparse_lambda}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" "${trial_metrics_json}" >> "${LOCAL_SUMMARY_JSONL}"
+  printf '{"trial":"%s","trial_slug":"%s","sparsity_l1_lambda":"%s","batch_size_used":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \
+    "${trial_name}" "${trial_slug}" "${trial_sparse_lambda}" "${trial_batch_used}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" "${trial_metrics_json}" >> "${LOCAL_SUMMARY_JSONL}"
 
   printf '| %s | %s | %s | `%s` |\n' "${trial_name}" "${trial_status}" "${trial_exit}" "${local_trial_dir}" >> "${LOCAL_SUMMARY_MD}"
 done
