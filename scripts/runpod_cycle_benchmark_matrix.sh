@@ -66,6 +66,14 @@ FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
 FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
 FLOW_TRANSFER_TOOL="${RUNPOD_BENCH_TRANSFER_TOOL:-rclone}"
 FLOW_TRANSFER_STRICT="${RUNPOD_BENCH_TRANSFER_STRICT:-0}"
+FLOW_TRANSFER_RETRIES="${RUNPOD_BENCH_TRANSFER_RETRIES:-3}"
+FLOW_TRANSFER_TIMEOUT_SECONDS="${RUNPOD_BENCH_TRANSFER_TIMEOUT_SECONDS:-1800}"
+FLOW_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_BENCH_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS:-0}"
+FLOW_RCLONE_TRANSFERS="${RUNPOD_BENCH_RCLONE_TRANSFERS:-8}"
+FLOW_RCLONE_CHECKERS="${RUNPOD_BENCH_RCLONE_CHECKERS:-16}"
+FLOW_RCLONE_MULTI_THREAD_STREAMS="${RUNPOD_BENCH_RCLONE_MULTI_THREAD_STREAMS:-4}"
+FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_BENCH_COLLECT_INCLUDE_EPOCH_CHECKPOINTS:-0}"
+FLOW_SKIP_FINAL_COLLECT="${RUNPOD_BENCH_SKIP_FINAL_COLLECT:-0}"
 FLOW_EXPECTED_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
@@ -124,6 +132,11 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
 - transfer_tool: \`${FLOW_TRANSFER_TOOL}\`
 - transfer_strict: \`${FLOW_TRANSFER_STRICT}\`
+- transfer_retries: \`${FLOW_TRANSFER_RETRIES}\`
+- transfer_timeout_seconds: \`${FLOW_TRANSFER_TIMEOUT_SECONDS}\`
+- transfer_include_epoch_checkpoints: \`${FLOW_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS}\`
+- final_collect_include_epoch_checkpoints: \`${FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS}\`
+- skip_final_collect: \`${FLOW_SKIP_FINAL_COLLECT}\`
 - image_used: \`${IMAGE_USED:-<unknown>}\`
 
 | trial | status | exit_code | local_dir |
@@ -147,6 +160,76 @@ out = {
     "last_val_loss": None,
     "last_top1": None,
     "last_top5": None,
+}
+
+transfer_trial_artifacts() {
+  local trial="$1"
+  local remote_trial_dir="$2"
+  local local_trial_dir="$3"
+  local attempt=1
+  while (( attempt <= FLOW_TRANSFER_RETRIES )); do
+    if [[ "${FLOW_TRANSFER_TOOL}" == "rclone" ]]; then
+      if command -v rclone >/dev/null 2>&1; then
+        local rclone_src rclone_cmd
+        rclone_src=":sftp,host=${SSH_HOST},user=${SSH_USER},port=${SSH_PORT},key_file=${SSH_KEY},known_hosts_file=${SSH_KNOWN_HOSTS_FILE}:${remote_trial_dir}"
+        rclone_cmd=(
+          rclone copy --create-empty-src-dirs
+          --transfers "${FLOW_RCLONE_TRANSFERS}"
+          --checkers "${FLOW_RCLONE_CHECKERS}"
+          --multi-thread-streams "${FLOW_RCLONE_MULTI_THREAD_STREAMS}"
+          --fast-list
+          "${rclone_src}" "${local_trial_dir}"
+          --include "metrics_*.json"
+          --include "progress_*.jsonl"
+          --include "train_stdout_*.log"
+          --include "train_exit_code.txt"
+          --include "model_*.pt"
+          --include "model_best_*.pt"
+          --include "telemetry/**"
+        )
+        if [[ "${FLOW_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS}" == "1" ]]; then
+          rclone_cmd+=( --include "epoch_checkpoints/**" )
+        fi
+        if timeout "${FLOW_TRANSFER_TIMEOUT_SECONDS}" "${rclone_cmd[@]}" >/dev/null 2>&1; then
+          telemetry_event "benchmark_transfer" "ok" "trial transfer complete" "{\"trial\":\"${trial}\",\"tool\":\"rclone\",\"attempt\":${attempt}}"
+          return 0
+        fi
+        telemetry_event "benchmark_transfer" "warn" "rclone_copy_failed_retry" "{\"trial\":\"${trial}\",\"attempt\":${attempt}}"
+      elif [[ "${FLOW_TRANSFER_STRICT}" == "1" ]]; then
+        echo "[runpod-bench-matrix] transfer tool rclone requested but command is missing on host" >&2
+        return 1
+      else
+        telemetry_event "benchmark_transfer" "warn" "rclone_missing_fallback_rsync" "{\"trial\":\"${trial}\",\"attempt\":${attempt}}"
+      fi
+    fi
+
+    local rsync_cmd
+    rsync_cmd=(
+      rsync -az
+      --include "metrics_*.json"
+      --include "progress_*.jsonl"
+      --include "train_stdout_*.log"
+      --include "train_exit_code.txt"
+      --include "model_*.pt"
+      --include "model_best_*.pt"
+      --include "telemetry/***"
+    )
+    if [[ "${FLOW_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS}" == "1" ]]; then
+      rsync_cmd+=( --include "epoch_checkpoints/***" )
+    fi
+    rsync_cmd+=( --exclude "*" )
+    rsync_cmd+=( -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" )
+    rsync_cmd+=( "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" )
+
+    if timeout "${FLOW_TRANSFER_TIMEOUT_SECONDS}" "${rsync_cmd[@]}" >/dev/null 2>&1; then
+      telemetry_event "benchmark_transfer" "ok" "trial transfer complete" "{\"trial\":\"${trial}\",\"tool\":\"rsync\",\"attempt\":${attempt}}"
+      return 0
+    fi
+    telemetry_event "benchmark_transfer" "warn" "rsync_copy_failed_retry" "{\"trial\":\"${trial}\",\"attempt\":${attempt}}"
+    attempt=$((attempt + 1))
+  done
+  telemetry_event "benchmark_transfer" "error" "trial transfer failed after retries" "{\"trial\":\"${trial}\",\"retries\":${FLOW_TRANSFER_RETRIES}}"
+  return 1
 }
 metrics_files = sorted(trial_dir.glob("metrics_*.json"))
 progress_files = sorted(trial_dir.glob("progress_*.jsonl"))
@@ -436,26 +519,7 @@ EOF_REMOTE
   fi
   telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
 
-  if [[ "${FLOW_TRANSFER_TOOL}" == "rclone" ]]; then
-    if command -v rclone >/dev/null 2>&1; then
-      rclone_src=":sftp,host=${SSH_HOST},user=${SSH_USER},port=${SSH_PORT},key_file=${SSH_KEY},known_hosts_file=${SSH_KNOWN_HOSTS_FILE}:${remote_trial_dir}"
-      if ! rclone copy --create-empty-src-dirs "${rclone_src}" "${local_trial_dir}" >/dev/null 2>&1; then
-        telemetry_event "benchmark_transfer" "warn" "rclone_copy_failed_fallback_rsync" "{\"trial\":\"${trial}\"}"
-        rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
-          "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
-      fi
-    elif [[ "${FLOW_TRANSFER_STRICT}" == "1" ]]; then
-      echo "[runpod-bench-matrix] transfer tool rclone requested but command is missing on host" >&2
-      exit 1
-    else
-      telemetry_event "benchmark_transfer" "warn" "rclone_missing_fallback_rsync" "{\"trial\":\"${trial}\"}"
-      rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
-        "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
-    fi
-  else
-    rsync -az -e "ssh -i ${SSH_KEY} -p ${SSH_PORT} -o BatchMode=yes -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING} -o UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
-      "${SSH_USER}@${SSH_HOST}:${remote_trial_dir}/" "${local_trial_dir}/" >/dev/null 2>&1 || true
-  fi
+  transfer_trial_artifacts "${trial}" "${remote_trial_dir}" "${local_trial_dir}" || true
 
   trial_metrics_json="$(extract_trial_metrics_json "${local_trial_dir}")"
   printf '{"trial":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \
@@ -481,7 +545,11 @@ while IFS= read -r row || [[ -n "${row}" ]]; do
   printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "${t}" "${s}" "${vl}" "${t1}" "${t5}" >> "${LOCAL_SUMMARY_MD}"
 done < "${LOCAL_SUMMARY_JSONL}"
 
-RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh" || true
+if [[ "${FLOW_SKIP_FINAL_COLLECT}" != "1" ]]; then
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
+  RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS}" \
+    bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh" || true
+fi
 
 runpod_cycle_append_report "${REPORT_MD}" \
   "## Benchmark Matrix" \

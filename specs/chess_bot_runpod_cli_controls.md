@@ -181,6 +181,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - exports `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` so training fails on runtime-cache miss/mismatch instead of runtime index fallback
 - `scripts/runpod_cycle_collect.sh`
   - pulls remote run artifacts and timing logs into local `artifacts/runpod_cycles/<run_id>/collected/`
+  - supports fast-collect mode via `RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS=0` (default include is `1`) to skip heavy `epoch_checkpoints/**` trees during rsync
   - automatically writes a best-effort runtime log bundle under `.../collected/logs_auto/`:
     - `remote_state_snapshot.txt` (GPU/process/service + train/progress log tails)
     - `train_log_indexing_summary.json` (keyword-based indexing/cache-miss detection across collected logs)
@@ -289,7 +290,16 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
-  - benchmark artifact pull prefers `rclone` SFTP (`RUNPOD_BENCH_TRANSFER_TOOL=rclone`) with automatic fallback to `rsync`; set `RUNPOD_BENCH_TRANSFER_STRICT=1` to fail fast if `rclone` is unavailable on the host
+  - benchmark trial artifact pull defaults to a fast filtered copy (metrics/progress/logs/models/telemetry), excluding `epoch_checkpoints/**` unless explicitly enabled with `RUNPOD_BENCH_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS=1`
+  - transfer controls:
+    - `RUNPOD_BENCH_TRANSFER_TOOL` (`rclone` default)
+    - `RUNPOD_BENCH_TRANSFER_RETRIES` (default `3`)
+    - `RUNPOD_BENCH_TRANSFER_TIMEOUT_SECONDS` (default `1800`)
+    - `RUNPOD_BENCH_RCLONE_TRANSFERS`/`RUNPOD_BENCH_RCLONE_CHECKERS`/`RUNPOD_BENCH_RCLONE_MULTI_THREAD_STREAMS`
+  - `rclone` SFTP is preferred with automatic fallback to filtered `rsync`; set `RUNPOD_BENCH_TRANSFER_STRICT=1` to fail fast when `rclone` is requested but unavailable
+  - final full collect can be tuned independently:
+    - `RUNPOD_BENCH_COLLECT_INCLUDE_EPOCH_CHECKPOINTS` (default `0`)
+    - `RUNPOD_BENCH_SKIP_FINAL_COLLECT=1` to skip end-of-matrix full collect entirely
   - benchmark/fetch path enforces cloud token safety by clearing write-capable HF env vars on pod-side fetch/train shells (`HF_WRITE_TOKEN`, legacy `HF_TOKEN`)
   - records `benchmark_image_used` telemetry event from provision metadata and writes image summary into trial markdown
   - runs a remote dependency freshness check against repo `requirements.txt` using pod venv, writes `artifacts/runpod_cycles/<run_id>/reports/dependency_check.json`, and emits `benchmark_dependencies` telemetry status

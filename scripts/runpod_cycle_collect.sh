@@ -36,6 +36,16 @@ AUTO_COLLECT_MANIFEST_JSON="${LOCAL_AUTO_LOGS_DIR}/collection_manifest.json"
 
 mkdir -p "${LOCAL_COLLECT_DIR}" "${LOCAL_AUTO_LOGS_DIR}"
 
+COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS:-1}"
+collect_rsync_args=( -az --info=stats1 --progress -e "${RSYNC_SSH}" )
+if [[ "${COLLECT_INCLUDE_EPOCH_CHECKPOINTS}" != "1" ]]; then
+  # Keep summary-critical trial artifacts while skipping heavy checkpoint fanout.
+  collect_rsync_args+=(
+    --exclude "manual_bench/*/epoch_checkpoints/***"
+    --exclude "manual_*/epoch_checkpoints/***"
+  )
+fi
+
 printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
   "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
 
@@ -45,7 +55,7 @@ printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o Id
   printf '[runpod-cycle-collect] local_collect_dir=%s/run_artifacts\n' "${LOCAL_COLLECT_DIR}"
 } > "${RSYNC_ARTIFACTS_LOG}"
 
-rsync -az --info=stats1 --progress -e "${RSYNC_SSH}" \
+rsync "${collect_rsync_args[@]}" \
   "${SSH_USER}@${SSH_HOST}:${REMOTE_RUN_DIR}/" "${LOCAL_COLLECT_DIR}/run_artifacts/" \
   2>&1 | tee -a "${RSYNC_ARTIFACTS_LOG}"
 
@@ -151,6 +161,7 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Remote run dir: \`${REMOTE_RUN_DIR}\`" \
   "- Local collect dir: \`${LOCAL_COLLECT_DIR}\`" \
   "- SSH endpoint used: \`${SSH_USER}@${SSH_HOST}:${SSH_PORT}\`" \
+  "- Include epoch checkpoints: \`${COLLECT_INCLUDE_EPOCH_CHECKPOINTS}\`" \
   "- Timing log (best effort): \`${LOCAL_COLLECT_DIR}/runpod_phase_times.jsonl\`" \
   "- Auto remote state snapshot: \`${AUTO_REMOTE_STATE_LOG}\`" \
   "- Auto indexing summary: \`${AUTO_INDEX_SUMMARY_JSON}\`" \
