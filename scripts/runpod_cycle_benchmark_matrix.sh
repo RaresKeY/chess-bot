@@ -261,25 +261,6 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 |---|---:|---:|---|
 MD
 
-extract_trial_metrics_json() {
-  local trial_dir="$1"
-  python3 - "$trial_dir" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-trial_dir = Path(sys.argv[1])
-out = {
-    "duration_seconds": None,
-    "rows_per_second": None,
-    "epochs_completed": None,
-    "train_rows": None,
-    "last_train_loss": None,
-    "last_val_loss": None,
-    "last_top1": None,
-    "last_top5": None,
-}
-
 transfer_trial_artifacts() {
   local trial="$1"
   local remote_trial_dir="$2"
@@ -348,6 +329,24 @@ transfer_trial_artifacts() {
   done
   telemetry_event "benchmark_transfer" "error" "trial transfer failed after retries" "{\"trial\":\"${trial}\",\"retries\":${FLOW_TRANSFER_RETRIES}}"
   return 1
+}
+extract_trial_metrics_json() {
+  local trial_dir="$1"
+  python3 - "$trial_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+trial_dir = Path(sys.argv[1])
+out = {
+    "duration_seconds": None,
+    "rows_per_second": None,
+    "epochs_completed": None,
+    "train_rows": None,
+    "last_train_loss": None,
+    "last_val_loss": None,
+    "last_top1": None,
+    "last_top5": None,
 }
 metrics_files = sorted(trial_dir.glob("metrics_*.json"))
 progress_files = sorted(trial_dir.glob("progress_*.jsonl"))

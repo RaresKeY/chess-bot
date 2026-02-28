@@ -62,6 +62,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV` | `1` | `0`, `1` | Inject managed temp public key into pod env | same |
 | `RUNPOD_SET_UNIQUE_REPO_DIR` | `1` | `0`, `1` | Per-run `REPO_DIR` injection to avoid stale volume collisions | same |
 | `RUNPOD_REQUIRE_SSH_READY` | `1` | `0`, `1` | Wait for direct SSH readiness before start success | same |
+| `RUNPOD_SSH_READY_TIMEOUT_SECONDS` | `360` | integer `>=1` | SSH readiness deadline before start failure | same |
 | `RUNPOD_TERMINATE_ON_SSH_NOT_READY` | `1` | `0`, `1` | Auto-terminate if readiness times out | same |
 
 ## Full-Train Wrappers (`scripts/runpod_full_train_easy.sh`, `scripts/runpod_cycle_full_train_hf.sh`)

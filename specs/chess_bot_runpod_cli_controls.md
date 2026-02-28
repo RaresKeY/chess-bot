@@ -140,7 +140,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - smoke-service default injection can be controlled with `RUNPOD_SET_SMOKE_SERVICE_ENVS`
   - now verifies direct SSH login readiness before returning success (`RUNPOD_REQUIRE_SSH_READY=1` default)
   - SSH readiness wait controls:
-    - `RUNPOD_SSH_READY_TIMEOUT_SECONDS` (default `240`)
+    - `RUNPOD_SSH_READY_TIMEOUT_SECONDS` (default `360`)
     - `RUNPOD_SSH_READY_POLL_SECONDS` (default `8`)
   - on SSH readiness timeout, start script can auto-terminate the just-created pod to avoid stalled-cost leaks (`RUNPOD_TERMINATE_ON_SSH_NOT_READY=1` default)
   - saves provisioning JSON to `artifacts/runpod_cycles/<run_id>/provision.json`
