@@ -292,6 +292,8 @@ OUT
         self.assertIn("FLOW_BATCH_ATTEMPTS", text)
         self.assertIn("build_batch_attempt_plan()", text)
         self.assertIn("benchmark_batch_plan", text)
+        self.assertIn("elif (( remote_vram_mib >= 44000 )); then", text)
+        self.assertIn("FLOW_BATCH_SIZE_RESOLVED=8192", text)
         self.assertIn("benchmark_trial_batch_attempt", text)
         self.assertIn("batch_size_used", text)
         self.assertIn("oom detected; retrying lower batch", text)
@@ -410,8 +412,31 @@ OUT
     def test_managed_temp_key_path_only_no_legacy_key_overrides(self):
         text = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
         self.assertIn('printf \'%s\\n\' "${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"', text)
+        self.assertIn("runpod_cycle_assert_managed_ssh_key_path()", text)
+        self.assertIn("refusing personal SSH key path under", text)
         self.assertNotIn("RUNPOD_SSH_KEY", text)
         self.assertNotIn("RUNPOD_SSH_PUBKEY_PATH", text)
+        self.assertNotIn("~/.ssh/id_ed25519", text)
+
+    def test_managed_key_guard_rejects_home_ssh_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["RUNPOD_TEMP_SSH_KEY_BASE"] = str(home / ".ssh" / "id_ed25519")
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-lc",
+                    "source scripts/runpod_cycle_common.sh && runpod_cycle_assert_managed_ssh_key_path",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("refusing personal SSH key path under", proc.stderr)
 
     def test_full_train_hf_context_probe_uses_quoted_heredoc(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")

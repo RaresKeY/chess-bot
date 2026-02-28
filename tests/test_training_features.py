@@ -290,6 +290,7 @@ class TrainingFeatureTests(unittest.TestCase):
                     verbose=False,
                     show_progress=False,
                     progress_callback=on_progress,
+                    batch_progress_interval_sec=0.0001,
                 )
 
         self.assertEqual(dataset_info["train_rows"], 4)
@@ -304,6 +305,7 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertIn("dataloader_ready", event_names)
         self.assertIn("train_loop_start", event_names)
         self.assertIn("train_setup", event_names)
+        self.assertIn("batch_progress", event_names)
         self.assertEqual(event_names.count("epoch_start"), 2)
         self.assertEqual(event_names.count("epoch_end"), 2)
         self.assertEqual(event_names[-1], "train_complete")

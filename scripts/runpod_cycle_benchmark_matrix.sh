@@ -347,7 +347,7 @@ if [[ -z "${FLOW_BATCH_SIZE_OVERRIDE}" ]]; then
     if (( remote_vram_mib >= 70000 )); then
       FLOW_BATCH_SIZE_RESOLVED=8192
     elif (( remote_vram_mib >= 44000 )); then
-      FLOW_BATCH_SIZE_RESOLVED=4096
+      FLOW_BATCH_SIZE_RESOLVED=8192
     elif (( remote_vram_mib >= 22000 )); then
       FLOW_BATCH_SIZE_RESOLVED=2048
     elif (( remote_vram_mib >= 15000 )); then

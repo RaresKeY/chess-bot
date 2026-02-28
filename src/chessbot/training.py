@@ -2520,6 +2520,7 @@ def train_next_move_model_from_jsonl_paths(
     verbose: bool = True,
     show_progress: bool = True,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    batch_progress_interval_sec: float = 15.0,
     rollout_horizon: int = 1,
     closeness_horizon: int = 4,
     rollout_loss_decay: float = 0.7,
@@ -3102,6 +3103,7 @@ def train_next_move_model_from_jsonl_paths(
 
     history: List[Dict] = []
     _emit_stage("train_loop_start", epochs=int(epochs))
+    batch_progress_interval = max(0.0, float(batch_progress_interval_sec))
     for epoch in range(1, epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(int(epoch))
@@ -3121,6 +3123,9 @@ def train_next_move_model_from_jsonl_paths(
         running_l1_penalty = 0.0
         seen = 0
         total_batches = len(train_loader)
+        epoch_started = time.perf_counter()
+        last_batch_progress_emit = epoch_started
+        seen_at_last_emit = 0
         for batch_idx, (tokens, lengths, labels, winners, phases, side_to_moves) in enumerate(train_loader, start=1):
             tokens = tokens.to(device, non_blocking=True)
             lengths = lengths.to(device, non_blocking=True)
@@ -3157,6 +3162,40 @@ def train_next_move_model_from_jsonl_paths(
             seen += bs
             running_loss += loss.item() * bs
             running_l1_penalty += l1_penalty_value * bs
+            if progress_callback is not None and is_primary and batch_progress_interval > 0.0:
+                now = time.perf_counter()
+                elapsed_since_emit = now - last_batch_progress_emit
+                is_last_batch = batch_idx == total_batches
+                if elapsed_since_emit >= batch_progress_interval or is_last_batch:
+                    elapsed_epoch = max(now - epoch_started, 1e-9)
+                    elapsed_interval = max(elapsed_since_emit, 1e-9)
+                    interval_seen = max(0, int(seen - seen_at_last_emit))
+                    samples_per_sec_epoch = float(seen / elapsed_epoch)
+                    samples_per_sec_interval = float(interval_seen / elapsed_interval)
+                    avg_batch_seen = (float(seen) / float(batch_idx)) if batch_idx > 0 else 0.0
+                    remaining_batches = max(0, int(total_batches - batch_idx))
+                    eta_sec = (
+                        float((avg_batch_seen * remaining_batches) / samples_per_sec_epoch)
+                        if samples_per_sec_epoch > 0
+                        else None
+                    )
+                    progress_callback(
+                        {
+                            "event": "batch_progress",
+                            "epoch": int(epoch),
+                            "epochs": int(epochs),
+                            "batch_idx": int(batch_idx),
+                            "train_batches_total": int(total_batches),
+                            "samples_seen_epoch": int(seen),
+                            "samples_per_sec_epoch": samples_per_sec_epoch,
+                            "samples_per_sec_interval": samples_per_sec_interval,
+                            "epoch_eta_sec": eta_sec,
+                            "running_train_loss": float(running_loss / max(seen, 1)),
+                            "running_train_l1_penalty": float(running_l1_penalty / max(seen, 1)),
+                        }
+                    )
+                    last_batch_progress_emit = now
+                    seen_at_last_emit = int(seen)
             if verbose and show_progress and is_primary:
                 _print_epoch_progress(epoch, epochs, batch_idx, total_batches, running_loss, seen)
         if verbose and show_progress and total_batches > 0 and is_primary:

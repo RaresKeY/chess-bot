@@ -163,8 +163,23 @@ runpod_cycle_ssh_pubkey_path() {
   printf '%s\n' "$(runpod_cycle_ssh_key).pub"
 }
 
+runpod_cycle_assert_managed_ssh_key_path() {
+  local key_path home_ssh_dir
+  key_path="$(runpod_cycle_ssh_key)"
+  if [[ -z "${key_path}" ]]; then
+    echo "[runpod-cycle] managed SSH key path is empty" >&2
+    exit 1
+  fi
+  home_ssh_dir="${HOME:-}/.ssh/"
+  if [[ -n "${HOME:-}" && "${key_path}" == "${home_ssh_dir}"* ]]; then
+    echo "[runpod-cycle] refusing personal SSH key path under ${home_ssh_dir}; use managed temp key path instead" >&2
+    exit 1
+  fi
+}
+
 runpod_cycle_ensure_ssh_keypair() {
   local key_path pub_path
+  runpod_cycle_assert_managed_ssh_key_path
   key_path="$(runpod_cycle_ssh_key)"
   pub_path="$(runpod_cycle_ssh_pubkey_path)"
   command -v ssh-keygen >/dev/null 2>&1 || {
@@ -209,6 +224,7 @@ runpod_cycle_ssh_base_args() {
   local repo_root="$1"
   local pod_json="$2"
   local host port key user
+  runpod_cycle_assert_managed_ssh_key_path
   host="$(runpod_cycle_ssh_host "${pod_json}")"
   port="$(runpod_cycle_ssh_port "${pod_json}")"
   user="$(runpod_cycle_ssh_user)"

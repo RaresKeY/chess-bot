@@ -92,6 +92,9 @@ def _summarize_telemetry_samples(samples: List[Dict[str, Any]]) -> Dict[str, Any
         "last_val_loss",
         "last_top1",
         "last_top5",
+        "last_samples_per_sec_epoch",
+        "last_samples_per_sec_interval",
+        "last_epoch_eta_sec",
     ]
     metrics: Dict[str, Any] = {}
     for key in numeric_keys:
@@ -344,6 +347,15 @@ class _TrainingTelemetryLogger:
                 state_updates["last_top1"] = _safe_float(metrics.get("top1"))
                 state_updates["last_top5"] = _safe_float(metrics.get("top5"))
                 state_updates["last_lr"] = _safe_float(metrics.get("lr"))
+        if event_name == "batch_progress":
+            state_updates["batch_idx"] = _safe_int(evt.get("batch_idx"))
+            state_updates["train_batches_total"] = _safe_int(evt.get("train_batches_total"))
+            state_updates["samples_seen_epoch"] = _safe_int(evt.get("samples_seen_epoch"))
+            state_updates["last_samples_per_sec_epoch"] = _safe_float(evt.get("samples_per_sec_epoch"))
+            state_updates["last_samples_per_sec_interval"] = _safe_float(evt.get("samples_per_sec_interval"))
+            state_updates["last_epoch_eta_sec"] = _safe_float(evt.get("epoch_eta_sec"))
+            state_updates["last_train_loss"] = _safe_float(evt.get("running_train_loss"))
+            state_updates["last_train_l1_penalty"] = _safe_float(evt.get("running_train_l1_penalty"))
         with self._state_lock:
             self._latest_state.update({k: v for k, v in state_updates.items() if v is not None or isinstance(v, str)})
 
@@ -611,6 +623,12 @@ def main() -> None:
         help="Telemetry sampling interval in seconds",
     )
     parser.add_argument(
+        "--batch-progress-interval-sec",
+        type=float,
+        default=15.0,
+        help="Emit batch-level progress events every N seconds while inside an epoch (0 disables periodic batch events).",
+    )
+    parser.add_argument(
         "--telemetry-dir",
         default="local_logs/training_telemetry",
         help="Base directory for per-run telemetry logs (gitignored local folder)",
@@ -686,6 +704,7 @@ def main() -> None:
                 "backend": str(args.distributed_backend),
             },
             "telemetry_interval_sec": float(args.telemetry_interval_sec),
+            "batch_progress_interval_sec": float(args.batch_progress_interval_sec),
             "model_request": {
                 "embed_dim": int(args.embed_dim),
                 "hidden_dim": int(args.hidden_dim),
@@ -832,6 +851,7 @@ def main() -> None:
             "device_requested": str(device_request),
             "batch_size": int(args.batch_size),
             "num_workers": int(args.num_workers),
+            "batch_progress_interval_sec": float(args.batch_progress_interval_sec),
             "amp_requested": bool(args.amp),
             "amp_dtype": str(args.amp_dtype),
             "tf32": tf32_state,
@@ -898,6 +918,7 @@ def main() -> None:
             verbose=args.verbose,
             show_progress=args.progress,
             progress_callback=emit_progress,
+            batch_progress_interval_sec=args.batch_progress_interval_sec,
             rollout_horizon=args.rollout_horizon,
             closeness_horizon=args.closeness_horizon,
             rollout_loss_decay=args.rollout_loss_decay,

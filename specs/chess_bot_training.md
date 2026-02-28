@@ -113,6 +113,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - Verbose logs include per-file train/val input lists and loaded row counts per input file when multiple datasets are provided
 - Core training loop can emit epoch start/end summaries, a per-epoch batch progress bar, and best-checkpoint update/restore messages
 - When `--progress-jsonl-out` is set, the CLI appends JSONL events with timestamps for host-side progress polling; startup now emits deterministic pre-epoch stage markers (`data_prep_start`, `runtime_cache_lookup_start`/`done`, `vocab_rows_meta_lookup_start`/`done`, optional `vocab_rows_fallback_scan_start`/`done`, `dataset_index_ready`, `subset_sampling_resolved`, `dataloader_ready`, `train_loop_start`) before `train_setup`/epoch events
+- Training can now emit periodic batch-level progress rows during each epoch (`event=batch_progress`) with running throughput/ETA fields (`samples_per_sec_epoch`, `samples_per_sec_interval`, `epoch_eta_sec`, running loss terms), controlled by `--batch-progress-interval-sec` (default `15`, `0` disables)
 
 ## Output Artifact Contract
 `artifacts/model.pt` stores:

@@ -122,6 +122,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_common.sh`
   - shared helpers for modular lifecycle scripts (run id paths, keyring token lookup, pod JSON parsing, SSH/connection fields)
   - managed temp key only: scripts always use `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` and do not support personal/local key override variables
+  - hard guard rejects managed-key paths under `${HOME}/.ssh/` (fails fast with explicit error) to prevent accidental personal-key use in RunPod flows
   - shared SSH args disable host agent/keyring import prompts for managed keys (`AddKeysToAgent=no`, `IdentityAgent=none`)
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
@@ -291,7 +292,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - supports sparse lambda sweeps in one run via `RUNPOD_BENCH_SPARSITY_L1_LAMBDAS` (comma-separated); sparse base trials are expanded into trial ids like `<base>@<lambda>` and each variant is executed independently
   - benchmark batch sizing now supports auto mode (`RUNPOD_BENCH_BATCH_SIZE=auto` default path):
-    - resolves an aggressive per-rank batch target from remote GPU VRAM (`8192/4096/2048/1024/512` tiers)
+    - resolves an aggressive per-rank batch target from remote GPU VRAM (`8192/2048/1024/512` tiers; >=44 GB now starts at `8192` and relies on OOM downshift)
     - builds a descending retry plan and reruns the same trial at lower batches when OOM signatures are detected in train logs
     - explicit numeric `RUNPOD_BENCH_BATCH_SIZE` remains a hard override (no auto downgrade plan)
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`

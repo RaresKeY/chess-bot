@@ -39,6 +39,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional idle watchdog for autostop behavior
 - Host-side cycle scripts now default to safer SSH client behavior (`StrictHostKeyChecking=accept-new` with persistent `config/runpod_known_hosts`) instead of the older insecure `/tmp` + host-key-checking-disabled pattern; overrides remain available via `RUNPOD_SSH_HOST_KEY_CHECKING` and `RUNPOD_SSH_KNOWN_HOSTS_FILE`
 - Host-side RunPod flows use only a managed temporary SSH keypair at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` (no personal/local key override path)
+- RunPod key guard fails fast when `RUNPOD_TEMP_SSH_KEY_BASE` points under `${HOME}/.ssh/` to prevent accidental personal-key usage
 - Managed-key bootstrap creates the temp keypair when missing and reuses it for subsequent lifecycle steps in the same flow
 - Host-side SSH invocations now force `AddKeysToAgent=no` and `IdentityAgent=none` to prevent desktop keyring/gpg-agent import passphrase prompts for managed temp keys
 - Managed key env injection toggle is `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
