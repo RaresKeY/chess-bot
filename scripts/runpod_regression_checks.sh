@@ -8,10 +8,14 @@ if [[ ! -x "${PY_BIN}" ]]; then
 fi
 
 RUN_LOCAL_SMOKE="${RUN_LOCAL_SMOKE:-0}"
+RUN_CONNECTIVITY_TELEMETRY_CHECKS="${RUN_CONNECTIVITY_TELEMETRY_CHECKS:-1}"
+RUN_CONNECTIVITY_PROVIDER="${RUN_CONNECTIVITY_PROVIDER:-runpod}"
 
 echo "[runpod-regression] repo=${REPO_ROOT}"
 echo "[runpod-regression] python=${PY_BIN}"
 echo "[runpod-regression] run-local-smoke=${RUN_LOCAL_SMOKE}"
+echo "[runpod-regression] run-connectivity-telemetry-checks=${RUN_CONNECTIVITY_TELEMETRY_CHECKS}"
+echo "[runpod-regression] run-connectivity-provider=${RUN_CONNECTIVITY_PROVIDER}"
 
 run_step() {
   local name="$1"
@@ -30,6 +34,14 @@ run_step "unit-tests (runpod helpers/scripts)" \
 
 run_step "cli-doctor (REST + GraphQL auth diagnostics)" \
   bash scripts/runpod_cli_doctor.sh
+
+if [[ "${RUN_CONNECTIVITY_TELEMETRY_CHECKS}" == "1" ]]; then
+  run_step "connectivity+telemetry checks (timeout guarded)" \
+    bash scripts/cloud_connectivity_health_checks.sh --provider "${RUN_CONNECTIVITY_PROVIDER}"
+else
+  echo
+  echo "[runpod-regression] skipping connectivity+telemetry category (set RUN_CONNECTIVITY_TELEMETRY_CHECKS=1)"
+fi
 
 if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
   run_step "template-list (manual REST probe)" \

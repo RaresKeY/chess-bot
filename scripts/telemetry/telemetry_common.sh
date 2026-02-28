@@ -25,7 +25,10 @@ telemetry_emit_event() {
   local event_name="$1"
   local status="$2"
   local message="${3:-}"
-  local extra_json="${4:-{}}"
+  local extra_json="${4:-}"
+  if [[ -z "${extra_json}" ]]; then
+    extra_json='{}'
+  fi
   local repo_root run_id out_dir out_file
   repo_root="$(telemetry_repo_root)"
   run_id="$(telemetry_run_id)"
@@ -39,7 +42,7 @@ telemetry_emit_event() {
     --arg event "${event_name}" \
     --arg status "${status}" \
     --arg message "${message}" \
-    --argjson extra "${extra_json:-{}}" \
+    --argjson extra "${extra_json}" \
     '{ts_utc:$ts_utc,ts_epoch_ms:$ts_epoch_ms,run_id:$run_id,event:$event,status:$status,message:$message,extra:$extra}' \
     >> "${out_file}"
 }

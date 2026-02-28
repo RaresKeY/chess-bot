@@ -115,6 +115,8 @@ OUT
             "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_start.sh",
             "scripts/runpod_cycle_watchdog.sh",
+            "scripts/cloud_connectivity_health_checks.sh",
+            "scripts/runpod_connectivity_telemetry_checks.sh",
             "scripts/telemetry_control.sh",
             "scripts/telemetry_emit_event.sh",
             "scripts/telemetry_checkpoint.sh",

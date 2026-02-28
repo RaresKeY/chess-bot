@@ -9,6 +9,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cli_doctor.sh`
 - `scripts/runpod_quick_launch.sh`
 - `scripts/runpod_regression_checks.sh`
+- `scripts/cloud_connectivity_health_checks.sh`
+- `scripts/cloud_checks/providers/runpod.sh`
+- `scripts/runpod_connectivity_telemetry_checks.sh`
 - `scripts/runpod_cycle_common.sh`
 - `scripts/runpod_cycle_start.sh`
 - `scripts/runpod_cycle_push_dataset.sh`
@@ -100,8 +103,16 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_regression_checks.sh`
   - runs RunPod-focused unit tests (`tests/test_runpod_api_helpers.py`, `tests/test_runpod_local_smoke_script.py`)
   - runs `scripts/runpod_cli_doctor.sh`
+  - runs timeout-guarded connectivity+telemetry category via `scripts/cloud_connectivity_health_checks.sh --provider runpod` (default enabled, can disable with `RUN_CONNECTIVITY_TELEMETRY_CHECKS=0`)
+  - provider can be overridden with `RUN_CONNECTIVITY_PROVIDER` for cross-cloud architecture parity
   - optionally runs direct `template-list`/`gpu-search` probes when `RUNPOD_API_KEY` is set
   - optionally runs Docker local smoke via `RUN_LOCAL_SMOKE=1`
+- `scripts/cloud_connectivity_health_checks.sh`
+  - provider-based connectivity/health/telemetry framework with timeout-guarded checks
+  - RunPod provider implementation lives in `scripts/cloud_checks/providers/runpod.sh`
+- `scripts/runpod_connectivity_telemetry_checks.sh`
+  - backward-compatible wrapper to `cloud_connectivity_health_checks.sh --provider runpod`
+  - maps legacy env names (`RUNPOD_CONNECTIVITY_TIMEOUT_SECONDS`, `RUNPOD_ENABLE_LIVE_CONNECTIVITY_CHECKS`) to framework envs
 - `scripts/runpod_quick_launch.sh`
   - thin wrapper around `runpod_provision.py provision`
   - driven by env vars (`RUNPOD_TEMPLATE_NAME`, `RUNPOD_POD_NAME`, `RUNPOD_GPU_TYPE_ID`, etc.)

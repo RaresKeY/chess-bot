@@ -91,3 +91,9 @@ Define the host-side telemetry event/checkpoint contract for RunPod cycle flows,
   - checkpoint/event hooks in modified cycle scripts
   - entrypoint OpenTelemetry/healthchecks controls
   - Dockerfile telemetry runtime dependencies
+- Connectivity timeout checks category:
+  - framework script: `scripts/cloud_connectivity_health_checks.sh`
+  - RunPod compatibility wrapper: `scripts/runpod_connectivity_telemetry_checks.sh`
+  - local telemetry path checks always run
+  - live RunPod connectivity probes are opt-in (`RUNPOD_ENABLE_LIVE_CONNECTIVITY_CHECKS=1`)
+  - every probe must be timeout-guarded (`RUNPOD_CONNECTIVITY_TIMEOUT_SECONDS`)

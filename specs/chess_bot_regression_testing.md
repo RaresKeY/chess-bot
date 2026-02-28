@@ -7,6 +7,8 @@ Define how to add regression tests after a bug fix so the same failure mode is c
 - Applies to all `chess_bot` components (`scripts/*`, `src/chessbot/*`)
 - Covers unit/integration-style regressions in local test suites
 - Focuses on test additions tied to a specific observed bug or bad flow
+- Includes timeout-guarded connectivity categories for external services (for example RunPod API + telemetry command paths) when these checks are opt-in and deterministic in local mode
+  - preferred architecture is provider-based (`scripts/cloud_connectivity_health_checks.sh --provider <name>`)
 
 ## When To Add A Regression Test
 - A real runtime bug was observed (traceback, wrong output, bad API call, stuck flow)
@@ -65,6 +67,11 @@ Do not skip the regression test when:
 - For full-suite convenience, use:
   - `bash scripts/test.sh`
   - compatibility alias: `bash scripts/run_all_tests.sh`
+  - RunPod connectivity+telemetry category:
+    - `bash scripts/cloud_connectivity_health_checks.sh --provider runpod`
+    - compatibility alias: `bash scripts/runpod_connectivity_telemetry_checks.sh`
+    - enable live API probes with `--live` (or `RUNPOD_ENABLE_LIVE_CONNECTIVITY_CHECKS=1` via wrapper)
+    - control per-step timeout with `CLOUD_CHECK_TIMEOUT_SECONDS` (or `RUNPOD_CONNECTIVITY_TIMEOUT_SECONDS` via wrapper)
 
 ## Anti-Patterns
 - Fixing the bug without a test when a local test is feasible

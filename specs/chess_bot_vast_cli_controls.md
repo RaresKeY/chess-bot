@@ -12,6 +12,8 @@ Define the Vast.ai host-side provisioning and lifecycle workflow added as a para
 - `scripts/vast_cycle_stop.sh`
 - `scripts/vast_cycle_terminate.sh`
 - `scripts/vast_cycle_status.sh`
+- `scripts/cloud_connectivity_health_checks.sh` (provider framework)
+- `scripts/cloud_checks/providers/vast.sh` (Vast provider checks)
 - `deploy/vast_cloud_training/README.md`
 - `deploy/vast_cloud_training/PLAN.md`
 - `deploy/vast_cloud_training/env.example`
@@ -57,6 +59,7 @@ Vast scripts resolve API key in this order:
 ## Validation
 - `tests/test_vast_api_helpers.py`
 - `tests/test_vast_cycle_scripts.py`
+- `tests/test_cloud_connectivity_architecture.py` (provider interface/timeout framework)
 
 ## Sources
 - Vast API reference and endpoint descriptions: https://docs.vast.ai/api-reference/instances
