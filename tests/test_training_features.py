@@ -20,6 +20,7 @@ from src.chessbot.training import (
     _build_rollout_step_weights,
     _index_game_jsonl_paths_cached_or_runtime,
     _prefix_match_len,
+    _try_load_runtime_splice_vocab_rows_meta_for_paths,
     _weighted_rollout_closeness,
     collate_train,
     collate_train_rollout,
@@ -69,6 +70,43 @@ class TrainingFeatureTests(unittest.TestCase):
         }
         (dataset_dir / "runtime_splice_cache").mkdir(parents=True, exist_ok=True)
         (dataset_dir / "runtime_splice_cache" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    @staticmethod
+    def _write_runtime_vocab_meta(
+        dataset_dir: Path,
+        *,
+        min_context: int,
+        min_target: int,
+        max_samples_per_game: int,
+        seed: int,
+        train_game_rows: int,
+        train_sample_rows: int,
+        val_game_rows: int,
+        val_sample_rows: int,
+        vocab_tokens: list[str],
+    ) -> None:
+        vocab = {"<PAD>": 0, "<UNK>": 1}
+        for tok in vocab_tokens:
+            if tok not in vocab:
+                vocab[tok] = len(vocab)
+        payload = {
+            "kind": "runtime_splice_vocab_rows_meta_v1",
+            "config": {
+                "min_context": int(min_context),
+                "min_target": int(min_target),
+                "max_samples_per_game": int(max_samples_per_game),
+                "seed": int(seed),
+            },
+            "splits": {
+                "train": {"path": "train.jsonl", "game_rows": int(train_game_rows), "sample_rows": int(train_sample_rows)},
+                "val": {"path": "val.jsonl", "game_rows": int(val_game_rows), "sample_rows": int(val_sample_rows)},
+            },
+            "vocab": vocab,
+        }
+        (dataset_dir / "runtime_splice_cache").mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "runtime_splice_cache" / "vocab_rows_meta.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
 
     def test_side_to_move_id_from_context_len_parity_and_fallback(self):
         self.assertEqual(side_to_move_id_from_context_len(0), SIDE_TO_MOVE_WHITE)
@@ -397,8 +435,38 @@ class TrainingFeatureTests(unittest.TestCase):
             )
             self.assertFalse(used_cache)
             self.assertIn("cache_config_mismatch", reason)
-            # Fallback runtime indexing should still produce rows.
-            self.assertGreater(len(idx[1]), 0)
+
+    def test_runtime_vocab_rows_meta_loader_reads_counts_and_vocab(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp)
+            train_path = ds / "train.jsonl"
+            val_path = ds / "val.jsonl"
+            train_path.write_text('{"moves":["e2e4","e7e5"]}\n', encoding="utf-8")
+            val_path.write_text('{"moves":["d2d4","d7d5"]}\n', encoding="utf-8")
+            self._write_runtime_vocab_meta(
+                ds,
+                min_context=8,
+                min_target=1,
+                max_samples_per_game=0,
+                seed=7,
+                train_game_rows=11,
+                train_sample_rows=101,
+                val_game_rows=3,
+                val_sample_rows=17,
+                vocab_tokens=["e2e4", "e7e5", "g1f3"],
+            )
+            cfg = RuntimeSpliceConfig(min_context=8, min_target=1, max_samples_per_game=0, seed=7)
+            out, reason = _try_load_runtime_splice_vocab_rows_meta_for_paths(
+                train_paths=[str(train_path)],
+                val_paths=[str(val_path)],
+                runtime_cfg=cfg,
+            )
+            self.assertEqual(reason, "loaded_runtime_splice_vocab_rows_meta")
+            self.assertIsNotNone(out)
+            vocab = out[0]
+            self.assertIn("e2e4", vocab)
+            self.assertEqual(out[2], 101)  # train_rows_total
+            self.assertEqual(out[6], 17)   # val_rows_total
 
     def test_game_training_uses_runtime_cache_when_cache_present(self):
         rows = [

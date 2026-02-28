@@ -786,6 +786,121 @@ def _count_rows_in_game_jsonl_paths_runtime_splice(
     return sample_rows_by_file, total_sample_rows, game_rows_by_file, total_game_rows
 
 
+def _try_load_runtime_splice_vocab_rows_meta_for_paths(
+    train_paths: List[str],
+    val_paths: List[str],
+    runtime_cfg: RuntimeSpliceConfig,
+) -> Tuple[
+    Optional[
+        Tuple[
+            Dict[str, int],
+            Dict[str, int],
+            int,
+            Dict[str, int],
+            int,
+            Dict[str, int],
+            int,
+            Dict[str, int],
+            int,
+        ]
+    ],
+    str,
+]:
+    """
+    Attempt to load precomputed vocabulary + split row counts from runtime splice metadata.
+
+    Metadata file location per dataset:
+      <dataset_dir>/runtime_splice_cache/vocab_rows_meta.json
+    """
+
+    def _cfg_matches(meta_cfg: Dict[str, Any]) -> bool:
+        keys = ("min_context", "min_target", "max_samples_per_game", "seed")
+        for key in keys:
+            try:
+                if int(meta_cfg.get(key, -10**9)) != int(getattr(runtime_cfg, key)):
+                    return False
+            except Exception:
+                return False
+        return True
+
+    path_to_meta: Dict[str, Dict[str, Any]] = {}
+    for p in list(train_paths) + list(val_paths):
+        p_str = os.fspath(p)
+        if p_str in path_to_meta:
+            continue
+        dataset_dir = Path(p_str).resolve().parent
+        meta_path = dataset_dir / "runtime_splice_cache" / "vocab_rows_meta.json"
+        if not meta_path.is_file():
+            return None, f"vocab_rows_meta_missing:{meta_path}"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return None, f"vocab_rows_meta_invalid:{exc}"
+        if str(meta.get("kind", "")) != "runtime_splice_vocab_rows_meta_v1":
+            return None, f"vocab_rows_meta_kind_invalid:{meta.get('kind')}"
+        cfg_obj = meta.get("config")
+        if not isinstance(cfg_obj, dict) or not _cfg_matches(cfg_obj):
+            return None, "vocab_rows_meta_config_mismatch"
+        if not isinstance(meta.get("vocab"), dict):
+            return None, "vocab_rows_meta_vocab_missing"
+        if not isinstance(meta.get("splits"), dict):
+            return None, "vocab_rows_meta_splits_missing"
+        path_to_meta[p_str] = meta
+
+    vocab: Dict[str, int] = {"<PAD>": 0, "<UNK>": 1}
+    train_rows_by_file: Dict[str, int] = {}
+    val_rows_by_file: Dict[str, int] = {}
+    train_game_rows_by_file: Dict[str, int] = {}
+    val_game_rows_by_file: Dict[str, int] = {}
+    train_rows_total = 0
+    val_rows_total = 0
+    train_games_total = 0
+    val_games_total = 0
+
+    for p in train_paths:
+        p_str = os.fspath(p)
+        meta = path_to_meta[p_str]
+        split_obj = (meta.get("splits") or {}).get("train")
+        if not isinstance(split_obj, dict):
+            return None, f"vocab_rows_meta_split_missing:train:{p_str}"
+        sample_rows = int(split_obj.get("sample_rows", 0) or 0)
+        game_rows = int(split_obj.get("game_rows", 0) or 0)
+        train_rows_by_file[p_str] = sample_rows
+        train_game_rows_by_file[p_str] = game_rows
+        train_rows_total += sample_rows
+        train_games_total += game_rows
+        for tok in (meta.get("vocab") or {}).keys():
+            if tok in {"<PAD>", "<UNK>"}:
+                continue
+            if tok not in vocab:
+                vocab[tok] = len(vocab)
+
+    for p in val_paths:
+        p_str = os.fspath(p)
+        meta = path_to_meta[p_str]
+        split_obj = (meta.get("splits") or {}).get("val")
+        if not isinstance(split_obj, dict):
+            return None, f"vocab_rows_meta_split_missing:val:{p_str}"
+        sample_rows = int(split_obj.get("sample_rows", 0) or 0)
+        game_rows = int(split_obj.get("game_rows", 0) or 0)
+        val_rows_by_file[p_str] = sample_rows
+        val_game_rows_by_file[p_str] = game_rows
+        val_rows_total += sample_rows
+        val_games_total += game_rows
+
+    return (
+        vocab,
+        train_rows_by_file,
+        train_rows_total,
+        train_game_rows_by_file,
+        train_games_total,
+        val_rows_by_file,
+        val_rows_total,
+        val_game_rows_by_file,
+        val_games_total,
+    ), "loaded_runtime_splice_vocab_rows_meta"
+
+
 def _runtime_index_memory_bytes(path_ids, offsets, splice_indices, sample_phase_ids) -> int:
     total = 0
     for arr_obj in (path_ids, offsets, splice_indices, sample_phase_ids):
@@ -1719,19 +1834,39 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 runtime_cfg,
                 expected_split="val",
             )
-        (
-            vocab,
-            train_rows_by_file,
-            train_rows_total,
-            train_game_rows_by_file,
-            train_games_total,
-        ) = _build_vocab_and_count_rows_from_train_game_paths(train_paths, runtime_cfg)
-        (
-            val_rows_by_file,
-            val_rows_total,
-            val_game_rows_by_file,
-            val_games_total,
-        ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
+        meta_loaded = False
+        meta_out, _meta_reason = _try_load_runtime_splice_vocab_rows_meta_for_paths(
+            train_paths=train_paths,
+            val_paths=val_paths,
+            runtime_cfg=runtime_cfg,
+        )
+        if meta_out is not None:
+            (
+                vocab,
+                train_rows_by_file,
+                train_rows_total,
+                train_game_rows_by_file,
+                train_games_total,
+                val_rows_by_file,
+                val_rows_total,
+                val_game_rows_by_file,
+                val_games_total,
+            ) = meta_out
+            meta_loaded = True
+        else:
+            (
+                vocab,
+                train_rows_by_file,
+                train_rows_total,
+                train_game_rows_by_file,
+                train_games_total,
+            ) = _build_vocab_and_count_rows_from_train_game_paths(train_paths, runtime_cfg)
+            (
+                val_rows_by_file,
+                val_rows_total,
+                val_game_rows_by_file,
+                val_games_total,
+            ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
         cache_load_reason_by_split = {
             "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
             "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),
@@ -1745,9 +1880,17 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         train_runtime_index_bytes = _runtime_index_memory_bytes(train_index[1], train_index[2], train_index[3], train_index[4])
         val_runtime_index_bytes = _runtime_index_memory_bytes(val_index[1], val_index[2], val_index[3], val_index[4])
         if train_cache_used and val_cache_used:
-            data_loading_mode = "indexed_game_jsonl_runtime_splice_cache"
+            data_loading_mode = (
+                "indexed_game_jsonl_runtime_splice_cache_meta"
+                if meta_loaded
+                else "indexed_game_jsonl_runtime_splice_cache"
+            )
         elif train_cache_used or val_cache_used:
-            data_loading_mode = "indexed_game_jsonl_runtime_splice_hybrid"
+            data_loading_mode = (
+                "indexed_game_jsonl_runtime_splice_hybrid_meta"
+                if meta_loaded
+                else "indexed_game_jsonl_runtime_splice_hybrid"
+            )
         else:
             data_loading_mode = "indexed_game_jsonl_runtime_splice"
     else:
@@ -2497,19 +2640,39 @@ def train_next_move_model_from_jsonl_paths(
                 runtime_cfg,
                 expected_split="val",
             )
-        (
-            vocab,
-            train_rows_by_file,
-            train_rows_total,
-            train_game_rows_by_file,
-            train_games_total,
-        ) = _build_vocab_and_count_rows_from_train_game_paths(train_paths, runtime_cfg)
-        (
-            val_rows_by_file,
-            val_rows_total,
-            val_game_rows_by_file,
-            val_games_total,
-        ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
+        meta_loaded = False
+        meta_out, _meta_reason = _try_load_runtime_splice_vocab_rows_meta_for_paths(
+            train_paths=train_paths,
+            val_paths=val_paths,
+            runtime_cfg=runtime_cfg,
+        )
+        if meta_out is not None:
+            (
+                vocab,
+                train_rows_by_file,
+                train_rows_total,
+                train_game_rows_by_file,
+                train_games_total,
+                val_rows_by_file,
+                val_rows_total,
+                val_game_rows_by_file,
+                val_games_total,
+            ) = meta_out
+            meta_loaded = True
+        else:
+            (
+                vocab,
+                train_rows_by_file,
+                train_rows_total,
+                train_game_rows_by_file,
+                train_games_total,
+            ) = _build_vocab_and_count_rows_from_train_game_paths(train_paths, runtime_cfg)
+            (
+                val_rows_by_file,
+                val_rows_total,
+                val_game_rows_by_file,
+                val_games_total,
+            ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
         cache_load_reason_by_split = {
             "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
             "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),
@@ -2523,9 +2686,17 @@ def train_next_move_model_from_jsonl_paths(
         train_runtime_index_bytes = _runtime_index_memory_bytes(train_index[1], train_index[2], train_index[3], train_index[4])
         val_runtime_index_bytes = _runtime_index_memory_bytes(val_index[1], val_index[2], val_index[3], val_index[4])
         if train_cache_used and val_cache_used:
-            data_loading_mode = "indexed_game_jsonl_runtime_splice_cache"
+            data_loading_mode = (
+                "indexed_game_jsonl_runtime_splice_cache_meta"
+                if meta_loaded
+                else "indexed_game_jsonl_runtime_splice_cache"
+            )
         elif train_cache_used or val_cache_used:
-            data_loading_mode = "indexed_game_jsonl_runtime_splice_hybrid"
+            data_loading_mode = (
+                "indexed_game_jsonl_runtime_splice_hybrid_meta"
+                if meta_loaded
+                else "indexed_game_jsonl_runtime_splice_hybrid"
+            )
         else:
             data_loading_mode = "indexed_game_jsonl_runtime_splice"
     else:

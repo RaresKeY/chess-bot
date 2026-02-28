@@ -277,7 +277,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_benchmark_matrix.sh`
   - one-pod matrix runner for repeated training trials across precision modes on the same provisioned pod
   - defaults to `RUNPOD_GPU_TYPE_ID=NVIDIA A40`, `RUNPOD_GPU_COUNT=2`, and trial list `fp32,tf32,fp16,bf16,sparsity`
+  - performs a one-time remote HF fetch before trials and reuses the generated manifest across all trials
+  - optional single-dataset mode for faster benchmark loops:
+    - `RUNPOD_BENCH_HF_DATASET_NAME=<dataset_name>`
+    - `RUNPOD_BENCH_HF_DATASET_VERSION=<version|latest>`
+    - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
+  - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - pulls each trial directory locally to `artifacts/runpod_cycles/<run_id>/benchmarks/<trial>/` and writes:
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.jsonl`
@@ -290,7 +296,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_benchmark_10k_sixpack.sh`
   - opinionated wrapper for quick throughput comparisons on one pod
   - defaults to 6 trials (`fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse`), `RUNPOD_BENCH_MAX_TOTAL_ROWS=10000`, and `RUNPOD_BENCH_EPOCHS=5`
+  - defaults to single-dataset fetch mode for speed (`RUNPOD_BENCH_HF_DATASET_NAME=elite_2025-11_game`, `RUNPOD_HF_DATASET_PATH_PREFIX=validated_datasets`)
   - defaults to pod termination (`RUNPOD_BENCH_TERMINATE_POD=1`) after artifact collection and writes final telemetry snapshot JSON
+- `scripts/build_runtime_splice_vocab_meta.py`
+  - local utility to build `runtime_splice_cache/vocab_rows_meta.json` for compact game datasets using multiprocessing
+  - metadata includes train vocab and split game/sample row counts keyed by runtime splice config, enabling cache-backed training startup without full JSONL recount/vocab scans when config matches
 - `scripts/runpod_file_transfer.sh`
   - host-side file transfer utility for RunPod pods using managed SSH metadata from `provision.json`
   - modes:

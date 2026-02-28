@@ -51,6 +51,8 @@ FLOW_GPU_COUNT="${RUNPOD_GPU_COUNT:-2}"
 FLOW_TRAIN_NPROC_PER_NODE="${RUNPOD_FULL_TRAIN_NPROC_PER_NODE:-${FLOW_GPU_COUNT}}"
 FLOW_HF_REPO_ID="${RUNPOD_HF_DATASET_REPO_ID:-LogicLark-QuantumQuill/chess-bot-datasets}"
 FLOW_HF_PREFIX="${RUNPOD_HF_DATASET_PATH_PREFIX:-validated_datasets}"
+FLOW_HF_DATASET_NAME="${RUNPOD_BENCH_HF_DATASET_NAME:-}"
+FLOW_HF_DATASET_VERSION="${RUNPOD_BENCH_HF_DATASET_VERSION:-}"
 FLOW_HF_SCHEMA_FILTER="${RUNPOD_HF_DATASET_SCHEMA_FILTER:-game_jsonl_runtime_splice_v1}"
 FLOW_EPOCHS="${RUNPOD_BENCH_EPOCHS:-1}"
 FLOW_BATCH_SIZE="${RUNPOD_BENCH_BATCH_SIZE:-2048}"
@@ -102,6 +104,8 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - train_nproc_per_node: \`${FLOW_TRAIN_NPROC_PER_NODE}\`
 - hf_repo: \`${FLOW_HF_REPO_ID}\`
 - hf_prefix: \`${FLOW_HF_PREFIX}\`
+- hf_dataset_name: \`${FLOW_HF_DATASET_NAME:-<all-latest>}\`
+- hf_dataset_version: \`${FLOW_HF_DATASET_VERSION:-<latest>}\`
 - hf_schema_filter: \`${FLOW_HF_SCHEMA_FILTER}\`
 - epochs_per_trial: \`${FLOW_EPOCHS}\`
 - batch_size: \`${FLOW_BATCH_SIZE}\`
@@ -178,6 +182,27 @@ PY
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "mkdir -p '${REMOTE_RUN_DIR}' '${REMOTE_MATRIX_DIR}'"
+
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+  "FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_DATASET_NAME='${FLOW_HF_DATASET_NAME}' FLOW_HF_DATASET_VERSION='${FLOW_HF_DATASET_VERSION}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' /bin/bash -s" <<'EOF_REMOTE_FETCH'
+set -Eeuo pipefail
+mkdir -p "$(dirname "${REMOTE_MANIFEST}")"
+fetch_args=(
+  --repo-id "${FLOW_HF_REPO_ID}"
+  --repo-path-prefix "${FLOW_HF_PREFIX}"
+  --dest-dir "${REMOTE_REPO_DIR}/data/hf_datasets"
+  --output-manifest "${REMOTE_MANIFEST}"
+)
+if [[ -n "${FLOW_HF_DATASET_NAME}" ]]; then
+  fetch_args+=( --dataset-name "${FLOW_HF_DATASET_NAME}" )
+  if [[ -n "${FLOW_HF_DATASET_VERSION}" ]]; then
+    fetch_args+=( --version "${FLOW_HF_DATASET_VERSION}" )
+  fi
+else
+  fetch_args+=( --all-latest )
+fi
+"/opt/venvs/chessbot/bin/python" "${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py" "${fetch_args[@]}"
+EOF_REMOTE_FETCH
 
 IFS=',' read -r -a FLOW_TRIALS <<<"${FLOW_TRIALS_RAW}"
 

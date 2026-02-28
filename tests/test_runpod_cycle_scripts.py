@@ -286,6 +286,8 @@ OUT
         self.assertIn("runpod_cycle_collect.sh", text)
         self.assertIn("RUNPOD_BENCH_TERMINATE_POD", text)
         self.assertIn("runpod_cycle_terminate.sh", text)
+        self.assertIn("RUNPOD_BENCH_HF_DATASET_NAME", text)
+        self.assertIn("hf_dataset_fetch.py", text)
 
     def test_benchmark_10k_sixpack_wrapper_defaults(self):
         text = Path("scripts/runpod_cycle_benchmark_10k_sixpack.sh").read_text(encoding="utf-8")
@@ -293,6 +295,7 @@ OUT
         self.assertIn("RUNPOD_BENCH_MAX_TOTAL_ROWS", text)
         self.assertIn("fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse", text)
         self.assertIn("RUNPOD_BENCH_TERMINATE_POD", text)
+        self.assertIn("RUNPOD_BENCH_HF_DATASET_NAME", text)
         self.assertIn("scripts/runpod_cycle_benchmark_matrix.sh", text)
         self.assertIn("scripts/telemetry_status.sh", text)
 

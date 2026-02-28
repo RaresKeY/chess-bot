@@ -100,6 +100,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - when compatible `runtime_splice_cache` artifacts are present for game-level train/val paths, training loads precomputed packed indexes from cache instead of rebuilding them from JSONL
   - if cache files are missing/mismatched (for example runtime splice config mismatch), training safely falls back to runtime JSONL indexing
   - when `--require-runtime-splice-cache` is enabled for game datasets, training checks cache-loadability first and raises an error on cache miss/mismatch instead of falling back
+  - when `runtime_splice_cache/vocab_rows_meta.json` is present and matches runtime splice config, game-dataset training can reuse precomputed vocab + split row/sample counts instead of scanning full train/val JSONL files before epochs
   - train DataLoader disables `persistent_workers` and uses reduced prefetch (`prefetch_factor=1`) when `--num-workers > 0`
   - validation DataLoader runs single-process (`num_workers=0`) to avoid a second worker pool and reduce host RAM growth
 - CLI prints a small CUDA preflight summary (`torch` version, CUDA availability, device count, `CUDA_VISIBLE_DEVICES`)
@@ -155,6 +156,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - Runtime-splice optimization (current):
   - training now caches per-sample phase IDs during runtime splice-index construction (single replay pass per game at index-build time)
   - runtime splice indexes use packed arrays (`array`-backed path IDs / offsets / splice indices / phase IDs) instead of Python int lists to reduce RAM usage substantially
+  - optional metadata companion (`runtime_splice_cache/vocab_rows_meta.json`) stores train-vocab and split row/sample counts for faster startup on cache-backed cloud runs
   - metrics summary may include `runtime_splice_index_bytes_train` / `runtime_splice_index_bytes_val` for visibility into index memory footprint
 
 ## Regression Tests (current)
