@@ -93,6 +93,26 @@ class TrainBaselineTelemetryTests(unittest.TestCase):
         self.assertIn("RTX 5090", msg)
         self.assertIn("hints:", msg)
 
+    def test_runtime_precision_context_contains_tf32_and_amp_fields(self):
+        tf32 = {
+            "requested": "on",
+            "matmul_allow_tf32_before": False,
+            "cudnn_allow_tf32_before": False,
+            "matmul_allow_tf32_after": True,
+            "cudnn_allow_tf32_after": True,
+        }
+        ctx = self.mod._runtime_precision_context(
+            amp_requested=True,
+            amp_dtype_requested="bf16",
+            tf32_state=tf32,
+        )
+        self.assertTrue(ctx["amp_requested"])
+        self.assertEqual(ctx["amp_dtype_requested"], "bf16")
+        self.assertEqual(ctx["amp_dtype_effective"], "torch.bfloat16")
+        self.assertIn("torch_float32_matmul_precision", ctx)
+        self.assertIn("autocast_gpu_dtype_default", ctx)
+        self.assertEqual(ctx["tf32"]["requested"], "on")
+
 
 if __name__ == "__main__":
     unittest.main()

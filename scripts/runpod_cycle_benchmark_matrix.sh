@@ -63,6 +63,7 @@ FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-
 FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
 FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
+FLOW_SPARSITY_L1_LAMBDAS_RAW="${RUNPOD_BENCH_SPARSITY_L1_LAMBDAS:-}"
 FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
 FLOW_TRANSFER_TOOL="${RUNPOD_BENCH_TRANSFER_TOOL:-rclone}"
 FLOW_TRANSFER_STRICT="${RUNPOD_BENCH_TRANSFER_STRICT:-0}"
@@ -137,6 +138,8 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - transfer_include_epoch_checkpoints: \`${FLOW_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS}\`
 - final_collect_include_epoch_checkpoints: \`${FLOW_COLLECT_INCLUDE_EPOCH_CHECKPOINTS}\`
 - skip_final_collect: \`${FLOW_SKIP_FINAL_COLLECT}\`
+- sparsity_l1_lambda_default: \`${FLOW_SPARSITY_L1_LAMBDA}\`
+- sparsity_l1_lambdas: \`${FLOW_SPARSITY_L1_LAMBDAS_RAW:-<default-only>}\`
 - image_used: \`${IMAGE_USED:-<unknown>}\`
 
 | trial | status | exit_code | local_dir |
@@ -421,17 +424,43 @@ fi
 "/opt/venvs/chessbot/bin/python" "${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py" "${fetch_args[@]}"
 EOF_REMOTE_FETCH
 
-IFS=',' read -r -a FLOW_TRIALS <<<"${FLOW_TRIALS_RAW}"
+IFS=',' read -r -a FLOW_TRIALS_BASE <<<"${FLOW_TRIALS_RAW}"
+IFS=',' read -r -a FLOW_SPARSITY_LAMBDAS <<<"${FLOW_SPARSITY_L1_LAMBDAS_RAW}"
+FLOW_TRIALS=()
+for raw_trial in "${FLOW_TRIALS_BASE[@]}"; do
+  trial_base="$(printf '%s' "${raw_trial}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  [[ -n "${trial_base}" ]] || continue
+  if [[ "${trial_base}" == "fp32_sparse" || "${trial_base}" == "fp16_sparse" || "${trial_base}" == "bf16_sparse" || "${trial_base}" == "sparsity" ]]; then
+    if [[ -n "${FLOW_SPARSITY_L1_LAMBDAS_RAW}" ]]; then
+      for lam in "${FLOW_SPARSITY_LAMBDAS[@]}"; do
+        lam_clean="$(printf '%s' "${lam}" | tr -d '[:space:]')"
+        [[ -n "${lam_clean}" ]] || continue
+        FLOW_TRIALS+=( "${trial_base}@${lam_clean}" )
+      done
+    else
+      FLOW_TRIALS+=( "${trial_base}" )
+    fi
+  else
+    FLOW_TRIALS+=( "${trial_base}" )
+  fi
+done
 
 for raw_trial in "${FLOW_TRIALS[@]}"; do
   trial="$(printf '%s' "${raw_trial}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
   [[ -n "${trial}" ]] || continue
+  trial_name="${trial}"
+  trial_slug="$(printf '%s' "${trial_name}" | tr '@/:' '____')"
+  trial_base="${trial_name%%@*}"
+  trial_sparse_lambda="${FLOW_SPARSITY_L1_LAMBDA}"
+  if [[ "${trial_name}" == *"@"* ]]; then
+    trial_sparse_lambda="${trial_name#*@}"
+  fi
 
   trial_status="ok"
   trial_exit=0
   train_extra_args="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0 --progress --verbose"
 
-  case "${trial}" in
+  case "${trial_base}" in
     fp32)
       train_extra_args+=" --no-amp --tf32 off"
       ;;
@@ -445,13 +474,13 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
       train_extra_args+=" --amp --amp-dtype bf16 --tf32 on"
       ;;
     fp32_sparse)
-      train_extra_args+=" --no-amp --tf32 off --sparsity-mode l1 --sparsity-l1-lambda ${FLOW_SPARSITY_L1_LAMBDA}"
+      train_extra_args+=" --no-amp --tf32 off --sparsity-mode l1 --sparsity-l1-lambda ${trial_sparse_lambda}"
       ;;
     fp16_sparse)
-      train_extra_args+=" --amp --amp-dtype fp16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${FLOW_SPARSITY_L1_LAMBDA}"
+      train_extra_args+=" --amp --amp-dtype fp16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${trial_sparse_lambda}"
       ;;
     bf16_sparse|sparsity)
-      train_extra_args+=" --amp --amp-dtype bf16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${FLOW_SPARSITY_L1_LAMBDA}"
+      train_extra_args+=" --amp --amp-dtype bf16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${trial_sparse_lambda}"
       ;;
     *)
       trial_status="skipped"
@@ -459,15 +488,15 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
       ;;
   esac
 
-  local_trial_dir="${LOCAL_BENCH_ROOT}/${trial}"
-  remote_trial_dir="${REMOTE_MATRIX_DIR}/${trial}"
+  local_trial_dir="${LOCAL_BENCH_ROOT}/${trial_slug}"
+  remote_trial_dir="${REMOTE_MATRIX_DIR}/${trial_slug}"
   mkdir -p "${local_trial_dir}"
 
   if [[ "${trial_status}" == "ok" ]]; then
-    telemetry_checkpoint "trial_${trial}" "running" "trial started"
+    telemetry_checkpoint "trial_${trial_slug}" "running" "trial started"
     train_extra_args+=" --distributed-backend ${FLOW_DISTRIBUTED_BACKEND}"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-      "TRIAL='${trial}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE='${FLOW_BATCH_SIZE}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
+      "TRIAL='${trial_slug}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE='${FLOW_BATCH_SIZE}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
 set -Eeuo pipefail
 mkdir -p "${REMOTE_TRIAL_DIR}"
 cd "${REMOTE_REPO_DIR}"
@@ -511,21 +540,21 @@ EOF_REMOTE
   fi
 
   if [[ "${trial_status}" == "ok" ]]; then
-    telemetry_checkpoint "trial_${trial}" "done" "trial completed successfully"
+    telemetry_checkpoint "trial_${trial_slug}" "done" "trial completed successfully"
   elif [[ "${trial_status}" == "failed" ]]; then
-    telemetry_checkpoint "trial_${trial}" "error" "trial failed"
+    telemetry_checkpoint "trial_${trial_slug}" "error" "trial failed"
   else
-    telemetry_checkpoint "trial_${trial}" "done" "trial skipped"
+    telemetry_checkpoint "trial_${trial_slug}" "done" "trial skipped"
   fi
-  telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
+  telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial_name}\",\"trial_slug\":\"${trial_slug}\",\"sparsity_l1_lambda\":\"${trial_sparse_lambda}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
 
-  transfer_trial_artifacts "${trial}" "${remote_trial_dir}" "${local_trial_dir}" || true
+  transfer_trial_artifacts "${trial_slug}" "${remote_trial_dir}" "${local_trial_dir}" || true
 
   trial_metrics_json="$(extract_trial_metrics_json "${local_trial_dir}")"
-  printf '{"trial":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \
-    "${trial}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" "${trial_metrics_json}" >> "${LOCAL_SUMMARY_JSONL}"
+  printf '{"trial":"%s","trial_slug":"%s","sparsity_l1_lambda":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s","metrics":%s}\n' \
+    "${trial_name}" "${trial_slug}" "${trial_sparse_lambda}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" "${trial_metrics_json}" >> "${LOCAL_SUMMARY_JSONL}"
 
-  printf '| %s | %s | %s | `%s` |\n' "${trial}" "${trial_status}" "${trial_exit}" "${local_trial_dir}" >> "${LOCAL_SUMMARY_MD}"
+  printf '| %s | %s | %s | `%s` |\n' "${trial_name}" "${trial_status}" "${trial_exit}" "${local_trial_dir}" >> "${LOCAL_SUMMARY_MD}"
 done
 
 cat >> "${LOCAL_SUMMARY_MD}" <<'MD'

@@ -147,6 +147,42 @@ def _configure_tf32(mode: str) -> Dict[str, Any]:
     }
 
 
+def _runtime_precision_context(*, amp_requested: bool, amp_dtype_requested: str, tf32_state: Dict[str, Any]) -> Dict[str, Any]:
+    matmul_precision = None
+    if hasattr(torch, "get_float32_matmul_precision"):
+        try:
+            matmul_precision = str(torch.get_float32_matmul_precision())
+        except Exception:
+            matmul_precision = None
+    autocast_gpu_dtype_default = None
+    try:
+        if hasattr(torch, "get_autocast_dtype"):
+            autocast_gpu_dtype_default = str(torch.get_autocast_dtype("cuda"))
+        elif hasattr(torch, "get_autocast_gpu_dtype"):
+            autocast_gpu_dtype_default = str(torch.get_autocast_gpu_dtype())
+    except Exception:
+        autocast_gpu_dtype_default = None
+    amp_dtype_mode = str(amp_dtype_requested or "auto").strip().lower()
+    amp_dtype_effective = "none"
+    if amp_requested:
+        if amp_dtype_mode == "fp16":
+            amp_dtype_effective = str(torch.float16)
+        elif amp_dtype_mode == "bf16":
+            amp_dtype_effective = str(torch.bfloat16)
+        elif amp_dtype_mode == "auto":
+            amp_dtype_effective = autocast_gpu_dtype_default or "auto"
+        else:
+            amp_dtype_effective = amp_dtype_mode
+    return {
+        "torch_float32_matmul_precision": matmul_precision,
+        "autocast_gpu_dtype_default": autocast_gpu_dtype_default,
+        "amp_requested": bool(amp_requested),
+        "amp_dtype_requested": str(amp_dtype_requested),
+        "amp_dtype_effective": amp_dtype_effective,
+        "tf32": tf32_state,
+    }
+
+
 def _resolve_distributed_context(mode: str) -> Dict[str, int | bool]:
     normalized = str(mode or "auto").strip().lower()
     if normalized not in {"auto", "off", "on"}:
@@ -581,6 +617,11 @@ def main() -> None:
     )
     args = parser.parse_args()
     tf32_state = _configure_tf32(args.tf32)
+    precision_runtime = _runtime_precision_context(
+        amp_requested=bool(args.amp),
+        amp_dtype_requested=str(args.amp_dtype),
+        tf32_state=tf32_state,
+    )
     dist_ctx = _resolve_distributed_context(args.distributed)
     distributed_enabled = bool(dist_ctx["enabled"])
     distributed_rank = int(dist_ctx["rank"])
@@ -673,6 +714,7 @@ def main() -> None:
                 "sparsity_l1_lambda": float(args.sparsity_l1_lambda),
                 "sparsity_include_bias": bool(args.sparsity_include_bias),
             },
+            "precision_runtime": precision_runtime,
         }
     )
     telemetry.start()
@@ -706,6 +748,7 @@ def main() -> None:
                     "local_rank": int(distributed_local_rank),
                     "backend": str(args.distributed_backend),
                 },
+                "precision_runtime": precision_runtime,
             }
         )
         print(
@@ -741,6 +784,7 @@ def main() -> None:
                     "amp_requested": args.amp,
                     "amp_dtype": str(args.amp_dtype),
                     "tf32": tf32_state,
+                    "precision_runtime": precision_runtime,
                     "rollout_horizon": args.rollout_horizon,
                     "closeness_horizon": args.closeness_horizon,
                     "rollout_loss_decay": args.rollout_loss_decay,
@@ -791,6 +835,7 @@ def main() -> None:
             "amp_requested": bool(args.amp),
             "amp_dtype": str(args.amp_dtype),
             "tf32": tf32_state,
+            "precision_runtime": precision_runtime,
             "rollout_horizon": int(args.rollout_horizon),
             "closeness_horizon": int(args.closeness_horizon),
             "rollout_loss_decay": float(args.rollout_loss_decay),
@@ -983,6 +1028,7 @@ def main() -> None:
         "amp": args.amp,
         "amp_dtype": args.amp_dtype,
         "tf32": tf32_state,
+        "precision_runtime": precision_runtime,
         "sparsity_mode": args.sparsity_mode,
         "sparsity_l1_lambda": args.sparsity_l1_lambda,
         "sparsity_include_bias": args.sparsity_include_bias,
@@ -1035,6 +1081,7 @@ def main() -> None:
                 "runtime_splice_index_bytes_val": dataset_info.get("runtime_splice_index_bytes_val"),
                 "sparsity": dataset_info.get("sparsity"),
             },
+            "precision_runtime": precision_runtime,
             "model_final": {
                 "param_count": int(param_count),
                 "artifact_training_objective": artifact.get("runtime", {}).get("training_objective"),

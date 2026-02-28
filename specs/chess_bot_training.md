@@ -67,6 +67,11 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - `--amp/--no-amp` (CUDA mixed precision via `torch.amp`)
   - `--amp-dtype {auto,fp16,bf16}` (autocast dtype selection when AMP is enabled)
   - `--tf32 {auto,on,off}` (controls `torch.backends.cuda.matmul.allow_tf32` and `torch.backends.cudnn.allow_tf32` before train startup)
+  - runtime precision diagnostics are emitted in startup/progress/metrics metadata:
+    - `torch.get_float32_matmul_precision()` (when available)
+    - default CUDA autocast dtype
+    - requested/effective AMP dtype
+    - TF32 requested + backend before/after flags
   - sparsity regularization controls:
     - `--sparsity-mode {off,l1}` (`l1` enables L1 regularization on trainable weights)
     - `--sparsity-l1-lambda` (L1 multiplier; `0` disables even when mode is set)
@@ -136,6 +141,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - when multistep mode is enabled (`rollout_horizon > 1`), epoch history additionally includes rollout metrics such as `rollout_step{n}_acc`, `rollout_prefix_match_len_avg`, `rollout_legal_rate`, and `rollout_weighted_continuation_score`
 - model path
 - runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)
+- `precision_runtime` summary (`torch_float32_matmul_precision`, `autocast_gpu_dtype_default`, AMP requested/effective dtype, TF32 backend flag state)
 - sparsity request/runtime fields (`sparsity_mode`, `sparsity_l1_lambda`, `sparsity_include_bias`, `sparsity_runtime`)
 - requested `phase_weights`
 - feature-toggle and embedding-dim settings for phase/side-to-move head inputs

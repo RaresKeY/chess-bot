@@ -289,6 +289,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_BENCH_HF_DATASET_VERSION=<version|latest>`
     - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
+  - supports sparse lambda sweeps in one run via `RUNPOD_BENCH_SPARSITY_L1_LAMBDAS` (comma-separated); sparse base trials are expanded into trial ids like `<base>@<lambda>` and each variant is executed independently
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
   - benchmark trial artifact pull defaults to a fast filtered copy (metrics/progress/logs/models/telemetry), excluding `epoch_checkpoints/**` unless explicitly enabled with `RUNPOD_BENCH_TRANSFER_INCLUDE_EPOCH_CHECKPOINTS=1`
   - transfer controls:
@@ -316,7 +317,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - emits benchmark/trial telemetry checkpoints and events under `artifacts/runpod_cycles/<run_id>/telemetry/`
 - `scripts/runpod_cycle_benchmark_10k_sixpack.sh`
   - opinionated wrapper for quick throughput comparisons on one pod
-  - defaults to 6 trials (`fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse`), `RUNPOD_BENCH_MAX_TOTAL_ROWS=10000`, and `RUNPOD_BENCH_EPOCHS=5`
+  - defaults to 6 base trials (`fp32,fp16,bf16,fp32_sparse,fp16_sparse,bf16_sparse`) with sparse lambda sweep `RUNPOD_BENCH_SPARSITY_L1_LAMBDAS=1e-5,5e-5,1e-4`
+  - defaults to `RUNPOD_BENCH_MAX_TOTAL_ROWS=100000` and `RUNPOD_BENCH_EPOCHS=10` for stronger precision/sparsity differentiation
   - defaults to single-dataset fetch mode for speed (`RUNPOD_BENCH_HF_DATASET_NAME=elite_2025-11_game`, `RUNPOD_HF_DATASET_PATH_PREFIX=validated_datasets`)
   - defaults to pod termination (`RUNPOD_BENCH_TERMINATE_POD=1`) after artifact collection and writes final telemetry snapshot JSON
 - `scripts/build_runtime_splice_vocab_meta.py`
