@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runpod_cycle_common.sh"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_ID="$(runpod_cycle_run_id)"
+export RUNPOD_CYCLE_RUN_ID="${RUN_ID}"
 
 # Opinionated defaults for "just run it" usage. Override via env only when needed.
 export RUNPOD_HF_DATASET_REPO_ID="${RUNPOD_HF_DATASET_REPO_ID:-LogicLark-QuantumQuill/chess-bot-datasets}"
@@ -17,8 +19,14 @@ export RUNPOD_FULL_TRAIN_NPROC_PER_NODE="${RUNPOD_FULL_TRAIN_NPROC_PER_NODE:-${R
 export RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
+RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_emit_event.sh" \
+  --event "full_train_easy_start" --status "info" --message "runpod full train easy wrapper start" >/dev/null 2>&1 || true
+RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_checkpoint.sh" \
+  --name "full_train_easy" --state "running" --note "easy wrapper started" >/dev/null 2>&1 || true
+
 cat <<EOF
 [runpod-full-train-easy] starting full RunPod flow
+[runpod-full-train-easy] run_id=${RUN_ID}
 [runpod-full-train-easy] hf_repo=${RUNPOD_HF_DATASET_REPO_ID}
 [runpod-full-train-easy] hf_prefix=${RUNPOD_HF_DATASET_PATH_PREFIX}
 [runpod-full-train-easy] hf_schema_filter=${RUNPOD_HF_DATASET_SCHEMA_FILTER}

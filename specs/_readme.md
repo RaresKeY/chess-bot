@@ -17,6 +17,7 @@ Populate this table following template style.
 | [Chess Bot Overview](./chess_bot_overview.md) | `README.md`, `scripts/*.py`, `src/chessbot/*` | High-level scope, architecture pattern, decisions, and artifact contract. |
 | [Chess Bot README Contract](./chess_bot_readme_contract.md) | `README.md` | Rules for component-oriented README sections and spec/README sync. |
 | [Chess Bot Environment](./chess_bot_environment.md) | `AGENTS.md`, `.venv`, runtime checks | Container verification, venv guidance, and runtime assumptions. |
+| [Chess Bot Telemetry](./chess_bot_telemetry.md) | `scripts/telemetry*.sh`, `scripts/runpod_cycle_*`, `deploy/runpod_cloud_training/otel-collector-config.yaml`, `deploy/runpod_cloud_training/entrypoint.sh` | Host telemetry components, checkpoint/watchdog contract, and container OpenTelemetry/healthchecks behavior. |
 | [Chess Bot Secrets Contract](./chess_bot_secrets_contract.md) | `src/chessbot/secrets.py`, token-using scripts in `scripts/*`, `src/chessbot/lichess_bot.py` | Canonical secret/token resolution order, dotenv fallback rules, and security/testing contract. |
 | [Chess Bot Regression Testing](./chess_bot_regression_testing.md) | `tests/*`, bug-fix changes across `scripts/*` and `src/chessbot/*` | Rules and checklist for adding focused regression tests after fixes. |
 | [Chess Bot Validation](./chess_bot_validation.md) | `scripts/validate_games.py`, `src/chessbot/validation.py` | PGN replay validation behavior, outputs, and record schema. |

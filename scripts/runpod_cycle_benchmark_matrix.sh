@@ -17,6 +17,33 @@ runpod_cycle_require_cmd ssh
 runpod_cycle_require_cmd rsync
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
+telemetry_event() {
+  local ev="$1"
+  local st="$2"
+  local msg="${3:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_emit_event.sh" \
+    --event "${ev}" --status "${st}" --message "${msg}" >/dev/null 2>&1 || true
+}
+
+telemetry_checkpoint() {
+  local name="$1"
+  local state="$2"
+  local note="${3:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_checkpoint.sh" \
+    --name "${name}" --state "${state}" --note "${note}" >/dev/null 2>&1 || true
+}
+
+telemetry_healthcheck() {
+  local kind="$1"
+  local msg="${2:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_healthchecks_ping.sh" \
+    "${kind}" "${msg}" >/dev/null 2>&1 || true
+}
+
+telemetry_event "benchmark_matrix_start" "info" "benchmark matrix started"
+telemetry_checkpoint "benchmark_matrix" "running" "matrix flow started"
+telemetry_healthcheck start "run_id=${RUN_ID} benchmark_matrix_start"
+
 FLOW_SKIP_START="${RUNPOD_CYCLE_SKIP_START:-0}"
 FLOW_STOP_POD="${RUNPOD_BENCH_STOP_POD:-1}"
 FLOW_GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA A40}"
@@ -33,11 +60,13 @@ FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
+  telemetry_checkpoint "benchmark_provision" "running" "starting benchmark pod"
   RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
   RUNPOD_GPU_TYPE_ID="${FLOW_GPU_TYPE_ID}" \
   RUNPOD_GPU_COUNT="${FLOW_GPU_COUNT}" \
   bash "${REPO_ROOT}/scripts/runpod_cycle_start.sh"
 fi
+telemetry_checkpoint "benchmark_provision" "done" "benchmark pod ready"
 
 if [[ ! -f "${PROVISION_JSON}" ]]; then
   echo "[runpod-bench-matrix] missing provision file: ${PROVISION_JSON}" >&2
@@ -121,6 +150,7 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
   mkdir -p "${local_trial_dir}"
 
   if [[ "${trial_status}" == "ok" ]]; then
+    telemetry_checkpoint "trial_${trial}" "running" "trial started"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
       "TRIAL='${trial}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE='${FLOW_BATCH_SIZE}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
 set -Eeuo pipefail
@@ -162,6 +192,15 @@ EOF_REMOTE
     fi
   fi
 
+  if [[ "${trial_status}" == "ok" ]]; then
+    telemetry_checkpoint "trial_${trial}" "done" "trial completed successfully"
+  elif [[ "${trial_status}" == "failed" ]]; then
+    telemetry_checkpoint "trial_${trial}" "error" "trial failed"
+  else
+    telemetry_checkpoint "trial_${trial}" "done" "trial skipped"
+  fi
+  telemetry_event "benchmark_trial" "info" "trial processed" "{\"trial\":\"${trial}\",\"status\":\"${trial_status}\",\"exit_code\":${trial_exit}}"
+
   printf '{"trial":"%s","status":"%s","exit_code":%s,"remote_trial_dir":"%s"}\n' \
     "${trial}" "${trial_status}" "${trial_exit}" "${remote_trial_dir}" >> "${LOCAL_SUMMARY_JSONL}"
 
@@ -182,8 +221,14 @@ runpod_cycle_append_report "${REPORT_MD}" \
   ""
 
 if [[ "${FLOW_STOP_POD}" == "1" ]]; then
+  telemetry_checkpoint "benchmark_stop_pod" "running" "stopping benchmark pod"
   RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_stop.sh"
+  telemetry_checkpoint "benchmark_stop_pod" "done" "benchmark pod stopped"
 fi
+
+telemetry_checkpoint "benchmark_matrix" "done" "benchmark matrix finished"
+telemetry_event "benchmark_matrix_complete" "ok" "benchmark matrix completed"
+telemetry_healthcheck success "run_id=${RUN_ID} benchmark_matrix_complete"
 
 echo "[runpod-bench-matrix] run_id=${RUN_ID}"
 echo "[runpod-bench-matrix] summary=${LOCAL_SUMMARY_MD}"

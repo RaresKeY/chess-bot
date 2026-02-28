@@ -1,0 +1,36 @@
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu: {}
+      memory: {}
+      filesystem: {}
+      disk: {}
+      network: {}
+      process: {}
+  otlp:
+    protocols:
+      grpc: {}
+      http: {}
+
+processors:
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+
+exporters:
+  logging:
+    verbosity: normal
+  file:
+    path: ${env:OTEL_FILE_EXPORT_PATH}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [batch]
+      exporters: [logging, file]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging, file]

@@ -26,6 +26,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/runpod_cycle_benchmark_matrix.sh`
 - `scripts/runpod_file_transfer.sh`
+- `scripts/telemetry/telemetry_common.sh`
+- `scripts/telemetry_control.sh`
+- `scripts/telemetry_emit_event.sh`
+- `scripts/telemetry_checkpoint.sh`
+- `scripts/telemetry_healthchecks_ping.sh`
+- `scripts/telemetry_status.sh`
+- `scripts/telemetry_watchdog.sh`
 - `scripts/hf_dataset_publish.py`
 - `scripts/hf_dataset_fetch.py`
 - Runtime pod interfaces used by operators:
@@ -186,10 +193,15 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - handles `Ctrl-C`/`SIGTERM` by restoring TTY state and stopping local child watcher processes to reduce terminal corruption/noisy leftover streams
 - `scripts/runpod_cycle_watchdog.sh`
   - host-side stall watchdog for active runs (`RUNPOD_CYCLE_RUN_ID`)
+  - this script is now a backward-compatible alias to `scripts/telemetry_watchdog.sh`
   - polls `scripts/runpod_cycle_status.sh --no-write` and treats stage/progress/log growth as activity
   - configurable stall action (`--on-stall`) with options:
     - `none`, `collect`, `stop`, `terminate`, `collect-stop`, `collect-terminate`
   - optional auto-collect on normal completion (`RUNPOD_WATCHDOG_AUTO_COLLECT_ON_FINISH=1`)
+- `scripts/telemetry_control.sh`
+  - central CLI entrypoint for telemetry commands (`status`, `event`, `checkpoint`, `watchdog`, `health`)
+- `scripts/telemetry_status.sh`
+  - single-run telemetry snapshot that merges latest event/checkpoint rows with `runpod_cycle_status.sh --no-write`
 - `scripts/runpod_cycle_full_train_hf.sh`
   - sequential host-side orchestration for a full HF-backed training run: GPU selection (`gpu-search` with fallback), start pod, remote HF fetch, remote context probe/spec suggestions, async remote training, local progress watch, collect artifacts, stop pod
   - runs a remote GPU sampler during training and writes per-run pre-train and post-run GPU/dataset/parameter observation artifacts for tuning future runs
@@ -252,6 +264,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.jsonl`
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.md`
   - notes: sparse Tensor Core mode is currently marked `skipped` (no 2:4 sparse training path wired in baseline trainer yet)
+  - emits benchmark/trial telemetry checkpoints and events under `artifacts/runpod_cycles/<run_id>/telemetry/`
 - `scripts/runpod_file_transfer.sh`
   - host-side file transfer utility for RunPod pods using managed SSH metadata from `provision.json`
   - modes:
@@ -263,6 +276,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - resumable mode (`--partial --append-verify`) enabled by default
     - optional checksum mode (`RUNPOD_TRANSFER_CHECKSUM=1`) and bandwidth cap (`RUNPOD_TRANSFER_BWLIMIT_KBPS`)
   - writes transfer logs under `artifacts/runpod_cycles/<run_id>/logs/`
+  - emits transfer start/complete telemetry events under `artifacts/runpod_cycles/<run_id>/telemetry/events.jsonl`
 - `scripts/runpod_cycle_verify_full_hf_run.py` / `src/chessbot/runpod_cycle_verify.py`
   - verifies full-HF cycle local artifacts (`provision.json`, `stop_response.json`, collected model/metrics/logs/progress/GPU samples/HF fetch manifest/context probe)
   - optional `--require-terminated` also checks `terminate_response.json`

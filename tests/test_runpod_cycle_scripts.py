@@ -115,6 +115,12 @@ OUT
             "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_start.sh",
             "scripts/runpod_cycle_watchdog.sh",
+            "scripts/telemetry_control.sh",
+            "scripts/telemetry_emit_event.sh",
+            "scripts/telemetry_checkpoint.sh",
+            "scripts/telemetry_healthchecks_ping.sh",
+            "scripts/telemetry_status.sh",
+            "scripts/telemetry_watchdog.sh",
             "scripts/runpod_cycle_push_dataset.sh",
             "scripts/runpod_cycle_train.sh",
             "scripts/runpod_cycle_collect.sh",
@@ -138,6 +144,9 @@ OUT
             "runpod_cycle_stop.sh",
         ]:
             self.assertIn(name, text)
+        self.assertIn('telemetry_checkpoint "full_smoke_flow" "running"', text)
+        self.assertIn('telemetry_checkpoint "full_smoke_flow" "done"', text)
+        self.assertIn('telemetry_event "full_smoke_flow_complete" "ok"', text)
 
     def test_stop_script_uses_graphql_pod_stop(self):
         text = Path("scripts/runpod_cycle_stop.sh").read_text(encoding="utf-8")
@@ -279,7 +288,10 @@ OUT
         self.assertIn("IdentityAgent=none", text)
 
     def test_watchdog_script_supports_stall_actions(self):
-        text = Path("scripts/runpod_cycle_watchdog.sh").read_text(encoding="utf-8")
+        alias_text = Path("scripts/runpod_cycle_watchdog.sh").read_text(encoding="utf-8")
+        self.assertIn("telemetry_watchdog.sh", alias_text)
+        self.assertIn("exec bash", alias_text)
+        text = Path("scripts/telemetry_watchdog.sh").read_text(encoding="utf-8")
         self.assertIn("--on-stall", text)
         self.assertIn("collect-stop", text)
         self.assertIn("collect-terminate", text)
@@ -287,6 +299,14 @@ OUT
         self.assertIn("scripts/runpod_cycle_collect.sh", text)
         self.assertIn("scripts/runpod_cycle_stop.sh", text)
         self.assertIn("scripts/runpod_cycle_terminate.sh", text)
+
+    def test_telemetry_control_routes_subcommands(self):
+        text = Path("scripts/telemetry_control.sh").read_text(encoding="utf-8")
+        self.assertIn("telemetry_status.sh", text)
+        self.assertIn("telemetry_emit_event.sh", text)
+        self.assertIn("telemetry_checkpoint.sh", text)
+        self.assertIn("telemetry_watchdog.sh", text)
+        self.assertIn("telemetry_healthchecks_ping.sh", text)
 
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
         text = Path("scripts/runpod_cycle_start.sh").read_text(encoding="utf-8")
@@ -338,6 +358,16 @@ OUT
         self.assertIn('export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0"', text)
         self.assertNotIn("--no-progress", text)
         self.assertIn('if [[ "${gpu_name_for_batch}" == *"RTX 5090"* ]]; then', text)
+
+    def test_cycle_train_and_easy_flow_emit_telemetry(self):
+        train_text = Path("scripts/runpod_cycle_train.sh").read_text(encoding="utf-8")
+        self.assertIn("cycle_train_start", train_text)
+        self.assertIn('telemetry_checkpoint "cycle_train" "running"', train_text)
+        self.assertIn('telemetry_checkpoint "cycle_train" "done"', train_text)
+        easy_text = Path("scripts/runpod_full_train_easy.sh").read_text(encoding="utf-8")
+        self.assertIn("full_train_easy_start", easy_text)
+        self.assertIn('telemetry_checkpoint.sh" \\', easy_text)
+        text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
         self.assertIn("batch_attempts=(4096 3072 2048)", text)
         self.assertIn("is_oom_failure_tail()", text)
         self.assertIn('FLOW_MAX_TOTAL_ROWS="${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-0}"', text)

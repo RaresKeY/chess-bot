@@ -15,6 +15,13 @@ class RunpodEntrypointScriptTests(unittest.TestCase):
         self.assertIn("ensure_runner_ssh_account()", text)
         self.assertIn("Unlocked ${RUNNER_USER} account for SSH public-key auth", text)
         self.assertIn("AuthorizedKeysFile .ssh/authorized_keys", text)
+        self.assertIn('START_OTEL_COLLECTOR="${START_OTEL_COLLECTOR:-1}"', text)
+        self.assertIn('OTEL_FILE_EXPORT_PATH="${OTEL_FILE_EXPORT_PATH:-${REPO_DIR}/artifacts/telemetry/otel/collector.jsonl}"', text)
+        self.assertIn("start_otel_collector", text)
+        self.assertIn("otelcol-contrib --config", text)
+        self.assertIn("RUNPOD_HEALTHCHECKS_URL", text)
+        self.assertIn("healthchecks_ping start", text)
+        self.assertIn("healthchecks_ping success", text)
 
 
 if __name__ == "__main__":

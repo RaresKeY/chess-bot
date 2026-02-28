@@ -39,6 +39,35 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-0}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:---epochs 1 --no-progress --no-verbose}"
 INFER_CONTEXT="${RUNPOD_INFER_CONTEXT:-e2e4 e7e5 g1f3}"
+FLOW_SUCCESS=0
+
+telemetry_event() {
+  local ev="$1"
+  local st="$2"
+  local msg="${3:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_emit_event.sh" \
+    --event "${ev}" --status "${st}" --message "${msg}" >/dev/null 2>&1 || true
+}
+
+telemetry_checkpoint() {
+  local name="$1"
+  local state="$2"
+  local note="${3:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_checkpoint.sh" \
+    --name "${name}" --state "${state}" --note "${note}" >/dev/null 2>&1 || true
+}
+
+cleanup_on_error() {
+  if [[ "${FLOW_SUCCESS}" == "1" ]]; then
+    return 0
+  fi
+  telemetry_checkpoint "cycle_train" "error" "runpod_cycle_train failed"
+  telemetry_event "cycle_train_error" "error" "runpod cycle train failed"
+}
+trap cleanup_on_error EXIT
+
+telemetry_event "cycle_train_start" "info" "runpod cycle train started"
+telemetry_checkpoint "cycle_train" "running" "starting runpod_cycle_train"
 
 REMOTE_READY_TIMEOUT_SECONDS="${RUNPOD_REMOTE_READY_TIMEOUT_SECONDS:-300}"
 REMOTE_READY_POLL_SECONDS="${RUNPOD_REMOTE_READY_POLL_SECONDS:-5}"
@@ -61,6 +90,7 @@ while true; do
   echo "[runpod-cycle-train] waiting for remote repo readiness: ${REMOTE_REPO_DIR}" >&2
   sleep "${REMOTE_READY_POLL_SECONDS}"
 done
+telemetry_checkpoint "cycle_train_remote_ready" "done" "remote repo ready for train"
 
 REMOTE_CMD=$(cat <<EOF
 set -Eeuo pipefail
@@ -128,6 +158,10 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Ready-check log: \`${READY_CHECK_LOG}\`" \
   "- Remote SSH/train log: \`${REMOTE_TRAIN_LOG}\`" \
   ""
+
+FLOW_SUCCESS=1
+telemetry_checkpoint "cycle_train" "done" "runpod_cycle_train completed"
+telemetry_event "cycle_train_complete" "ok" "runpod cycle train completed"
 
 echo "[runpod-cycle-train] remote_run_dir=${REMOTE_RUN_DIR}"
 echo "[runpod-cycle-train] remote_model=${REMOTE_MODEL_PATH}"

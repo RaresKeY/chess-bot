@@ -73,6 +73,9 @@ cleanup_on_error() {
   if [[ "${FLOW_SUCCESS}" == "1" ]]; then
     return 0
   fi
+  telemetry_checkpoint "full_hf_flow" "error" "flow failed before completion"
+  telemetry_event "full_hf_flow_error" "error" "runpod full hf flow failed"
+  telemetry_healthcheck "fail" "run_id=${RUN_ID} full_hf_flow_error"
   if [[ "${FLOW_INTERRUPTED}" == "1" ]]; then
     cleanup_child_processes
   fi
@@ -87,6 +90,33 @@ cleanup_on_error() {
 }
 trap handle_interrupt INT TERM
 trap cleanup_on_error EXIT
+
+telemetry_event() {
+  local ev="$1"
+  local st="$2"
+  local msg="${3:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_emit_event.sh" \
+    --event "${ev}" --status "${st}" --message "${msg}" >/dev/null 2>&1 || true
+}
+
+telemetry_checkpoint() {
+  local name="$1"
+  local state="$2"
+  local note="${3:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_checkpoint.sh" \
+    --name "${name}" --state "${state}" --note "${note}" >/dev/null 2>&1 || true
+}
+
+telemetry_healthcheck() {
+  local kind="$1"
+  local msg="${2:-}"
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_healthchecks_ping.sh" \
+    "${kind}" "${msg}" >/dev/null 2>&1 || true
+}
+
+telemetry_event "full_hf_flow_start" "info" "runpod full hf flow started"
+telemetry_checkpoint "full_hf_flow" "running" "flow started"
+telemetry_healthcheck "start" "run_id=${RUN_ID} full_hf_flow_start"
 
 pick_gpu() {
   if [[ -n "${RUNPOD_GPU_TYPE_ID:-}" ]]; then
@@ -212,12 +242,14 @@ if [[ "${FLOW_SKIP_START}" == "1" ]]; then
   echo "[runpod-cycle-full-train-hf] skipping pod start; reusing existing provision.json for run_id=${RUN_ID}"
   POD_STARTED=1
 else
+  telemetry_checkpoint "provision_pod" "running" "starting pod provisioning"
   RUNPOD_GPU_TYPE_ID="${SELECTED_GPU_TYPE_ID}" \
   RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
   RUNPOD_SET_SMOKE_SERVICE_ENVS="${RUNPOD_SET_SMOKE_SERVICE_ENVS:-1}" \
   bash "${REPO_ROOT}/scripts/runpod_cycle_start.sh"
   POD_STARTED=1
 fi
+telemetry_checkpoint "provision_pod" "done" "pod ready"
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
@@ -244,7 +276,9 @@ REMOTE_BEST_CHECKPOINT="${REMOTE_RUN_DIR}/model_best_${RUN_ID}.pt"
 REMOTE_EPOCH_CHECKPOINT_DIR="${REMOTE_RUN_DIR}/epoch_checkpoints"
 
 wait_remote_repo_ready "${SSH_HOST}" "${SSH_PORT}" "${SSH_USER}" "${SSH_KEY}" "${REMOTE_REPO_DIR}"
+telemetry_checkpoint "remote_repo_ready" "done" "remote repo is ready"
 
+telemetry_checkpoint "remote_hf_fetch" "running" "fetching hf datasets on pod"
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "bash -s" <<EOF 2>&1 | tee "${REMOTE_FETCH_LOG}"
 set -Eeuo pipefail
 mkdir -p '${REMOTE_RUN_DIR}'
@@ -269,7 +303,9 @@ else
 fi
 '/opt/venvs/chessbot/bin/python' '${REMOTE_REPO_DIR}/scripts/hf_dataset_fetch.py' "\${fetch_args[@]}"
 EOF
+telemetry_checkpoint "remote_hf_fetch" "done" "hf datasets fetched"
 
+telemetry_checkpoint "context_probe" "running" "collecting context probe"
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' SUGGESTIONS_JSON='${REMOTE_SUGGESTIONS_JSON}' SUGGESTIONS_MD='${REMOTE_SUGGESTIONS_MD}' HF_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' bash -s" \
   <<'EOF' 2>&1 | tee "${REMOTE_CONTEXT_LOG}"
@@ -440,6 +476,7 @@ Path(os.environ["SUGGESTIONS_MD"]).write_text(
 print(json.dumps({"context_probe_written": os.environ["CONTEXT_JSON"], "suggestions_written": os.environ["SUGGESTIONS_JSON"]}))
 PY
 EOF
+telemetry_checkpoint "context_probe" "done" "context probe complete"
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' REMOTE_BEST_CHECKPOINT='${REMOTE_BEST_CHECKPOINT}' REMOTE_EPOCH_CHECKPOINT_DIR='${REMOTE_EPOCH_CHECKPOINT_DIR}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' HF_DATASET_SCHEMA_FILTER='${HF_DATASET_SCHEMA_FILTER}' HF_DATASET_NAME='${HF_DATASET_NAME}' HF_DATASET_VERSION='${HF_DATASET_VERSION}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' FLOW_RUNTIME_MIN_CONTEXT='${FLOW_RUNTIME_MIN_CONTEXT}' FLOW_RUNTIME_MIN_TARGET='${FLOW_RUNTIME_MIN_TARGET}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_MAX_TRAIN_ROWS='${FLOW_MAX_TRAIN_ROWS}' FLOW_MAX_VAL_ROWS='${FLOW_MAX_VAL_ROWS}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
@@ -809,15 +846,20 @@ echo "[runpod-cycle-full-train-hf] launched_remote_train_pid=${bg_pid}"
 echo "[runpod-cycle-full-train-hf] progress_jsonl=${REMOTE_PROGRESS_JSONL}"
 echo "[runpod-cycle-full-train-hf] exit_code_file=${REMOTE_TRAIN_EXIT_CODE_FILE}"
 EOF
+telemetry_checkpoint "train_launch" "done" "remote training launched"
 
+telemetry_checkpoint "train_watch" "running" "watching remote training progress"
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
 RUNPOD_REMOTE_TRAIN_EXIT_CODE_FILE="${REMOTE_TRAIN_EXIT_CODE_FILE}" \
 RUNPOD_REMOTE_PROGRESS_JSONL="${REMOTE_PROGRESS_JSONL}" \
 RUNPOD_REMOTE_BEST_CHECKPOINT="${REMOTE_BEST_CHECKPOINT}" \
 RUNPOD_REMOTE_EPOCH_CHECKPOINT_DIR="${REMOTE_EPOCH_CHECKPOINT_DIR}" \
 bash "${REPO_ROOT}/scripts/runpod_cycle_watch_progress.sh"
+telemetry_checkpoint "train_watch" "done" "watch progress completed"
 
+telemetry_checkpoint "artifact_collect" "running" "collecting remote artifacts"
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh"
+telemetry_checkpoint "artifact_collect" "done" "artifact collection completed"
 
 LOCAL_COLLECT_DIR="${CYCLE_DIR}/collected/run_artifacts"
 LOCAL_SPEC_SUGGESTIONS_DIR="${CYCLE_DIR}/spec_suggestions"
@@ -955,6 +997,9 @@ runpod_cycle_append_report "${REPORT_MD}" \
 
 RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_stop.sh"
 FLOW_SUCCESS=1
+telemetry_checkpoint "full_hf_flow" "done" "flow completed successfully"
+telemetry_event "full_hf_flow_complete" "ok" "runpod full hf flow complete"
+telemetry_healthcheck "success" "run_id=${RUN_ID} full_hf_flow_complete"
 
 echo "[runpod-cycle-full-train-hf] run_id=${RUN_ID}"
 echo "[runpod-cycle-full-train-hf] collected_artifacts=${LOCAL_COLLECT_DIR}"

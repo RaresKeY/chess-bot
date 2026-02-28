@@ -17,6 +17,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Optional host-side RunPod full-cycle artifact verifier: `scripts/runpod_cycle_verify_full_hf_run.py`, `src/chessbot/runpod_cycle_verify.py`
 - Container image build: `deploy/runpod_cloud_training/Dockerfile`
 - Startup orchestration: `deploy/runpod_cloud_training/entrypoint.sh`
+- OpenTelemetry collector config: `deploy/runpod_cloud_training/otel-collector-config.yaml`
+- Healthchecks utility: `deploy/runpod_cloud_training/healthchecks_ping.sh`
 - Inference HTTP service: `deploy/runpod_cloud_training/inference_api.py`
 - RunPod training launcher preset: `deploy/runpod_cloud_training/train_baseline_preset.sh`
 - Hugging Face sync tools:
@@ -32,6 +34,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - `sshd` for SSH CLI access (key-based auth)
 - `jupyter lab` for interactive exploration and file upload/download
 - FastAPI/uvicorn inference endpoint (`/healthz`, `/infer`)
+- OpenTelemetry Collector (`otelcol-contrib`) for host metrics + OTLP ingest
 - Optional Hugging Face artifact auto-sync watcher
 - Optional idle watchdog for autostop behavior
 - Host-side cycle scripts now default to safer SSH client behavior (`StrictHostKeyChecking=accept-new` with persistent `config/runpod_known_hosts`) instead of the older insecure `/tmp` + host-key-checking-disabled pattern; overrides remain available via `RUNPOD_SSH_HOST_KEY_CHECKING` and `RUNPOD_SSH_KNOWN_HOSTS_FILE`
@@ -60,6 +63,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Prebuilt Python venv in image (`/opt/venvs/chessbot`)
 - `rclone` installed for generic high-throughput transfers
 - image also includes transfer/debug packages for large artifact handling (`aria2`, `pigz`, `zstd`, `lz4`, `pv`, `wget`, `git-lfs`, `unzip`)
+- image includes telemetry/debug packages (`dnsutils`, `iputils-ping`, `net-tools`, `sysstat`)
+- image installs `otelcol-contrib` binary for OpenTelemetry collection
 - `huggingface_hub` + `hf_transfer` installed for HF artifact uploads
 - Inference access supported via both SSH CLI (repo scripts) and HTTP API service
 - Idle autostop watchdog script included for RunPod-style workflows
@@ -75,6 +80,11 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - `docker login ghcr.io` authenticates local Docker/Buildx pushes to GHCR
 - On Linux Mint host setups, Docker can be configured to store GHCR credentials in the system keyring via the `secretservice` credential helper (`"credsStore": "secretservice"` in `~/.docker/config.json`) instead of plaintext auth entries.
 - Phase timings are logged in JSONL under a conventional artifacts path by default: `artifacts/timings/runpod_phase_times.jsonl` (configurable via `RUNPOD_PHASE_TIMING_LOG`)
+- Entrypoint supports Healthchecks pings with `RUNPOD_HEALTHCHECKS_URL`/`HEALTHCHECKS_URL`
+- Entrypoint supports OpenTelemetry collector controls:
+  - `START_OTEL_COLLECTOR` (default `1`)
+  - `OTEL_CONFIG_PATH` (optional override)
+  - `OTEL_FILE_EXPORT_PATH` (default repo artifacts path)
 
 ## RunPod Lifecycle Semantics (Stop vs Terminate)
 - `stop` in RunPod context means halting pod compute (for example via GraphQL `podStop`); the pod resource and storage can remain.

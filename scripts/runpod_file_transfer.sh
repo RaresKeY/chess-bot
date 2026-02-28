@@ -3,6 +3,15 @@ set -Eeuo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runpod_cycle_common.sh"
 
+telemetry_event() {
+  local run_id="$1"
+  local ev="$2"
+  local st="$3"
+  local msg="${4:-}"
+  RUNPOD_CYCLE_RUN_ID="${run_id}" bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/telemetry_emit_event.sh" \
+    --event "${ev}" --status "${st}" --message "${msg}" >/dev/null 2>&1 || true
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -123,6 +132,7 @@ esac
   echo "[runpod-file-transfer] checksum=${USE_CHECKSUM} compress=${USE_COMPRESS} partial=${USE_PARTIAL}"
   echo "[runpod-file-transfer] bwlimit_kbps=${BW_LIMIT_KBPS:-<unset>}"
 } | tee "${LOG_FILE}"
+telemetry_event "${RUN_ID}" "file_transfer_start" "info" "mode=${MODE} src=${SRC_PATH} dst=${DST_PATH}"
 
 attempt=1
 while true; do
@@ -135,11 +145,13 @@ while true; do
 
   if rsync "${rsync_opts[@]}" -e "${RSYNC_SSH}" "${RSYNC_SRC}" "${RSYNC_DST}" 2>&1 | tee -a "${LOG_FILE}"; then
     echo "[runpod-file-transfer] success" | tee -a "${LOG_FILE}"
+    telemetry_event "${RUN_ID}" "file_transfer_complete" "ok" "mode=${MODE} src=${SRC_PATH} dst=${DST_PATH}"
     break
   fi
 
   if (( attempt >= RETRIES )); then
     echo "[runpod-file-transfer] failed after ${RETRIES} attempts" | tee -a "${LOG_FILE}" >&2
+    telemetry_event "${RUN_ID}" "file_transfer_complete" "error" "mode=${MODE} src=${SRC_PATH} dst=${DST_PATH}"
     exit 1
   fi
 

@@ -16,6 +16,7 @@ START_JUPYTER="${START_JUPYTER:-1}"
 START_INFERENCE_API="${START_INFERENCE_API:-1}"
 START_HF_WATCH="${START_HF_WATCH:-0}"
 START_IDLE_WATCHDOG="${START_IDLE_WATCHDOG:-0}"
+START_OTEL_COLLECTOR="${START_OTEL_COLLECTOR:-1}"
 JUPYTER_PORT="${JUPYTER_PORT:-8888}"
 JUPYTER_TOKEN="${JUPYTER_TOKEN:-}"
 INFERENCE_API_HOST="${INFERENCE_API_HOST:-0.0.0.0}"
@@ -38,11 +39,29 @@ RUNPOD_PHASE_TIMING_LOG="${RUNPOD_PHASE_TIMING_LOG:-${REPO_DIR}/artifacts/timing
 RUNPOD_PHASE_TIMING_RUN_ID="${RUNPOD_PHASE_TIMING_RUN_ID:-runpod-entrypoint-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 RUNPOD_MODULE_IMAGE_DIR="${RUNPOD_MODULE_IMAGE_DIR:-/opt/runpod_cloud_training}"
 RUNPOD_MODULE_DIR="${RUNPOD_MODULE_DIR:-}"
+RUNPOD_HEALTHCHECKS_URL="${RUNPOD_HEALTHCHECKS_URL:-${HEALTHCHECKS_URL:-}}"
+OTEL_CONFIG_PATH="${OTEL_CONFIG_PATH:-}"
+OTEL_FILE_EXPORT_PATH="${OTEL_FILE_EXPORT_PATH:-${REPO_DIR}/artifacts/telemetry/otel/collector.jsonl}"
 
 PIDS=()
 
 log() {
   printf '[entrypoint] %s\n' "$*"
+}
+
+healthchecks_ping() {
+  local kind="$1"
+  local msg="${2:-}"
+  [[ -n "${RUNPOD_HEALTHCHECKS_URL}" ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  local url="${RUNPOD_HEALTHCHECKS_URL%/}"
+  case "${kind}" in
+    start) url="${url}/start" ;;
+    success) ;;
+    fail) url="${url}/fail" ;;
+    log) url="${url}/log" ;;
+  esac
+  curl -fsS -m 10 -X POST --data-raw "${msg}" "${url}" >/dev/null 2>&1 || true
 }
 
 _now_epoch_ms() {
@@ -239,6 +258,7 @@ start_runner_bg() {
 
 cleanup() {
   log "Shutting down services"
+  healthchecks_ping "log" "runpod entrypoint shutting down"
   for pid in "${PIDS[@]:-}"; do
     kill "${pid}" 2>/dev/null || true
   done
@@ -246,6 +266,9 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
+trap 'healthchecks_ping fail "runpod entrypoint error"' ERR
+
+healthchecks_ping start "runpod entrypoint boot"
 
 mkdir -p /workspace
 chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace "${RUNNER_HOME}"
@@ -340,7 +363,18 @@ if [[ "${START_IDLE_WATCHDOG}" == "1" ]]; then
       ${idle_watchdog_verbose_flag}
 fi
 
+if [[ "${START_OTEL_COLLECTOR}" == "1" ]]; then
+  if ! command -v otelcol-contrib >/dev/null 2>&1; then
+    log "Skipping OpenTelemetry Collector start: otelcol-contrib not found"
+  else
+    OTEL_CONFIG_RESOLVED="${OTEL_CONFIG_PATH:-${RUNPOD_MODULE_DIR}/otel-collector-config.yaml}"
+    run_timed_phase "start_otel_collector" start_runner_bg "otel-collector" \
+      "mkdir -p \"\$(dirname '${OTEL_FILE_EXPORT_PATH}')\" && OTEL_FILE_EXPORT_PATH='${OTEL_FILE_EXPORT_PATH}' otelcol-contrib --config '${OTEL_CONFIG_RESOLVED}'"
+  fi
+fi
+
 log "Startup complete"
+healthchecks_ping success "runpod entrypoint startup complete"
 log "Repo: ${REPO_DIR} (${REPO_REF})"
 log "SSH: port 22 (user=${RUNNER_USER})"
 if [[ "${START_JUPYTER}" == "1" ]]; then
@@ -348,6 +382,9 @@ if [[ "${START_JUPYTER}" == "1" ]]; then
 fi
 if [[ "${START_INFERENCE_API}" == "1" ]]; then
   log "Inference API: http://${INFERENCE_API_HOST}:${INFERENCE_API_PORT}"
+fi
+if [[ "${START_OTEL_COLLECTOR}" == "1" ]]; then
+  log "OpenTelemetry Collector: enabled"
 fi
 
 if [[ "$#" -gt 0 ]]; then

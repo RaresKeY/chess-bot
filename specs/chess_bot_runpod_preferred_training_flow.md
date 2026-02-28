@@ -102,6 +102,7 @@ python scripts/runpod_cycle_report_style.py --run-id <run_id>
 - For supervised/manual remote runs created under `manual_*`, monitor and auto-collect artifacts when complete:
 ```bash
 bash scripts/runpod_cycle_status.sh --watch --auto-collect
+bash scripts/telemetry_control.sh status --json
 ```
 - Per-run logs/artifacts are stored under:
   - `artifacts/runpod_cycles/<run_id>/`
