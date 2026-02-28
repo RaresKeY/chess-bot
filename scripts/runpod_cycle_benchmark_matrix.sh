@@ -21,8 +21,9 @@ telemetry_event() {
   local ev="$1"
   local st="$2"
   local msg="${3:-}"
+  local extra_json="${4:-{}}"
   RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/telemetry_emit_event.sh" \
-    --event "${ev}" --status "${st}" --message "${msg}" >/dev/null 2>&1 || true
+    --event "${ev}" --status "${st}" --message "${msg}" --extra-json "${extra_json}" >/dev/null 2>&1 || true
 }
 
 telemetry_checkpoint() {
@@ -81,6 +82,11 @@ if [[ ! -f "${PROVISION_JSON}" ]]; then
   exit 1
 fi
 
+IMAGE_USED="$(jq -r '(.pod_status.imageName // .create_response.imageName // "")' "${PROVISION_JSON}")"
+if [[ -n "${IMAGE_USED}" ]]; then
+  telemetry_event "benchmark_image_used" "info" "image resolved from provision record" "{\"image\":\"${IMAGE_USED}\"}"
+fi
+
 SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
 SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
 SSH_KEY="$(runpod_cycle_ssh_key)"
@@ -118,6 +124,7 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
 - transfer_tool: \`${FLOW_TRANSFER_TOOL}\`
 - transfer_strict: \`${FLOW_TRANSFER_STRICT}\`
+- image_used: \`${IMAGE_USED:-<unknown>}\`
 
 | trial | status | exit_code | local_dir |
 |---|---:|---:|---|
@@ -209,6 +216,103 @@ if [[ "${remote_sha}" != "${FLOW_EXPECTED_GIT_SHA}" ]]; then
 fi
 echo "[runpod-bench-matrix] remote_repo_synced sha=${remote_sha}"
 EOF_REMOTE_SYNC
+
+telemetry_checkpoint "benchmark_dependencies" "running" "checking pod dependency freshness"
+REMOTE_DEP_CHECK_JSON="${REMOTE_RUN_DIR}/dependency_check.json"
+LOCAL_DEP_CHECK_JSON="${CYCLE_DIR}/reports/dependency_check.json"
+mkdir -p "$(dirname "${LOCAL_DEP_CHECK_JSON}")"
+if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+  "REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_DEP_CHECK_JSON='${REMOTE_DEP_CHECK_JSON}' /bin/bash -s" <<'EOF_REMOTE_DEPS'
+set -Eeuo pipefail
+"/opt/venvs/chessbot/bin/python" - <<'PY' "${REMOTE_REPO_DIR}" "${REMOTE_DEP_CHECK_JSON}"
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+req_path = repo / "requirements.txt"
+rows = []
+missing = 0
+mismatch = 0
+checked = 0
+if req_path.is_file():
+    for raw in req_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-z0-9_.-]+)\s*(>=|==)\s*([A-Za-z0-9_.-]+)$", line)
+        if not m:
+            continue
+        name, op, need = m.group(1), m.group(2), m.group(3)
+        checked += 1
+        proc = subprocess.run(
+            ["/opt/venvs/chessbot/bin/python", "-m", "pip", "show", name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        got = ""
+        if proc.returncode == 0:
+            for pline in proc.stdout.splitlines():
+                if pline.startswith("Version:"):
+                    got = pline.split(":", 1)[1].strip()
+                    break
+        status = "ok"
+        if not got:
+            status = "missing"
+            missing += 1
+        else:
+            try:
+                from packaging.version import Version
+
+                lhs = Version(got)
+                rhs = Version(need)
+                if op == ">=":
+                    status = "ok" if lhs >= rhs else "mismatch"
+                elif op == "==":
+                    status = "ok" if lhs == rhs else "mismatch"
+            except Exception:
+                if op == "==" and got != need:
+                    status = "mismatch"
+                elif op == ">=" and got < need:
+                    status = "mismatch"
+        if status == "mismatch":
+            mismatch += 1
+        rows.append({"requirement": line, "name": name, "operator": op, "required": need, "installed": got, "status": status})
+
+payload = {
+    "requirements_path": str(req_path),
+    "checked": int(checked),
+    "missing": int(missing),
+    "mismatch": int(mismatch),
+    "up_to_date": bool(missing == 0 and mismatch == 0),
+    "rows": rows,
+}
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+print(json.dumps(payload, ensure_ascii=True))
+PY
+EOF_REMOTE_DEPS
+then
+  scp -i "${SSH_KEY}" -P "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o "StrictHostKeyChecking=${SSH_HOST_KEY_CHECKING}" -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" \
+    "${SSH_USER}@${SSH_HOST}:${REMOTE_DEP_CHECK_JSON}" "${LOCAL_DEP_CHECK_JSON}" >/dev/null 2>&1 || true
+  dep_missing="$(jq -r '.missing // 0' "${LOCAL_DEP_CHECK_JSON}" 2>/dev/null || echo 0)"
+  dep_mismatch="$(jq -r '.mismatch // 0' "${LOCAL_DEP_CHECK_JSON}" 2>/dev/null || echo 0)"
+  dep_up_to_date="$(jq -r '.up_to_date // false' "${LOCAL_DEP_CHECK_JSON}" 2>/dev/null || echo false)"
+  if [[ "${dep_up_to_date}" == "true" ]]; then
+    telemetry_checkpoint "benchmark_dependencies" "done" "dependencies up to date"
+    telemetry_event "benchmark_dependencies" "ok" "dependency check complete" "{\"missing\":${dep_missing},\"mismatch\":${dep_mismatch},\"up_to_date\":true}"
+  else
+    telemetry_checkpoint "benchmark_dependencies" "error" "dependency mismatch detected"
+    telemetry_event "benchmark_dependencies" "warn" "dependency check complete with issues" "{\"missing\":${dep_missing},\"mismatch\":${dep_mismatch},\"up_to_date\":false}"
+  fi
+else
+  telemetry_checkpoint "benchmark_dependencies" "error" "dependency check failed"
+  telemetry_event "benchmark_dependencies" "error" "dependency check command failed"
+fi
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_DATASET_NAME='${FLOW_HF_DATASET_NAME}' FLOW_HF_DATASET_VERSION='${FLOW_HF_DATASET_VERSION}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' /bin/bash -s" <<'EOF_REMOTE_FETCH'

@@ -298,6 +298,10 @@ OUT
         self.assertIn("rclone copy", text)
         self.assertIn(":sftp,host=${SSH_HOST}", text)
         self.assertIn("rclone_missing_fallback_rsync", text)
+        self.assertIn("benchmark_image_used", text)
+        self.assertIn("dependency_check.json", text)
+        self.assertIn("benchmark_dependencies", text)
+        self.assertIn("requirements.txt", text)
 
     def test_benchmark_10k_sixpack_wrapper_defaults(self):
         text = Path("scripts/runpod_cycle_benchmark_10k_sixpack.sh").read_text(encoding="utf-8")

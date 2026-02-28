@@ -287,6 +287,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
   - benchmark artifact pull prefers `rclone` SFTP (`RUNPOD_BENCH_TRANSFER_TOOL=rclone`) with automatic fallback to `rsync`; set `RUNPOD_BENCH_TRANSFER_STRICT=1` to fail fast if `rclone` is unavailable on the host
   - benchmark/fetch path enforces cloud token safety by clearing write-capable HF env vars on pod-side fetch/train shells (`HF_WRITE_TOKEN`, legacy `HF_TOKEN`)
+  - records `benchmark_image_used` telemetry event from provision metadata and writes image summary into trial markdown
+  - runs a remote dependency freshness check against repo `requirements.txt` using pod venv, writes `artifacts/runpod_cycles/<run_id>/reports/dependency_check.json`, and emits `benchmark_dependencies` telemetry status
   - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - propagates subset cap via both env (`TRAIN_MAX_TOTAL_ROWS`) and CLI (`--max-total-rows`) for deterministic logging and behavior checks
