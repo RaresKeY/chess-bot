@@ -57,6 +57,7 @@ FLOW_HF_SCHEMA_FILTER="${RUNPOD_HF_DATASET_SCHEMA_FILTER:-game_jsonl_runtime_spl
 FLOW_EPOCHS="${RUNPOD_BENCH_EPOCHS:-1}"
 FLOW_BATCH_SIZE="${RUNPOD_BENCH_BATCH_SIZE:-2048}"
 FLOW_NUM_WORKERS="${RUNPOD_BENCH_NUM_WORKERS:-8}"
+FLOW_DISTRIBUTED_BACKEND="${RUNPOD_BENCH_DISTRIBUTED_BACKEND:-nccl}"
 FLOW_RUNTIME_MAX_SAMPLES_PER_GAME="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-200000}"
 FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
@@ -112,6 +113,7 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - epochs_per_trial: \`${FLOW_EPOCHS}\`
 - batch_size: \`${FLOW_BATCH_SIZE}\`
 - num_workers_per_rank: \`${FLOW_NUM_WORKERS}\`
+- distributed_backend: \`${FLOW_DISTRIBUTED_BACKEND}\`
 
 | trial | status | exit_code | local_dir |
 |---|---:|---:|---|
@@ -269,6 +271,7 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
 
   if [[ "${trial_status}" == "ok" ]]; then
     telemetry_checkpoint "trial_${trial}" "running" "trial started"
+    train_extra_args+=" --distributed-backend ${FLOW_DISTRIBUTED_BACKEND}"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
       "TRIAL='${trial}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' REMOTE_TRIAL_DIR='${remote_trial_dir}' FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_SCHEMA_FILTER='${FLOW_HF_SCHEMA_FILTER}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_BATCH_SIZE='${FLOW_BATCH_SIZE}' FLOW_NUM_WORKERS='${FLOW_NUM_WORKERS}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' TRAIN_EXTRA_ARGS='${train_extra_args}' /bin/bash -s" <<'EOF_REMOTE'
 set -Eeuo pipefail

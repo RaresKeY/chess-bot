@@ -284,6 +284,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `RUNPOD_BENCH_HF_DATASET_VERSION=<version|latest>`
     - `RUNPOD_HF_DATASET_PATH_PREFIX` remains the repo prefix (default `validated_datasets`)
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
+  - supports distributed backend override for trial debugging/compatibility: `RUNPOD_BENCH_DISTRIBUTED_BACKEND=<nccl|gloo>`
   - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
   - propagates subset cap via both env (`TRAIN_MAX_TOTAL_ROWS`) and CLI (`--max-total-rows`) for deterministic logging and behavior checks
