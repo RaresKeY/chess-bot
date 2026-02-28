@@ -3,6 +3,7 @@ import json
 import os
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -2594,6 +2595,13 @@ def train_next_move_model_from_jsonl_paths(
             distributed_world_size=int(distributed_world_size),
         )
     is_primary = _is_primary_process(distributed_enabled=distributed_enabled, distributed_rank=distributed_rank)
+    def _emit_stage(event: str, **extra: Any) -> None:
+        if progress_callback is None or not is_primary:
+            return
+        payload = {"event": str(event)}
+        payload.update(extra)
+        progress_callback(payload)
+
     random.seed(seed)
     torch.manual_seed(seed)
 
@@ -2606,9 +2614,19 @@ def train_next_move_model_from_jsonl_paths(
         seed=int(seed),
     )
     schema_kind = _sniff_paths_schema(train_paths + val_paths)
+    data_prep_started = time.perf_counter()
+    _emit_stage(
+        "data_prep_start",
+        dataset_schema=str(schema_kind),
+        train_file_count=int(len(train_paths)),
+        val_file_count=int(len(val_paths)),
+        require_runtime_splice_cache=bool(require_runtime_splice_cache),
+    )
     train_game_rows_by_file: Dict[str, int] = {}
     val_game_rows_by_file: Dict[str, int] = {}
     if schema_kind == "game":
+        cache_lookup_started = time.perf_counter()
+        _emit_stage("runtime_cache_lookup_start")
         if bool(require_runtime_splice_cache):
             train_cache_out, _train_cache_reason = _index_game_jsonl_paths_from_runtime_cache(
                 train_paths,
@@ -2640,7 +2658,17 @@ def train_next_move_model_from_jsonl_paths(
                 runtime_cfg,
                 expected_split="val",
             )
+        _emit_stage(
+            "runtime_cache_lookup_done",
+            elapsed_sec=round(float(time.perf_counter() - cache_lookup_started), 3),
+            train_cache_used=bool(train_cache_used),
+            val_cache_used=bool(val_cache_used),
+            train_cache_reason=str(_train_cache_reason),
+            val_cache_reason=str(_val_cache_reason),
+        )
         meta_loaded = False
+        meta_lookup_started = time.perf_counter()
+        _emit_stage("vocab_rows_meta_lookup_start")
         meta_out, _meta_reason = _try_load_runtime_splice_vocab_rows_meta_for_paths(
             train_paths=train_paths,
             val_paths=val_paths,
@@ -2659,7 +2687,21 @@ def train_next_move_model_from_jsonl_paths(
                 val_games_total,
             ) = meta_out
             meta_loaded = True
+            _emit_stage(
+                "vocab_rows_meta_lookup_done",
+                loaded=True,
+                reason=str(_meta_reason),
+                elapsed_sec=round(float(time.perf_counter() - meta_lookup_started), 3),
+            )
         else:
+            _emit_stage(
+                "vocab_rows_meta_lookup_done",
+                loaded=False,
+                reason=str(_meta_reason),
+                elapsed_sec=round(float(time.perf_counter() - meta_lookup_started), 3),
+            )
+            vocab_count_started = time.perf_counter()
+            _emit_stage("vocab_rows_fallback_scan_start")
             (
                 vocab,
                 train_rows_by_file,
@@ -2673,6 +2715,12 @@ def train_next_move_model_from_jsonl_paths(
                 val_game_rows_by_file,
                 val_games_total,
             ) = _count_rows_in_game_jsonl_paths_runtime_splice(val_paths, runtime_cfg)
+            _emit_stage(
+                "vocab_rows_fallback_scan_done",
+                elapsed_sec=round(float(time.perf_counter() - vocab_count_started), 3),
+                train_rows_total=int(train_rows_total),
+                val_rows_total=int(val_rows_total),
+            )
         cache_load_reason_by_split = {
             "train": _cache_load_reason_label(used_cache=train_cache_used, reason=_train_cache_reason),
             "val": _cache_load_reason_label(used_cache=val_cache_used, reason=_val_cache_reason),
@@ -2699,6 +2747,15 @@ def train_next_move_model_from_jsonl_paths(
             )
         else:
             data_loading_mode = "indexed_game_jsonl_runtime_splice"
+        _emit_stage(
+            "dataset_index_ready",
+            elapsed_sec=round(float(time.perf_counter() - data_prep_started), 3),
+            data_loading=str(data_loading_mode),
+            train_rows_source=int(train_rows_total),
+            val_rows_source=int(val_rows_total),
+            train_runtime_index_bytes=int(train_runtime_index_bytes or 0),
+            val_runtime_index_bytes=int(val_runtime_index_bytes or 0),
+        )
     else:
         # Stream train files once to build vocabulary and exact row counts.
         vocab, train_rows_by_file, train_rows_total = _build_vocab_and_count_rows_from_train_paths(train_paths)
@@ -2712,6 +2769,15 @@ def train_next_move_model_from_jsonl_paths(
         train_runtime_index_bytes = None
         val_runtime_index_bytes = None
         cache_load_reason_by_split = None
+        _emit_stage(
+            "dataset_index_ready",
+            elapsed_sec=round(float(time.perf_counter() - data_prep_started), 3),
+            data_loading=str(data_loading_mode),
+            train_rows_source=int(train_rows_total),
+            val_rows_source=int(val_rows_total),
+            train_runtime_index_bytes=None,
+            val_runtime_index_bytes=None,
+        )
 
     if int(max_total_rows) > 0 and int(max_train_rows) <= 0 and int(max_val_rows) <= 0:
         total_rows_source = int(max(0, train_rows_total)) + int(max(0, val_rows_total))
@@ -2749,6 +2815,18 @@ def train_next_move_model_from_jsonl_paths(
         )
         val_rows_total = int(len(val_ds))
         val_subset_applied = True
+    _emit_stage(
+        "subset_sampling_resolved",
+        max_total_rows=int(max_total_rows),
+        max_train_rows=int(max_train_rows),
+        max_val_rows=int(max_val_rows),
+        train_rows_source=int(train_rows_source_total),
+        val_rows_source=int(val_rows_source_total),
+        train_rows_effective=int(train_rows_total),
+        val_rows_effective=int(val_rows_total),
+        train_subset_applied=bool(train_subset_applied),
+        val_subset_applied=bool(val_subset_applied),
+    )
 
     if train_rows_total <= 0:
         raise RuntimeError("No training rows found")
@@ -2796,6 +2874,11 @@ def train_next_move_model_from_jsonl_paths(
         collate_fn=collate_train,
         num_workers=0,
         pin_memory=pin_memory,
+    )
+    _emit_stage(
+        "dataloader_ready",
+        train_batches=int(len(train_loader)),
+        val_batches=int(len(val_loader)),
     )
     model = NextMoveLSTM(
         vocab_size=len(vocab),
@@ -3018,6 +3101,7 @@ def train_next_move_model_from_jsonl_paths(
         }
 
     history: List[Dict] = []
+    _emit_stage("train_loop_start", epochs=int(epochs))
     for epoch in range(1, epochs + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(int(epoch))

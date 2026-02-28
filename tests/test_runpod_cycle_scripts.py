@@ -288,6 +288,9 @@ OUT
         self.assertIn("runpod_cycle_terminate.sh", text)
         self.assertIn("RUNPOD_BENCH_HF_DATASET_NAME", text)
         self.assertIn("hf_dataset_fetch.py", text)
+        self.assertIn("FLOW_EXPECTED_GIT_SHA", text)
+        self.assertIn("git pull --ff-only origin main", text)
+        self.assertIn("TRAIN_MAX_TOTAL_ROWS", text)
 
     def test_benchmark_10k_sixpack_wrapper_defaults(self):
         text = Path("scripts/runpod_cycle_benchmark_10k_sixpack.sh").read_text(encoding="utf-8")

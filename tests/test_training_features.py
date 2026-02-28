@@ -298,6 +298,11 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertTrue(artifact["runtime"]["best_checkpoint"]["enabled"])
 
         event_names = [e.get("event") for e in events]
+        self.assertIn("data_prep_start", event_names)
+        self.assertIn("dataset_index_ready", event_names)
+        self.assertIn("subset_sampling_resolved", event_names)
+        self.assertIn("dataloader_ready", event_names)
+        self.assertIn("train_loop_start", event_names)
         self.assertIn("train_setup", event_names)
         self.assertEqual(event_names.count("epoch_start"), 2)
         self.assertEqual(event_names.count("epoch_end"), 2)

@@ -277,6 +277,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_benchmark_matrix.sh`
   - one-pod matrix runner for repeated training trials across precision modes on the same provisioned pod
   - defaults to `RUNPOD_GPU_TYPE_ID=NVIDIA A40`, `RUNPOD_GPU_COUNT=2`, and trial list `fp32,tf32,fp16,bf16,sparsity`
+  - syncs remote repo to host `HEAD` before dataset fetch/trials and fails fast on SHA mismatch (prevents stale remote code during long-lived template/image reuse)
   - performs a one-time remote HF fetch before trials and reuses the generated manifest across all trials
   - optional single-dataset mode for faster benchmark loops:
     - `RUNPOD_BENCH_HF_DATASET_NAME=<dataset_name>`
@@ -285,6 +286,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports sparse variants (`fp32_sparse`, `fp16_sparse`, `bf16_sparse`) by passing trainer sparsity flags (`--sparsity-mode l1 --sparsity-l1-lambda ...`)
   - supports one-time remote dataset manifest preparation per run before trials, so trial loops reuse the same fetched dataset selection
   - uses remote `train_baseline_preset.sh` with per-trial overrides (`--no-amp/--amp`, `--tf32`, `--amp-dtype`) and stores outputs under `artifacts/runpod_cycles/<run_id>/manual_bench/<trial>/`
+  - propagates subset cap via both env (`TRAIN_MAX_TOTAL_ROWS`) and CLI (`--max-total-rows`) for deterministic logging and behavior checks
   - pulls each trial directory locally to `artifacts/runpod_cycles/<run_id>/benchmarks/<trial>/` and writes:
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.jsonl`
     - `artifacts/runpod_cycles/<run_id>/benchmarks/trial_summary.md`

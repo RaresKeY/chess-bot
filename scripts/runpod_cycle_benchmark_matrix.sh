@@ -62,6 +62,7 @@ FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
 FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
 FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
 FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
+FLOW_EXPECTED_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
 if [[ "${FLOW_SKIP_START}" != "1" ]]; then
   telemetry_checkpoint "benchmark_provision" "running" "starting benchmark pod"
@@ -107,6 +108,7 @@ cat > "${LOCAL_SUMMARY_MD}" <<MD
 - hf_dataset_name: \`${FLOW_HF_DATASET_NAME:-<all-latest>}\`
 - hf_dataset_version: \`${FLOW_HF_DATASET_VERSION:-<latest>}\`
 - hf_schema_filter: \`${FLOW_HF_SCHEMA_FILTER}\`
+- expected_git_sha: \`${FLOW_EXPECTED_GIT_SHA}\`
 - epochs_per_trial: \`${FLOW_EPOCHS}\`
 - batch_size: \`${FLOW_BATCH_SIZE}\`
 - num_workers_per_rank: \`${FLOW_NUM_WORKERS}\`
@@ -182,6 +184,25 @@ PY
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "mkdir -p '${REMOTE_RUN_DIR}' '${REMOTE_MATRIX_DIR}'"
+
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+  "FLOW_EXPECTED_GIT_SHA='${FLOW_EXPECTED_GIT_SHA}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' /bin/bash -s" <<'EOF_REMOTE_SYNC'
+set -Eeuo pipefail
+cd "${REMOTE_REPO_DIR}"
+if [[ ! -d .git ]]; then
+  echo "[runpod-bench-matrix] remote repo missing git metadata: ${REMOTE_REPO_DIR}" >&2
+  exit 1
+fi
+git fetch origin main >/dev/null 2>&1
+git checkout main >/dev/null 2>&1
+git pull --ff-only origin main >/dev/null 2>&1
+remote_sha="$(git rev-parse HEAD)"
+if [[ "${remote_sha}" != "${FLOW_EXPECTED_GIT_SHA}" ]]; then
+  echo "[runpod-bench-matrix] remote sha mismatch after sync: ${remote_sha} expected ${FLOW_EXPECTED_GIT_SHA}" >&2
+  exit 1
+fi
+echo "[runpod-bench-matrix] remote_repo_synced sha=${remote_sha}"
+EOF_REMOTE_SYNC
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
   "FLOW_HF_REPO_ID='${FLOW_HF_REPO_ID}' FLOW_HF_PREFIX='${FLOW_HF_PREFIX}' FLOW_HF_DATASET_NAME='${FLOW_HF_DATASET_NAME}' FLOW_HF_DATASET_VERSION='${FLOW_HF_DATASET_VERSION}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_MANIFEST='${REMOTE_MANIFEST}' /bin/bash -s" <<'EOF_REMOTE_FETCH'
@@ -274,6 +295,7 @@ export TRAIN_BATCH_SIZE="${FLOW_BATCH_SIZE}"
 export TRAIN_NUM_WORKERS="${FLOW_NUM_WORKERS}"
 export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
 export TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1
+export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"
 export TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS} --max-total-rows ${FLOW_MAX_TOTAL_ROWS} --telemetry-dir ${REMOTE_TRIAL_DIR}/telemetry"
 
 log_path="${REMOTE_TRIAL_DIR}/train_stdout_${TRIAL}.log"
