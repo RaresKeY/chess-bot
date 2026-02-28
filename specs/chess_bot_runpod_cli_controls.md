@@ -296,6 +296,14 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - builds a descending retry plan and reruns the same trial at lower batches when OOM signatures are detected in train logs
     - explicit numeric `RUNPOD_BENCH_BATCH_SIZE` remains a hard override (no auto downgrade plan)
   - NCCL stall guard + safer fallback:
+    - NCCL base safety env is set up-front for benchmark trials when backend is `nccl`:
+      - `NCCL_DEBUG` (default `WARN`)
+      - `TORCH_NCCL_ASYNC_ERROR_HANDLING=1`
+      - `TORCH_NCCL_ENABLE_MONITORING=1`
+      - `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=60`
+      - `TORCH_NCCL_DUMP_ON_TIMEOUT=1`
+      - `TORCH_NCCL_TRACE_BUFFER_SIZE=2000`
+    - each value is overrideable with `RUNPOD_BENCH_NCCL_DEBUG`, `RUNPOD_BENCH_TORCH_NCCL_*`
     - if a trial is still pre-epoch (no `train_setup`/`train_loop_start`/`epoch_start`/`batch_progress`) for `RUNPOD_BENCH_NCCL_STALL_TIMEOUT_SECONDS` (default `120`), the run is terminated as stalled
     - with `RUNPOD_BENCH_NCCL_SAFE_FALLBACK_ENABLED=1` (default), the same trial retries once with safer NCCL env overrides (`NCCL_IB_DISABLE=1`, `NCCL_P2P_DISABLE=1`, `NCCL_P2P_LEVEL=LOC`, `TORCH_NCCL_BLOCKING_WAIT=1`, `TORCH_NCCL_ASYNC_ERROR_HANDLING=1`)
     - stall poll interval is controlled by `RUNPOD_BENCH_NCCL_STALL_POLL_SECONDS` (default `5`)
