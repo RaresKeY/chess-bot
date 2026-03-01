@@ -212,6 +212,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_train.sh`
   - runs `train_baseline_preset.sh` on the pod with explicit output/metrics paths under `artifacts/runpod_cycles/<run_id>/`
   - prefers repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over image-baked `/opt/...` copy (fallback only) so long-lived pods/old images still use latest pulled training script
+  - remote preset selection block now escapes remote-only shell vars in heredoc (`\${TRAIN_PRESET_*}`) to avoid host-side `set -u` expansion errors (for example `TRAIN_PRESET_IMAGE: unbound variable`)
   - runs a short remote inference smoke command (`scripts/infer_move.py`) against the produced model
   - waits for remote repo scripts/readiness before launching training (same timeout/poll env controls as dataset push)
   - exports `REPO_DIR`, `RUNPOD_PHASE_TIMING_LOG`, and `PYTHONPATH` inside the remote SSH command so per-run `REPO_DIR` overrides work end-to-end
