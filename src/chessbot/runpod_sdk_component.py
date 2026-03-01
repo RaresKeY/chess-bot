@@ -447,6 +447,8 @@ def cmd_provision(args: argparse.Namespace) -> int:
     _print_json(
         {
             "component": "runpod_sdk",
+            "pod_id": pod_id,
+            "pod_status": create_out.get("pod_status", {}),
             "create_response": create_out,
             "selected_gpu_type_id": gpu_ids[0],
             "selected_template": {"id": template.get("id"), "name": template.get("name")},

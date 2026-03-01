@@ -6,6 +6,9 @@ Provide a **separate RunPod SDK-based component** for host-side RunPod operation
 ## Component Boundary (Explicit)
 - SDK component:
   - `scripts/runpod_sdk_component.py`
+  - `scripts/runpod_sdk_cycle_start.sh`
+  - `scripts/runpod_sdk_cycle_stop.sh`
+  - `scripts/runpod_sdk_cycle_full_smoke.sh`
   - `src/chessbot/runpod_sdk_component.py`
 - Raw API component (existing, unchanged):
   - `scripts/runpod_provision.py`
@@ -32,6 +35,12 @@ The SDK component is intentionally modular and independent. Changes here should 
   - requests pod stop
 - `pod-terminate`
   - requests pod termination/deletion
+- SDK smoke flow wrappers:
+  - `scripts/runpod_sdk_cycle_start.sh` provisions via SDK and records compatible `provision.json`
+  - `scripts/runpod_sdk_cycle_stop.sh` stops pod via SDK (`pod-stop`)
+  - `scripts/runpod_sdk_cycle_full_smoke.sh` runs:
+    - sdk-start -> dataset push -> train -> collect -> local-validate -> sdk-stop
+  - these wrappers are intentionally separate from raw `runpod_cycle_start.sh`/`runpod_cycle_stop.sh`
 
 ## Authentication / Secret Resolution
 - API key resolution order:
@@ -60,3 +69,5 @@ The SDK component is intentionally modular and independent. Changes here should 
 ## Tests
 - `tests/test_runpod_sdk_component.py`
   - verifies nested callable discovery, GPU ranking behavior, template selection, API key dotenv fallback, parser defaults, and provision-path behavior with a mocked SDK object.
+- `tests/test_runpod_cycle_scripts.py`
+  - verifies SDK smoke wrappers exist and that SDK full smoke flow calls SDK start/stop plus existing shared train/collect validation steps.

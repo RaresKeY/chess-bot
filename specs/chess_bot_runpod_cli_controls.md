@@ -7,6 +7,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/build_runpod_image.sh`
 - `scripts/runpod_provision.py`
 - `scripts/runpod_sdk_component.py`
+- `scripts/runpod_sdk_cycle_start.sh`
+- `scripts/runpod_sdk_cycle_stop.sh`
+- `scripts/runpod_sdk_cycle_full_smoke.sh`
 - `scripts/runpod_cli_doctor.sh`
 - `scripts/runpod_quick_launch.sh`
 - `scripts/runpod_regression_checks.sh`
@@ -91,6 +94,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `pod-stop`
   - `pod-terminate`
 - Output includes `"component": "runpod_sdk"` so operators can distinguish SDK-driven actions from raw API script outputs.
+- SDK smoke wrappers (separate from raw cycle wrappers):
+  - `scripts/runpod_sdk_cycle_start.sh`
+  - `scripts/runpod_sdk_cycle_stop.sh`
+  - `scripts/runpod_sdk_cycle_full_smoke.sh`
+  - full smoke sequence: SDK provision -> dataset push -> train -> collect -> local validate -> SDK stop
+  - SDK start wrapper normalizes provision JSON (`pod_id`/`pod_status`) so existing shared push/train/collect scripts can reuse `runpod_cycle_common.sh` parsing.
 
 ## GraphQL GPU Search Failure Behavior (current)
 - `gpu-search` now converts raw GraphQL `HTTP 403` traces into an actionable error message

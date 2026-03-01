@@ -133,6 +133,9 @@ OUT
             "scripts/runpod_file_transfer.sh",
             "scripts/runpod_active_pods_full_status.sh",
             "scripts/runpod_cycle_full_smoke.sh",
+            "scripts/runpod_sdk_cycle_start.sh",
+            "scripts/runpod_sdk_cycle_stop.sh",
+            "scripts/runpod_sdk_cycle_full_smoke.sh",
             "scripts/runpod_full_train_easy.sh",
             "scripts/runpod_sdk_component.py",
         ]
@@ -153,6 +156,27 @@ OUT
         self.assertIn('telemetry_checkpoint "full_smoke_flow" "running"', text)
         self.assertIn('telemetry_checkpoint "full_smoke_flow" "done"', text)
         self.assertIn('telemetry_event "full_smoke_flow_complete" "ok"', text)
+
+    def test_sdk_full_smoke_calls_sdk_start_and_stop(self):
+        text = Path("scripts/runpod_sdk_cycle_full_smoke.sh").read_text(encoding="utf-8")
+        self.assertIn("runpod_sdk_cycle_start.sh", text)
+        self.assertIn("runpod_cycle_push_dataset.sh", text)
+        self.assertIn("runpod_cycle_train.sh", text)
+        self.assertIn("runpod_cycle_collect.sh", text)
+        self.assertIn("runpod_cycle_local_validate.sh", text)
+        self.assertIn("runpod_sdk_cycle_stop.sh", text)
+        self.assertIn('telemetry_checkpoint "full_smoke_sdk_flow" "running"', text)
+        self.assertIn('telemetry_checkpoint "full_smoke_sdk_flow" "done"', text)
+
+    def test_sdk_start_and_stop_use_sdk_component_cli(self):
+        start = Path("scripts/runpod_sdk_cycle_start.sh").read_text(encoding="utf-8")
+        stop = Path("scripts/runpod_sdk_cycle_stop.sh").read_text(encoding="utf-8")
+        self.assertIn("scripts/runpod_sdk_component.py", start)
+        self.assertIn("provision", start)
+        self.assertIn("runpod_sdk_cycle_start.sh", start)
+        self.assertIn("scripts/runpod_sdk_component.py", stop)
+        self.assertIn("pod-stop", stop)
+        self.assertIn("runpod_sdk_cycle_stop.sh", stop)
 
     def test_stop_script_uses_graphql_pod_stop(self):
         text = Path("scripts/runpod_cycle_stop.sh").read_text(encoding="utf-8")

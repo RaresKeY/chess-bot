@@ -8,6 +8,9 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - `scripts/runpod_cycle_start.sh`
 - `scripts/runpod_provision.py`
 - `scripts/runpod_sdk_component.py`
+- `scripts/runpod_sdk_cycle_start.sh`
+- `scripts/runpod_sdk_cycle_stop.sh`
+- `scripts/runpod_sdk_cycle_full_smoke.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/runpod_active_pods_full_status.sh`
@@ -84,6 +87,27 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `--wait-timeout-seconds` (`provision`) | `900` | integer `>=1` | Wait deadline for `--wait-ready` polling | same |
 | `--wait-poll-seconds` (`provision`) | `10` | integer `>=1` | Poll interval for `--wait-ready` | same |
 | `--pod-id` (`pod-status`, `pod-stop`, `pod-terminate`) | required | string | Target pod id for status/stop/terminate operations | same |
+
+## RunPod SDK Smoke Flow Wrappers (`scripts/runpod_sdk_cycle_*.sh`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `RUNPOD_CYCLE_RUN_ID` | `runpod-sdk-cycle-<utc-ts>` (full smoke) / shared helper default | string | Run id for per-run artifacts and telemetry paths | `bash scripts/runpod_sdk_cycle_full_smoke.sh` |
+| `RUNPOD_SDK_TEMPLATE_NAME` | fallback to `RUNPOD_TEMPLATE_NAME` then `chess-bot-training` | template name | SDK-specific template name override for `runpod_sdk_cycle_start.sh` without changing raw start defaults | `bash scripts/runpod_sdk_cycle_start.sh` |
+| `RUNPOD_TEMPLATE_NAME` | `chess-bot-training` | template name | Shared fallback template name if SDK-specific override is unset | same |
+| `RUNPOD_GPU_TYPE_ID` | `NVIDIA GeForce RTX 3090` | GPU type id/display name | Explicit GPU selection for SDK provision call | same |
+| `RUNPOD_GPU_COUNT` | `1` | integer `>=1` | Requested GPU count for SDK provision call | same |
+| `RUNPOD_CLOUD_TYPE` | `COMMUNITY` | `SECURE`, `COMMUNITY` | Cloud tier for SDK provision | same |
+| `RUNPOD_INTERRUPTIBLE` | `0` | `0`, `1` | Mapped to `--interruptible/--no-interruptible` in SDK start wrapper | same |
+| `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV` | `1` | `0`, `1` | Inject managed temp SSH pubkey env vars (`AUTHORIZED_KEYS`, `PUBLIC_KEY`) during SDK provision | same |
+| `RUNPOD_SET_UNIQUE_REPO_DIR` | `1` | `0`, `1` | Inject per-run `REPO_DIR` to avoid stale persistent-volume repos | same |
+| `RUNPOD_SET_SMOKE_SERVICE_ENVS` | `1` | `0`, `1` | Inject smoke-safe service envs (`START_SSHD=1`, others `0`) for stable smoke SSH runtime | same |
+| `RUNPOD_START_ENVS` | unset | whitespace-separated `KEY=VALUE` pairs | Additional env pairs forwarded to SDK provision command as repeated `--env` | same |
+| `RUNPOD_REQUIRE_SSH_READY` | `1` | `0`, `1` | Wait for direct SSH readiness before SDK start returns success | same |
+| `RUNPOD_SSH_READY_TIMEOUT_SECONDS` | `360` | integer `>=1` | SSH readiness timeout in SDK start wrapper | same |
+| `RUNPOD_SSH_READY_POLL_SECONDS` | `8` | integer `>=1` | SSH readiness poll interval | same |
+| `RUNPOD_TERMINATE_ON_SSH_NOT_READY` | `1` | `0`, `1` | Auto-terminate pod on SSH readiness timeout | same |
+| `RUNPOD_POD_JSON` | `artifacts/runpod_cycles/<run_id>/provision.json` | filepath | Override provision record path consumed by SDK stop and shared cycle scripts | `bash scripts/runpod_sdk_cycle_stop.sh` |
+| `RUNPOD_POD_ID` | from provision JSON | string | Explicit pod id override for SDK stop wrapper | same |
 
 ## Full-Train Wrappers (`scripts/runpod_full_train_easy.sh`, `scripts/runpod_cycle_full_train_hf.sh`)
 | Control | Default | Accepted | Effect | Related Command |
