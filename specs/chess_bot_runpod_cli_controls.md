@@ -194,6 +194,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - now fails fast when host `ssh` client is missing (before rsync loops)
   - defaults local dataset source to `data/dataset/_smoke_runpod`
   - waits for remote `REPO_DIR` to exist and become writable before `mkdir`/`rsync` (avoids startup race with repo clone/chown)
+  - this writability gate now aligns with container startup enforcement (`ensure_repo_writable_for_runner`) so root-owned repo mounts fail earlier during entrypoint bootstrap instead of timing out later in push
   - readiness wait is controlled with `RUNPOD_REMOTE_READY_TIMEOUT_SECONDS` / `RUNPOD_REMOTE_READY_POLL_SECONDS`
 - `scripts/hf_dataset_publish.py`
   - publishes a validated dataset directory to a Hugging Face **dataset** repo using path versioning under `validated_datasets/<dataset_name>/<version>/`
