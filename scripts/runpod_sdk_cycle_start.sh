@@ -141,7 +141,9 @@ if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then
 
   while true; do
     sdk_refresh_status_json
+    # Recompute SSH endpoint each poll so late runtime port mappings are applied.
     SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
+    SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
     mapped_ssh_port="$(sdk_mapped_ssh_port)"
     if [[ -n "${mapped_ssh_port}" && "${mapped_ssh_port}" != "null" ]]; then
       SSH_PORT="${mapped_ssh_port}"

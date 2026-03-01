@@ -179,6 +179,7 @@ OUT
         self.assertIn("sdk_refresh_status_json()", start)
         self.assertIn("pod-status --pod-id", start)
         self.assertIn("sdk_mapped_ssh_port()", start)
+        self.assertIn("Recompute SSH endpoint each poll so late runtime port mappings are applied.", start)
         self.assertIn('if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then', start)
         self.assertIn("runpod_cycle_require_cmd ssh", start)
         self.assertIn("runpod_sdk_cycle_start.sh", start)
