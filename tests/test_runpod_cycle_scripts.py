@@ -671,6 +671,9 @@ OUT
         self.assertIn('if ! chown -R "${RUNNER_USER}:${RUNNER_USER}" /workspace; then', text)
         self.assertIn("continuing; likely restricted volume permissions", text)
         self.assertIn('Skipping /workspace chown on start', text)
+        self.assertIn("ensure_repo_writable_for_runner()", text)
+        self.assertIn('run_timed_phase "ensure_repo_writable_for_runner" ensure_repo_writable_for_runner', text)
+        self.assertIn('if ! chmod -R a+rwX "${REPO_DIR}" 2>/dev/null; then', text)
 
     def test_cycle_train_prefers_repo_train_preset_over_image_copy(self):
         text = Path("scripts/runpod_cycle_train.sh").read_text(encoding="utf-8")

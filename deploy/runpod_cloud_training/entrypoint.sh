@@ -209,6 +209,29 @@ clone_or_update_repo() {
   fi
 }
 
+ensure_repo_writable_for_runner() {
+  if run_as_runner "test -d '${REPO_DIR}' && test -w '${REPO_DIR}'"; then
+    return 0
+  fi
+
+  log "Repo dir is not writable by ${RUNNER_USER}; attempting ownership/permission repair: ${REPO_DIR}"
+  if ! chown -R "${RUNNER_USER}:${RUNNER_USER}" "${REPO_DIR}" 2>/dev/null; then
+    log "Warning: chown repair failed for ${REPO_DIR}"
+  fi
+  # Some provider-managed mounts may reject chown while still allowing mode changes.
+  if ! chmod -R a+rwX "${REPO_DIR}" 2>/dev/null; then
+    log "Warning: chmod repair failed for ${REPO_DIR}"
+  fi
+
+  if run_as_runner "test -d '${REPO_DIR}' && test -w '${REPO_DIR}'"; then
+    log "Repo dir writeability repaired for ${RUNNER_USER}: ${REPO_DIR}"
+    return 0
+  fi
+
+  log "Repo dir remains non-writable for ${RUNNER_USER}: ${REPO_DIR}"
+  return 1
+}
+
 sync_repo_requirements() {
   local req_file="${REPO_DIR}/requirements.txt"
   local stamp_file="${VENV_DIR}/.repo_requirements.sha256"
@@ -287,6 +310,7 @@ run_timed_phase "ensure_ssh_keys" ensure_ssh_keys
 run_timed_phase "ensure_runner_ssh_account" ensure_runner_ssh_account
 run_timed_phase "configure_sshd" configure_sshd
 run_timed_phase "clone_or_update_repo" clone_or_update_repo
+run_timed_phase "ensure_repo_writable_for_runner" ensure_repo_writable_for_runner
 run_timed_phase "sync_repo_requirements" sync_repo_requirements
 run_timed_phase "resolve_module_dir" resolve_module_dir
 
