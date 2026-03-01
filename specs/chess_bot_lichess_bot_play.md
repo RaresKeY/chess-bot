@@ -36,11 +36,10 @@ Provide a separate module for connecting the local move model to the Lichess Bot
 ## Token Resolution (current)
 - Token source priority for live mode:
   1. `--token`
-  2. system keyring lookup (defaults: service `lichess`, username `lichess_api_token`)
-     - credential description label: `Lichess API Token`
+  2. system keyring lookup (see canonical mapping in `specs/chess_bot_secrets_contract.md`)
   3. `LICHESS_BOT_TOKEN` environment variable
   4. dotenv fallback lookup (`LICHESS_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.lichess`, then `.env`)
-- `keyring` is included in project requirements; lookup failures are still handled gracefully (for example missing backend or missing credential).
+- Container guidance for this workspace: prefer dotenv provider path (`LICHESS_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`) because keyring may be unavailable.
 
 ## Preview Mode (current)
 - `--preview-fixture` reads a local JSON fixture containing a `transcript` list of game-stream events.
@@ -60,7 +59,7 @@ Provide a separate module for connecting the local move model to the Lichess Bot
 - `scripts/serve_lichess_preview.py` serves an interactive live UI (`/index.html`) over local HTTP with client-side polling controls (auto-refresh toggle, interval, follow-newest game, manual refresh) and reads JSON artifacts from the preview dir.
 - The live UI renders a visual board using local SVG piece assets (`assets/pieces/cburnett`) plus a compact SAN move table for the selected game, driven by the derived board data in `state.json`.
 - The selected-game board highlights the last move (`from` and `to` squares) using a classic green square highlight treatment.
-- The live UI also exposes an outbound challenge form that POSTs to the local preview server (`/api/challenge`), which invokes a one-shot `scripts/lichess_bot.py --challenge-user ...` call using the same token/keyring settings.
+- The live UI also exposes an outbound challenge form that POSTs to the local preview server (`/api/challenge`), which invokes a one-shot `scripts/lichess_bot.py --challenge-user ...` call using the same token-provider settings.
 - The live UI also exposes an opponent-search panel with an `Actively search` toggle that polls a local `/api/online-bots` endpoint (backed by Lichess `/api/bot/online`) and renders clickable online bot candidates with `Prefill` / `Challenge` actions (default search interval `15000 ms`, server-side cache ~`15 s`).
 - The opponent-search list can be filtered client-side by the auto-challenge ELO range controls (rating bucket + min/max ELO) to narrow the visible candidates to the target strength window.
 - The live UI also exposes an `Auto Challenge` control row that can continuously trigger server-side auto-challenge ticks with configurable interval, rating bucket (`bullet`/`blitz`/`rapid`/`classical`), ELO min/max range, retry cooldown, `include playing bots` behavior, and an `only if no active game` guard.

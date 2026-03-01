@@ -28,6 +28,11 @@ If checks fail, warn the user immediately before proceeding.
 - Prefer module invocation for tooling reliability: `/work/.venv/bin/python -m pip ...`
 - Externally-synced shim wrappers (for example `uv`-generated `pip`) may break due to absolute shebangs.
 
+## Secret Provider Runtime Note (Observed 2026-03-01)
+- Python `keyring` is unavailable in this container runtime (`ModuleNotFoundError` in `.venv` and system `python3`).
+- For secret/token resolution in this workspace, prefer dotenv provider paths (`*_DOTENV_PATH`) over keyring-dependent workflows.
+- Canonical token/key-provider mapping is maintained in `specs/chess_bot_secrets_contract.md`.
+
 ## Observed Smoke Runtime (2026-02-22)
 - `/work/.venv` rebuilt in-container
 - End-to-end CLI pipeline executed successfully on sample PGN fixture

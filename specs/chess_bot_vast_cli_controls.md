@@ -56,8 +56,12 @@ Define the Vast.ai host-side provisioning and lifecycle workflow added as a para
 Vast scripts resolve API key in this order:
 1. explicit `--api-key`
 2. env `VAST_API_KEY`
-3. keyring (`service=vast`, `username=VAST_API_KEY`)
+3. keyring fallback (canonical identity mapping in `specs/chess_bot_secrets_contract.md`)
 4. dotenv fallback (`VAST_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.vast`, then `.env`)
+
+Container guidance for this workspace:
+- prefer dotenv provider path (`VAST_DOTENV_PATH` or `CHESSBOT_DOTENV_PATH`) over keyring.
+- canonical token/key identity mapping is maintained in `specs/chess_bot_secrets_contract.md`.
 
 ## Validation
 - `tests/test_vast_api_helpers.py`

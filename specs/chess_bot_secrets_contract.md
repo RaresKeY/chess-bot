@@ -18,6 +18,13 @@ Define one canonical contract for secret/token resolution so all CLI and runtime
 - Empty/whitespace-only values are treated as missing.
 - Missing secret errors must state which sources were checked.
 
+## Documentation Centralization Rule
+- This file is the canonical location for:
+  - token/key identity mappings (service/username keys)
+  - provider lookup order contracts
+  - container-specific provider guidance
+- Other specs should reference this file for token/key-provider policy instead of duplicating keyring identity details.
+
 ## Source Orders (Current Ground Truth)
 - RunPod API key (`RUNPOD_API_KEY`):
   1. explicit CLI (`--api-key`)
@@ -40,6 +47,16 @@ Define one canonical contract for secret/token resolution so all CLI and runtime
      - credential description label: `Lichess API Token`
   3. environment
   4. dotenv fallback
+
+## Container Provider Guidance (Observed 2026-03-01)
+- Current `/work` container runtime has no Python `keyring` module available (`ModuleNotFoundError` in both `.venv` and system `python3`).
+- Operational preference in this container:
+  1. explicit CLI token/key (when needed)
+  2. env vars
+  3. dotenv via `*_DOTENV_PATH` override
+  4. keyring only as optional cross-environment fallback
+- Practical instruction for this container:
+  - prefer `.env` provider paths (`RUNPOD_DOTENV_PATH`, `HF_DOTENV_PATH`, `LICHESS_DOTENV_PATH`, `VAST_DOTENV_PATH`) over keyring flags/workflows.
 
 ## Keyring Metadata (Non-Sensitive)
 - RunPod:

@@ -60,11 +60,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 ## Host Runtime Assumptions
 - Commands are run from the host workspace (not inside the RunPod pod)
 - Prefer project venv Python when available (`.venv/bin/python`)
-- RunPod API key lookup in `scripts/runpod_provision.py`:
-  1. `--api-key`
-  2. env `RUNPOD_API_KEY`
-  3. keyring (`service=runpod`, `username=RUNPOD_API_KEY`)
-  4. dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.runpod`, then `.env`)
+- Token/key-provider mapping is centralized in `specs/chess_bot_secrets_contract.md`.
+- Container guidance for this workspace:
+  - explicit keyring workflows are not available (`keyring` module unavailable in-container).
+  - prefer dotenv provider path (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`) over keyring.
 
 ## RunPod Pod Lifecycle Terms (Do Not Conflate)
 - `provision` / `start`: create a new RunPod pod resource and start compute.
@@ -107,9 +106,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - full smoke sequence: SDK provision -> dataset push -> train -> collect -> local validate -> SDK stop
   - SDK start wrapper normalizes provision JSON (`pod_id`/`pod_status`) so existing shared push/train/collect scripts can reuse `runpod_cycle_common.sh` parsing.
   - SDK start wrapper now passes `--image-name` only when `RUNPOD_SDK_IMAGE_NAME` is non-empty.
-  - SDK start SSH readiness loop now refreshes pod status via SDK `pod-status` and updates `provision.json` each poll so late-arriving public IP / mapped SSH port data can be used before timeout.
+  - SDK start SSH readiness loop now refreshes pod status via SDK `pod-status`, updates `provision.json`, and recomputes SSH host/port via shared helpers on every poll so late-arriving `runtime.ports` mappings are used before timeout.
   - SDK start now preflights host `ssh` when `RUNPOD_REQUIRE_SSH_READY=1` and fails fast before provisioning if `ssh` is missing, avoiding avoidable pod create/timeout cycles.
   - SDK provision template fallback now only applies when template-list methods are missing; runtime template-list errors are surfaced.
+  - known bug (observed 2026-03-01): SDK `gpu-search` availability fields can be all-zero (`max_gpu_count=0`, `price_per_hr=0.0`) even when direct API `gpu-search` reports non-zero capacity/pricing.
+  - root-cause note (observed 2026-03-01): SDK `gpu-search` currently relies on `runpod.get_gpus()` rows that may only provide `id`/`displayName`/`memoryInGb`; local ranking defaults missing price/count fields to zero.
+  - keyring/auth note (observed 2026-03-01): container keyring module was unavailable (`ModuleNotFoundError`), but SDK auth still resolved via dotenv and reproduced the bug; invalid explicit keys fail unauthorized. This indicates the all-zero symptom is not primarily a keyring-access issue.
+  - operator guidance while bug is open: treat SDK `gpu-search` as informational only; use direct `runpod_provision.py gpu-search` and direct cycle scripts for availability-sensitive launch decisions.
 
 ## GraphQL GPU Search Failure Behavior (current)
 - `gpu-search` now converts raw GraphQL `HTTP 403` traces into an actionable error message
@@ -157,7 +160,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - supports quick launch from the host terminal with optional explicit GPU type ID
   - inherits current `runpod_provision.py` defaults (notably `--use-runpod-training-preset-env` is now opt-in)
 - `scripts/runpod_cycle_common.sh`
-  - shared helpers for modular lifecycle scripts (run id paths, keyring token lookup, pod JSON parsing, SSH/connection fields)
+  - shared helpers for modular lifecycle scripts (run id paths, token lookup, pod JSON parsing, SSH/connection fields)
   - container-specific OpenSSH bootstrap: when host `ssh`/`ssh-keygen` is missing and a container marker exists (`/run/.containerenv` or `/.containerenv`), shared helpers attempt `apt-get install openssh-client` automatically before failing.
   - managed temp key only: scripts always use `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` and do not support personal/local key override variables
   - managed key preparation accepts an already-present `${RUNPOD_TEMP_SSH_KEY_BASE}` + `.pub` pair without requiring `ssh-keygen` on host (generation is only attempted when pair is missing)
@@ -166,7 +169,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - shared SSH args disable host agent/keyring import prompts for managed keys (`AddKeysToAgent=no`, `IdentityAgent=none`)
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
-  - provisions a pod from template using keyring-backed RunPod auth
+  - provisions a pod from template using shared resolver-backed RunPod auth (see `specs/chess_bot_secrets_contract.md`)
   - forwards `RUNPOD_INTERRUPTIBLE=1` to `runpod_provision.py --interruptible` for spot launches (default `0` / on-demand)
   - now injects a managed no-passphrase temp SSH key by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`), generated at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
   - managed key injection can be controlled with `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
@@ -193,17 +196,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - readiness wait is controlled with `RUNPOD_REMOTE_READY_TIMEOUT_SECONDS` / `RUNPOD_REMOTE_READY_POLL_SECONDS`
 - `scripts/hf_dataset_publish.py`
   - publishes a validated dataset directory to a Hugging Face **dataset** repo using path versioning under `validated_datasets/<dataset_name>/<version>/`
-  - canonical HF keyring identities:
-    - read/fetch: `service=huggingface`, `username=codex_hf_read_token`
-    - write/publish: `service=huggingface`, `username=codex_hf_write_token` (do not use in cloud training pods)
-  - equivalent explicit CLI flags:
-    - publish: `--keyring-service huggingface --keyring-username codex_hf_write_token`
-    - fetch: `--keyring-service huggingface --keyring-username codex_hf_read_token`
-  - default token lookup order:
-    1. `--token`
-    2. env (`HF_WRITE_TOKEN` for publish, `HF_READ_TOKEN` for fetch, legacy `HF_TOKEN` fallback)
-    3. keyring (`codex_hf_write_token` for publish, `codex_hf_read_token` for fetch)
-    4. dotenv fallback (`HF_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.hf_dataset`, then `.env`)
+  - canonical HF token/key identities are maintained in `specs/chess_bot_secrets_contract.md` (do not use write token in cloud training pods)
+  - token lookup/provider order follows `specs/chess_bot_secrets_contract.md` (container preference: dotenv provider paths over keyring)
   - writes `manifest.json` + `checksums.sha256` and uploads either:
     - a compressed `*.tar.gz` archive (default, faster for JSONL uploads), or
     - raw copied files (`--archive-format none`)
@@ -236,7 +230,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - runs local CPU inference (`scripts/infer_move.py`) on the collected `.pt` artifact and saves output
   - exports local `PYTHONPATH=${REPO_ROOT}` before invoking `scripts/infer_move.py` so direct script execution resolves `src.*` imports reliably on the host
 - `scripts/runpod_cycle_stop.sh`
-  - cleanly requests pod stop via RunPod GraphQL `podStop` using RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), then dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, `.env.runpod`, `.env`), plus saved `pod_id`
+  - cleanly requests pod stop via RunPod GraphQL `podStop` using the shared secrets resolver contract (see `specs/chess_bot_secrets_contract.md`) plus saved `pod_id`
   - stop mutation payload now requests object subfields (`id`, `desiredStatus`) to match the current GraphQL schema and avoid validation failures
   - appends a `STOPPED` record to the tracked pod registry for operator bookkeeping
   - note: `stop` halts compute but does not delete the pod; storage charges can still apply until termination
@@ -247,7 +241,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_terminate_all_tracked.sh`
   - safe cleanup utility to terminate (delete) all pods tracked by our scripts whose latest tracked state is not `TERMINATED`
   - requires explicit confirmation (`--yes` or `RUNPOD_CONFIRM_TERMINATE_ALL=YES`)
-  - uses RunPod REST `DELETE /pods/<id>` with RunPod token from env `RUNPOD_API_KEY` first, then keyring fallback (`runpod` / `RUNPOD_API_KEY`), then dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, `.env.runpod`, `.env`), and appends `TERMINATED` registry records on success
+  - uses RunPod REST `DELETE /pods/<id>` with token resolution via the shared secrets resolver contract (see `specs/chess_bot_secrets_contract.md`), and appends `TERMINATED` registry records on success
   - treats RunPod REST `404` responses that clearly indicate `pod not found to terminate` as an "already gone" reconciliation case (records local `TERMINATED` instead of failing the whole cleanup)
 - `scripts/runpod_cycle_full_smoke.sh`
   - orchestration wrapper that composes the modular scripts in order (start -> push -> train -> collect -> local-validate -> stop)
@@ -585,10 +579,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `scripts/runpod_cli_doctor.sh` reported GraphQL denial, but direct `curl` GraphQL probes (`myself`, `gpuTypes`) succeeded with the same key
   - likely cause was Cloudflare/browser-signature filtering against the helper's Python `urllib` requests; helper code now adds an explicit `User-Agent` header and the doctor GraphQL probe returned `ok` after the fix
 
-## Current GPU Availability Query (2026-02-26 host run, keyring-backed)
-- `gpu-search` is working again with the current RunPod API key/keyring flow and should be used before ad-hoc relaunch retries.
+## Current GPU Availability Query (2026-02-26 host run)
+- `gpu-search` is working again and should be used before ad-hoc relaunch retries.
 - Exact command used:
-  - ``.venv/bin/python scripts/runpod_provision.py --keyring-service runpod --keyring-username RUNPOD_API_KEY gpu-search --cloud-type COMMUNITY --limit 20``
+  - ``RUNPOD_DOTENV_PATH=/work/.env .venv/bin/python scripts/runpod_provision.py gpu-search --cloud-type COMMUNITY --limit 20``
 - Practical use:
   - pick a cheap/community GPU from the live list (for example `RTX A5000`, `RTX A4000`, `RTX 3070`, `RTX 3080`) instead of retrying a stale hardcoded SKU
   - then set `RUNPOD_GPU_TYPE_ID` explicitly for `scripts/runpod_cycle_start.sh` or `scripts/runpod_full_train_easy_smoke_test.sh`
@@ -668,7 +662,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - timing logs: `RUNPOD_PHASE_TIMING_ENABLED`, `RUNPOD_PHASE_TIMING_LOG`
 
 ## RunPod GPU Types Snapshot (2026-02-26)
-- Collected on host via direct RunPod GraphQL query using keyring-backed token (`service=runpod`, `username=RUNPOD_API_KEY`)
+- Collected on host via direct RunPod GraphQL query using resolver-backed token auth.
 - Raw snapshot saved at `artifacts/reports/runpod_gpu_types_snapshot_2026-02-26.json`
 - Dated config-style catalog saved at `config/runpod_gpu_types_catalog_2026-02-26.json` for reuse by RunPod CLI helper workflows/scripts
 - Snapshot count: `44` GPU types
@@ -721,7 +715,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 
 ## RunPod GPU Availability Snapshot (2026-02-27, COMMUNITY)
 - Command:
-  - ``.venv/bin/python scripts/runpod_provision.py --keyring-service runpod --keyring-username RUNPOD_API_KEY gpu-search --cloud-type COMMUNITY --min-memory-gb 12 --limit 120``
+  - ``RUNPOD_DOTENV_PATH=/work/.env .venv/bin/python scripts/runpod_provision.py gpu-search --cloud-type COMMUNITY --min-memory-gb 12 --limit 120``
 - Raw/dated outputs saved:
   - `artifacts/reports/runpod_gpu_types_snapshot_2026-02-27.json`
   - `config/runpod_gpu_types_catalog_2026-02-27.json`

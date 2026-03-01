@@ -70,7 +70,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - `huggingface_hub` + `hf_transfer` installed for HF artifact uploads
 - Inference access supported via both SSH CLI (repo scripts) and HTTP API service
 - Idle autostop watchdog script included for RunPod-style workflows
-- RunPod API helpers support API key lookup via env `RUNPOD_API_KEY` or keyring (`service=runpod`, `username=RUNPOD_API_KEY`)
+- RunPod API helpers use the shared secrets resolver contract (canonical mapping in `specs/chess_bot_secrets_contract.md`).
+- Container guidance in this workspace: prefer dotenv provider path (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`) over keyring.
 - RunPod account API keys are treated as high-sensitivity control credentials:
   - send only to RunPod API endpoints
   - pass via `Authorization: Bearer ...` headers (not URL query params)
@@ -173,10 +174,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - publish manifest includes `dataset_format` (detected from `stats.json` or row schema sniffing) and embeds `stats_json` when present for downstream schema-aware fetch/training flows
   - uploads a compressed `tar.gz` bundle by default (faster transfer for JSONL-heavy datasets)
   - supports `--archive-format none` to upload raw files instead
-  - HF token keyring identity is explicitly:
-    - `--keyring-service huggingface`
-    - `--keyring-username codex_hf_write_token`
-  - token lookup defaults to that keyring entry, with `--token` / `HF_TOKEN` overrides
+  - HF token/key-provider contract is centralized in `specs/chess_bot_secrets_contract.md`.
+  - in this container, prefer `HF_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH` for publish/fetch auth fallback.
   - sets `HF_HUB_ENABLE_HF_TRANSFER=1` by default for faster HF transfers when supported by the active env
   - supports `--dry-run` to inspect repo path/versioning without network upload
 - `scripts/hf_dataset_fetch.py` fetches a published dataset version from the HF dataset repo and extracts the archive into a local destination by default
@@ -225,7 +224,8 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - `provision` (choose GPU + template and create a Pod via REST, with optional wait loop)
 - `provision` supports template selection by exact `--template-id` or name/substring `--template-name`
 - Pod create flow supports common chess-bot ports (`22/tcp`, `8888/http`, `8000/http`) and optional env injection
-- Key lookup order is explicit arg -> env `RUNPOD_API_KEY` -> keyring (`runpod` / `RUNPOD_API_KEY`) -> dotenv fallback (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.runpod`, then `.env`); scripts should avoid echoing CLI/env values containing the token
+- Key lookup order follows the shared secrets contract (`specs/chess_bot_secrets_contract.md`); scripts should avoid echoing CLI/env values containing the token.
+- In this container runtime, operator preference is dotenv provider paths over keyring.
 - Provisioning helper strips any accidental `api_key` query parameter from GraphQL endpoints and uses bearer headers for GraphQL/REST authentication
 - GraphQL GPU listing (`gpuTypes`) can fail with `HTTP 403` even when REST template listing works if the API key/account lacks GraphQL access; helper now raises an actionable error instead of a raw traceback
 - `provision --gpu-type-id <id>` now supports a fallback path when GraphQL GPU discovery is denied: it proceeds with the explicit GPU type ID (without GraphQL validation) and emits a warning

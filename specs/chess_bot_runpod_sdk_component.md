@@ -42,7 +42,7 @@ The SDK component is intentionally modular and independent. Changes here should 
 - SDK smoke flow wrappers:
   - `scripts/runpod_sdk_cycle_start.sh` provisions via SDK and records compatible `provision.json`
     - passes `--image-name` only when non-empty (avoids empty-arg ambiguity)
-    - during SSH readiness wait, refreshes pod status via SDK `pod-status` and updates local `provision.json` so delayed public IP / SSH port mappings are picked up before timeout
+    - during SSH readiness wait, refreshes pod status via SDK `pod-status`, updates local `provision.json`, and recomputes SSH host/port each poll so delayed `runtime.ports` mappings are picked up before timeout
   - `scripts/runpod_sdk_cycle_stop.sh` stops pod via SDK (`pod-stop`)
   - `scripts/runpod_sdk_cycle_full_smoke.sh` runs:
     - sdk-start -> dataset push -> train -> collect -> local-validate -> sdk-stop
@@ -52,8 +52,11 @@ The SDK component is intentionally modular and independent. Changes here should 
 - API key resolution order:
   1. `--api-key`
   2. env `RUNPOD_API_KEY`
-  3. keyring (`service=runpod`, `username=RUNPOD_API_KEY`)
+  3. keyring fallback (canonical identity mapping in `specs/chess_bot_secrets_contract.md`)
   4. dotenv fallback (`RUNPOD_SDK_DOTENV_PATH`/`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`, then `.env.runpod`, then `.env`)
+- Canonical token/key identity mapping is maintained in `specs/chess_bot_secrets_contract.md`.
+- Container guidance in this workspace:
+  - prefer dotenv provider path (`RUNPOD_SDK_DOTENV_PATH` or `RUNPOD_DOTENV_PATH`) over keyring.
 - Component sets SDK auth state via:
   - env `RUNPOD_API_KEY`
   - common SDK fields when present (`runpod.api_key`, `runpod.config.api_key`)
@@ -72,6 +75,25 @@ The SDK component is intentionally modular and independent. Changes here should 
 ## Known Runtime Constraint
 - This component requires the Python `runpod` package in the active environment.
 - If missing, it exits with an actionable install message and does not mutate raw API workflows.
+
+## Known Bug (Availability Reporting)
+- Observed on 2026-03-01:
+  - `scripts/runpod_sdk_component.py gpu-search` returned large GPU catalogs for both `COMMUNITY` and `SECURE`, but every row reported `max_gpu_count=0` and `price_per_hr=0.0`.
+  - At the same time, the direct non-SDK path (`scripts/runpod_provision.py gpu-search`) reported normal non-zero capacity and pricing (for example `NVIDIA RTX A5000` with `max_gpu_count=10`, spot price populated).
+- Investigation details (2026-03-01):
+  - API key resolution in this environment was successful for SDK component (`_resolve_api_key` returned a non-empty key).
+  - Separate container keyring probe showed `keyring` module unavailable (`ModuleNotFoundError`) in both `.venv` and system `python3`.
+  - SDK probe resolved RunPod auth from dotenv source in-container (`resolved_api_key_source=dotenv`) and still reproduced the all-zero `gpu-search` output.
+  - Invalid explicit API key (`--api-key INVALID_TEST_KEY`) caused SDK `gpu-search` to fail unauthorized, confirming SDK path is not silently running unauthenticated.
+  - Installed SDK surface on host exposed `runpod.get_gpus`/`runpod.get_gpu` (no `get_gpu_types` method).
+  - `runpod.get_gpus()` returned rows with only `id`, `displayName`, `memoryInGb`.
+  - `runpod.get_gpu(<id>)` returned richer fields (`communityPrice`, `securePrice`, `communitySpotPrice`, `secureSpotPrice`, `maxGpuCount`, `lowestPrice`).
+  - Current component `gpu-search` uses `_sdk_gpu_types -> get_gpus()` and `_rank_gpu_rows`, which defaults missing price/count fields to `0.0`/`0`.
+- Conclusion:
+  - This bug is primarily a SDK method/data-shape mismatch in availability enrichment, not a container keyring availability problem.
+- Current operational stance:
+  - Treat SDK `gpu-search` availability fields as bugged/unreliable for real-time capacity decisions until fixed.
+  - Use direct non-SDK discovery/provision (`scripts/runpod_provision.py`, `scripts/runpod_cycle_start.sh`, `scripts/runpod_cycle_full_smoke.sh`) as source of truth for availability and launch attempts.
 
 ## Tests
 - `tests/test_runpod_sdk_component.py`

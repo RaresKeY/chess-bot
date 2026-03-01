@@ -29,10 +29,12 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - Shared secret resolution (`src/chessbot/secrets.py`):
   - default order is caller-defined but canonical project usage is `explicit -> env -> keyring -> dotenv`.
   - env precedence inside a tuple follows declared order (for example `HF_READ_TOKEN` before `HF_TOKEN`).
+  - canonical token/key-provider mapping and container guidance live in `specs/chess_bot_secrets_contract.md`.
+  - current `/work` container preference is dotenv provider paths over keyring (keyring module unavailable in this runtime).
 - RunPod API key (`scripts/runpod_provision.py`):
-  - `--api-key` -> `RUNPOD_API_KEY` -> keyring (`runpod`/`RUNPOD_API_KEY`) -> dotenv (`.env.runpod`, `.env`).
+  - `--api-key` -> `RUNPOD_API_KEY` -> keyring fallback -> dotenv (`.env.runpod`, `.env`).
 - HF read token (`scripts/hf_dataset_fetch.py`):
-  - `--token` -> `HF_READ_TOKEN` -> `HF_TOKEN` -> keyring -> dotenv.
+  - `--token` -> `HF_READ_TOKEN` -> `HF_TOKEN` -> keyring fallback -> dotenv.
 - Benchmark runtime splice cap (`scripts/runpod_cycle_benchmark_matrix.sh`):
   - explicit numeric `RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME` overrides all.
   - `auto` resolves from fetched runtime cache manifests.
