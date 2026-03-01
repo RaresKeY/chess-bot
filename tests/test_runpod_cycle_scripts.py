@@ -134,6 +134,7 @@ OUT
             "scripts/runpod_active_pods_full_status.sh",
             "scripts/runpod_cycle_full_smoke.sh",
             "scripts/runpod_full_train_easy.sh",
+            "scripts/runpod_sdk_component.py",
         ]
         for name in names:
             self.assertTrue(Path(name).is_file(), name)

@@ -7,6 +7,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - `scripts/runpod_cycle_benchmark_matrix.sh`
 - `scripts/runpod_cycle_start.sh`
 - `scripts/runpod_provision.py`
+- `scripts/runpod_sdk_component.py`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/runpod_active_pods_full_status.sh`
@@ -64,6 +65,25 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_REQUIRE_SSH_READY` | `1` | `0`, `1` | Wait for direct SSH readiness before start success | same |
 | `RUNPOD_SSH_READY_TIMEOUT_SECONDS` | `360` | integer `>=1` | SSH readiness deadline before start failure | same |
 | `RUNPOD_TERMINATE_ON_SSH_NOT_READY` | `1` | `0`, `1` | Auto-terminate if readiness times out | same |
+
+## RunPod SDK Component (`scripts/runpod_sdk_component.py`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `--api-key` | unset | string | Highest-precedence RunPod API key input | `python scripts/runpod_sdk_component.py <subcommand> ...` |
+| `RUNPOD_API_KEY` | unset | string | Env fallback for API key when CLI flag omitted | same |
+| `--keyring-service` | `runpod` | string | Keyring service for API key lookup | same |
+| `--keyring-username` | `RUNPOD_API_KEY` | string | Keyring username for API key lookup | same |
+| `RUNPOD_SDK_DOTENV_PATH` | unset | dotenv filepath | SDK-component-specific dotenv override for API key fallback | same |
+| `--cloud-type` (`gpu-search`, `provision`) | `COMMUNITY` | `SECURE`, `COMMUNITY` | Cloud tier used for GPU ranking/filtering | same |
+| `--min-memory-gb` (`gpu-search`, `provision`) | `24` | integer `>=0` | Minimum VRAM filter for SDK GPU ranking | same |
+| `--max-hourly-price` (`gpu-search`, `provision`) | `0.0` | float `>=0` (`0` disables cap) | Optional max price filter for SDK GPU ranking | same |
+| `--template-id` / `--template-name` (`provision`) | `""` / `chess-bot-training` | template id/name | Template selection for pod create via SDK path | same |
+| `--gpu-type-id` (`provision`) | unset | GPU type id/name | Explicit GPU type override; skips auto-pick from ranked SDK GPU list | same |
+| `--interruptible` (`provision`) | `False` | boolean flag | Requests spot/interruptible pod in SDK provision payload | same |
+| `--wait-ready` (`provision`) | `True` | boolean flag | Poll pod status after create until running/ready or timeout | same |
+| `--wait-timeout-seconds` (`provision`) | `900` | integer `>=1` | Wait deadline for `--wait-ready` polling | same |
+| `--wait-poll-seconds` (`provision`) | `10` | integer `>=1` | Poll interval for `--wait-ready` | same |
+| `--pod-id` (`pod-status`, `pod-stop`, `pod-terminate`) | required | string | Target pod id for status/stop/terminate operations | same |
 
 ## Full-Train Wrappers (`scripts/runpod_full_train_easy.sh`, `scripts/runpod_cycle_full_train_hf.sh`)
 | Control | Default | Accepted | Effect | Related Command |

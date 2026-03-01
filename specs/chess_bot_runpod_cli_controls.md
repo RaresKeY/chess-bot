@@ -6,6 +6,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 ## Code Ownership
 - `scripts/build_runpod_image.sh`
 - `scripts/runpod_provision.py`
+- `scripts/runpod_sdk_component.py`
 - `scripts/runpod_cli_doctor.sh`
 - `scripts/runpod_quick_launch.sh`
 - `scripts/runpod_regression_checks.sh`
@@ -41,6 +42,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/telemetry_watchdog.sh`
 - `scripts/hf_dataset_publish.py`
 - `scripts/hf_dataset_fetch.py`
+- `src/chessbot/runpod_sdk_component.py`
 - Runtime pod interfaces used by operators:
   - `ssh`
   - `scp` / `rsync`
@@ -77,6 +79,18 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `provision`: GraphQL GPU selection + REST pod creation
 - Template list can succeed while GPU search fails if the API key lacks GraphQL access/scopes (REST and GraphQL permissions may differ)
 - `provision` now supports explicit spot capacity control via `--interruptible/--no-interruptible` (default `--no-interruptible`)
+
+## RunPod SDK Component (`runpod_sdk_component.py`) - Separate Modular Path
+- This is a distinct component from the raw REST/GraphQL path.
+- It is maintained side-by-side and does not replace `runpod_provision.py` or `runpod_cycle_*.sh`.
+- Current subcommands:
+  - `gpu-search`
+  - `template-list`
+  - `provision`
+  - `pod-status`
+  - `pod-stop`
+  - `pod-terminate`
+- Output includes `"component": "runpod_sdk"` so operators can distinguish SDK-driven actions from raw API script outputs.
 
 ## GraphQL GPU Search Failure Behavior (current)
 - `gpu-search` now converts raw GraphQL `HTTP 403` traces into an actionable error message

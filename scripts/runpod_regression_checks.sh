@@ -30,6 +30,7 @@ cd "${REPO_ROOT}"
 run_step "unit-tests (runpod helpers/scripts)" \
   "${PY_BIN}" -m unittest -v \
     tests.test_runpod_api_helpers \
+    tests.test_runpod_sdk_component \
     tests.test_runpod_local_smoke_script
 
 run_step "cli-doctor (REST + GraphQL auth diagnostics)" \
