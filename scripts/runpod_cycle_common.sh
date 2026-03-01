@@ -193,7 +193,15 @@ runpod_cycle_pod_name() {
 
 runpod_cycle_remote_repo_dir() {
   local pod_json="$1"
-  runpod_cycle_pod_field "${pod_json}" '(.pod_status.env.REPO_DIR // .create_response.env.REPO_DIR // "/workspace/chess-bot")'
+  runpod_cycle_pod_field "${pod_json}" '(
+    (
+      (.pod_status.env | if type == "object" then .REPO_DIR else null end)
+      // (.create_response.env | if type == "object" then .REPO_DIR else null end)
+      // ([((.pod_status.env // [])[]? | strings | select(startswith("REPO_DIR=")) | sub("^REPO_DIR="; ""))][0])
+      // ([((.create_response.env // [])[]? | strings | select(startswith("REPO_DIR=")) | sub("^REPO_DIR="; ""))][0])
+      // "/workspace/chess-bot"
+    ) | tostring
+  )'
 }
 
 runpod_cycle_ssh_user() {

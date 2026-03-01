@@ -275,6 +275,38 @@ OUT
             )
             self.assertEqual(proc.stdout, "203.0.113.10:40321")
 
+    def test_common_remote_repo_dir_supports_env_array_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            pod_json = Path(td) / "provision.json"
+            pod_json.write_text(
+                json.dumps(
+                    {
+                        "pod_status": {
+                            "env": [
+                                "AUTHORIZED_KEYS=ssh-ed25519 AAAA...",
+                                "REPO_DIR=/workspace/chess-bot-sdk-run",
+                                "START_SSHD=1",
+                            ]
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-lc",
+                    f"source scripts/runpod_cycle_common.sh && "
+                    f"dir=\"$(runpod_cycle_remote_repo_dir '{pod_json}')\" && "
+                    f"printf '%s' \"$dir\"",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.stdout, "/workspace/chess-bot-sdk-run")
+
     def test_cycle_ssh_scripts_use_batch_mode_and_connect_timeout(self):
         for name in [
             "scripts/runpod_cycle_status.sh",
