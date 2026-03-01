@@ -679,7 +679,9 @@ OUT
         text = Path("scripts/runpod_cycle_train.sh").read_text(encoding="utf-8")
         self.assertIn("TRAIN_PRESET_REPO", text)
         self.assertIn("TRAIN_PRESET_IMAGE", text)
-        self.assertIn('if [[ -f "${TRAIN_PRESET_REPO}" ]]; then', text)
+        self.assertIn("TRAIN_PRESET_SCRIPT='\\${TRAIN_PRESET_IMAGE}'", text)
+        self.assertIn('if [[ -f "\\${TRAIN_PRESET_REPO}" ]]; then', text)
+        self.assertIn('bash "\\${TRAIN_PRESET_SCRIPT}"', text)
 
     def test_watch_progress_syncs_remote_checkpoints_and_writes_epoch_eta_report(self):
         text = Path("scripts/runpod_cycle_watch_progress.sh").read_text(encoding="utf-8")
