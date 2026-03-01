@@ -165,6 +165,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - managed temp key only: scripts always use `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` and do not support personal/local key override variables
   - managed key preparation accepts an already-present `${RUNPOD_TEMP_SSH_KEY_BASE}` + `.pub` pair without requiring `ssh-keygen` on host (generation is only attempted when pair is missing)
   - SSH endpoint parsing now falls back to `pod_status.runtime.ports` (`privatePort=22`, `isIpPublic=true`) when legacy `publicIp`/`portMappings` are missing in provision records.
+  - remote repo-dir parsing now supports both env-object shape (`env.REPO_DIR`) and SDK-style env-array shape (`["...","REPO_DIR=<path>",...]`) in `provision.json`.
   - hard guard rejects managed-key paths under `${HOME}/.ssh/` (fails fast with explicit error) to prevent accidental personal-key use in RunPod flows
   - shared SSH args disable host agent/keyring import prompts for managed keys (`AddKeysToAgent=no`, `IdentityAgent=none`)
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
