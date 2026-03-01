@@ -16,8 +16,10 @@ Generate top-k candidate move tokens from a model artifact and return the best l
 - `--context` space-separated UCI moves
 - `--winner-side` conditioning token (`W`, `B`, `D`, `?`)
 - `--policy-mode {auto,next,rollout}` (`auto` preserves old-model compatibility and prefers rollout for multistep-trained artifacts)
+- `--sequence-decode-policy {sequence_path,step1_legal}` controls dual-sequence first-move selection policy
 - `--rollout-plies` optional continuation rollout length (`>0` switches CLI to rollout mode)
 - `--rollout-fallback-legal/--no-rollout-fallback-legal` optional legal fallback during rollout generation
+- `--fallback-topk-multipliers` comma-separated progressive top-k retry multipliers before hard fallback behavior
 - `--device` torch device for inference (default `cpu`; `cuda:N` supported)
 
 ## Output (current)
@@ -43,6 +45,9 @@ When dual-sequence inference is used (single dual artifact or dual pair routing)
 - `selected_model_side` when dual pair routing is used (`white` or `black`)
 - `horizon`
 - `model_side` artifact-side metadata when present
+- `sequence_decode_policy_used` active dual-sequence decode policy
+- `decode_topk_attempts` progressive top-k attempts actually used for legality search
+- `decode_topk_used` top-k attempt where legal decode succeeded (or last attempted)
 
 ## Compatibility / Dispatch Behavior (current)
 - Inference helpers now detect artifact metadata when present:
@@ -53,6 +58,10 @@ When dual-sequence inference is used (single dual artifact or dual pair routing)
 - `--policy-mode auto` prioritizes new multistep artifacts by using rollout-first-move inference when metadata indicates a multistep objective, while keeping older artifacts on next-move logic
 - `model_family=dual_side_sequence_lstm` now dispatches to one-shot sequence inference and returns `policy_mode_used=sequence`
 - when both `--white-model` and `--black-model` are provided, inference routes to artifact by side-to-move derived from context length parity (white on even plies, black on odd plies)
+- dual-sequence first-move selection supports:
+  - `sequence_path` (default): score legal first-move candidates using horizon-aware continuation path score (log-prob sum over chosen legal sequence tokens)
+  - `step1_legal`: legacy behavior selecting first legal candidate from step-1 top-k
+- next-move and rollout decode now support progressive top-k retries (`--fallback-topk-multipliers`) before reporting no legal model move
 
 ## Constraints
 - Context must be legal from starting position; illegal context raises an error.

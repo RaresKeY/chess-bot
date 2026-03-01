@@ -21,3 +21,8 @@
 
 5. After toolchain + regressions pass, rerun SDK full smoke end-to-end.
    - bash scripts/runpod_sdk_cycle_full_smoke.sh
+
+6. In the `/work` codexbox container, configure GitHub auth and push the pending commit.
+   - Current unpushed commit on `main`: f0eecf1 (`feat: add dual-sequence training and runpod ssh guardrails`)
+   - Authenticate git in the container for `https://github.com/RaresKeY/chess-bot.git` (for example: `gh auth login` or PAT-backed credential helper)
+   - Push: `git push origin main`

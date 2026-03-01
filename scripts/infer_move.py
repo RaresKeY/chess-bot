@@ -20,6 +20,21 @@ from src.chessbot.inference import (
 )
 
 
+def _parse_topk_multipliers(text: str):
+    values = []
+    for part in str(text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            v = int(part)
+        except Exception:
+            continue
+        if v > 0 and v not in values:
+            values.append(v)
+    return values or [1, 2, 5]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Infer best legal move from a context")
     parser.add_argument("--model", default="", help="Single-model artifact path (legacy next-move or single dual-sequence artifact)")
@@ -28,6 +43,17 @@ def main() -> None:
     parser.add_argument("--context", required=True, help="Space-separated UCI moves")
     parser.add_argument("--winner-side", default="W", choices=["W", "B", "D", "?"])
     parser.add_argument("--topk", type=int, default=10)
+    parser.add_argument(
+        "--sequence-decode-policy",
+        choices=["sequence_path", "step1_legal"],
+        default="sequence_path",
+        help="Dual-sequence decode policy for selecting first move",
+    )
+    parser.add_argument(
+        "--fallback-topk-multipliers",
+        default="1,2,5",
+        help="Comma-separated multipliers for progressive top-k retries before hard fallback",
+    )
     parser.add_argument(
         "--policy-mode",
         choices=["auto", "next", "rollout"],
@@ -54,6 +80,7 @@ def main() -> None:
         }
     )
     context = parse_context(args.context)
+    topk_multipliers = _parse_topk_multipliers(args.fallback_topk_multipliers)
 
     use_dual_pair = bool(str(args.white_model).strip() and str(args.black_model).strip())
     use_single_model = bool(str(args.model).strip())
@@ -69,6 +96,8 @@ def main() -> None:
             context=context,
             topk=args.topk,
             device_str=args.device,
+            sequence_decode_policy=args.sequence_decode_policy,
+            fallback_topk_multipliers=topk_multipliers,
         )
     else:
         artifact = torch.load(args.model, map_location="cpu")
@@ -82,6 +111,8 @@ def main() -> None:
                 policy_mode=args.policy_mode,
                 rollout_plies=int(args.rollout_plies),
                 rollout_fallback_legal=bool(args.rollout_fallback_legal),
+                sequence_decode_policy=args.sequence_decode_policy,
+                fallback_topk_multipliers=topk_multipliers,
             )
         elif int(args.rollout_plies) > 0:
             out = infer_rollout_from_artifact_on_device(
@@ -92,6 +123,7 @@ def main() -> None:
                 rollout_plies=int(args.rollout_plies),
                 device_str=args.device,
                 fallback_legal=bool(args.rollout_fallback_legal),
+                fallback_topk_multipliers=topk_multipliers,
             )
         else:
             out = infer_from_artifact_on_device(
@@ -100,6 +132,7 @@ def main() -> None:
                 winner_side=args.winner_side,
                 topk=args.topk,
                 device_str=args.device,
+                fallback_topk_multipliers=topk_multipliers,
             )
     print(out)
 

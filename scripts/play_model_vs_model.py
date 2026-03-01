@@ -48,6 +48,21 @@ def _resolve_device(device_arg: str) -> str:
     return device_arg
 
 
+def _parse_topk_multipliers(text: str) -> List[int]:
+    out: List[int] = []
+    for part in str(text or "").split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        try:
+            v = int(piece)
+        except Exception:
+            continue
+        if v > 0 and v not in out:
+            out.append(v)
+    return out or [1, 2, 5]
+
+
 class LoadedMoveModelRuntime:
     def __init__(
         self,
@@ -57,6 +72,8 @@ class LoadedMoveModelRuntime:
         model_path: Optional[Path],
         model_white_path: Optional[Path],
         model_black_path: Optional[Path],
+        sequence_decode_policy: str,
+        fallback_topk_multipliers: List[int],
     ):
         self.alias = alias
         self.device = torch.device(device_str)
@@ -66,6 +83,8 @@ class LoadedMoveModelRuntime:
         self.model_path = model_path
         self.model_white_path = model_white_path
         self.model_black_path = model_black_path
+        self.sequence_decode_policy = str(sequence_decode_policy)
+        self.fallback_topk_multipliers = [int(x) for x in fallback_topk_multipliers]
 
         if model_white_path is not None and model_black_path is not None:
             self.mode = "dual_pair"
@@ -99,6 +118,8 @@ class LoadedMoveModelRuntime:
                 context=context,
                 topk=topk,
                 device_str=str(self.device),
+                sequence_decode_policy=self.sequence_decode_policy,
+                fallback_topk_multipliers=self.fallback_topk_multipliers,
             )
             topk_tokens = list(out.get("topk_step1") or [])
             return {
@@ -119,6 +140,8 @@ class LoadedMoveModelRuntime:
             policy_mode="auto",
             rollout_plies=0,
             rollout_fallback_legal=True,
+            sequence_decode_policy=self.sequence_decode_policy,
+            fallback_topk_multipliers=self.fallback_topk_multipliers,
         )
         topk_tokens = list(out.get("topk") or out.get("topk_step1") or [])
         if not topk_tokens:
@@ -215,6 +238,28 @@ def main() -> None:
     parser.add_argument("--topk-b", type=int, default=10, help="Model B top-k candidates")
     parser.add_argument("--winner-side-a", default="W", choices=["W", "B", "D", "?"], help="Conditioning token for model A")
     parser.add_argument("--winner-side-b", default="W", choices=["W", "B", "D", "?"], help="Conditioning token for model B")
+    parser.add_argument(
+        "--sequence-decode-policy-a",
+        choices=["sequence_path", "step1_legal"],
+        default="sequence_path",
+        help="Dual-sequence first-move decode policy for model A",
+    )
+    parser.add_argument(
+        "--sequence-decode-policy-b",
+        choices=["sequence_path", "step1_legal"],
+        default="sequence_path",
+        help="Dual-sequence first-move decode policy for model B",
+    )
+    parser.add_argument(
+        "--fallback-topk-multipliers-a",
+        default="1,2,5",
+        help="Comma-separated top-k multipliers for model A progressive decode retries",
+    )
+    parser.add_argument(
+        "--fallback-topk-multipliers-b",
+        default="1,2,5",
+        help="Comma-separated top-k multipliers for model B progressive decode retries",
+    )
     parser.add_argument("--device-a", default="auto", help="Torch device for model A (cpu/cuda/auto)")
     parser.add_argument("--device-b", default="auto", help="Torch device for model B (cpu/cuda/auto)")
     parser.add_argument("--max-plies", type=int, default=300, help="Hard cap on plies per game")
@@ -234,6 +279,8 @@ def main() -> None:
 
     device_a = _resolve_device(args.device_a)
     device_b = _resolve_device(args.device_b)
+    fallback_topk_multipliers_a = _parse_topk_multipliers(args.fallback_topk_multipliers_a)
+    fallback_topk_multipliers_b = _parse_topk_multipliers(args.fallback_topk_multipliers_b)
 
     if args.verbose:
         print(
@@ -252,6 +299,10 @@ def main() -> None:
                     "topk_b": args.topk_b,
                     "winner_side_a": args.winner_side_a,
                     "winner_side_b": args.winner_side_b,
+                    "sequence_decode_policy_a": args.sequence_decode_policy_a,
+                    "sequence_decode_policy_b": args.sequence_decode_policy_b,
+                    "fallback_topk_multipliers_a": fallback_topk_multipliers_a,
+                    "fallback_topk_multipliers_b": fallback_topk_multipliers_b,
                     "device_a": device_a,
                     "device_b": device_b,
                     "max_plies": args.max_plies,
@@ -266,6 +317,8 @@ def main() -> None:
         model_path=model_a_path,
         model_white_path=model_a_white_path,
         model_black_path=model_a_black_path,
+        sequence_decode_policy=args.sequence_decode_policy_a,
+        fallback_topk_multipliers=fallback_topk_multipliers_a,
     )
     runtime_b = LoadedMoveModelRuntime(
         alias=args.alias_b,
@@ -273,6 +326,8 @@ def main() -> None:
         model_path=model_b_path,
         model_white_path=model_b_white_path,
         model_black_path=model_b_black_path,
+        sequence_decode_policy=args.sequence_decode_policy_b,
+        fallback_topk_multipliers=fallback_topk_multipliers_b,
     )
     if args.verbose:
         print(
@@ -404,6 +459,10 @@ def main() -> None:
             "topk_b": args.topk_b,
             "winner_side_a": args.winner_side_a,
             "winner_side_b": args.winner_side_b,
+            "sequence_decode_policy_a": args.sequence_decode_policy_a,
+            "sequence_decode_policy_b": args.sequence_decode_policy_b,
+            "fallback_topk_multipliers_a": fallback_topk_multipliers_a,
+            "fallback_topk_multipliers_b": fallback_topk_multipliers_b,
             "device_a": device_a,
             "device_b": device_b,
             "max_plies": args.max_plies,

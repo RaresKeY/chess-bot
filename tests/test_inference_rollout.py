@@ -114,6 +114,21 @@ class InferenceRolloutTests(unittest.TestCase):
         # tiny artifact has vocab size 4; topk must be clamped
         self.assertLessEqual(len(out["topk"]), 4)
 
+    def test_next_inference_progressive_topk_retry_finds_legal_move(self):
+        artifact = self._build_tiny_artifact()
+        # On black-to-move, top-1 token e2e4 is illegal; top-2 includes legal e7e5.
+        out = infer_from_artifact_on_device(
+            artifact=artifact,
+            context=["e2e4"],
+            winner_side="W",
+            topk=1,
+            device_str="cpu",
+            fallback_topk_multipliers=[1, 2],
+        )
+        self.assertEqual(out["best_legal"], "e7e5")
+        self.assertEqual(out["decode_topk_used"], 2)
+        self.assertEqual(out["decode_topk_attempts"], [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()

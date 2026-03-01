@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 
 import chess
 import torch
@@ -15,6 +15,38 @@ from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_i
 
 def parse_context(text: str) -> List[str]:
     return [x.strip() for x in text.split() if x.strip()]
+
+
+def _coerce_topk_multipliers(values: Optional[Sequence[int]]) -> List[int]:
+    if values is None:
+        return [1, 2, 5]
+    out: List[int] = []
+    for raw in values:
+        try:
+            v = int(raw)
+        except Exception:
+            continue
+        if v <= 0:
+            continue
+        if v not in out:
+            out.append(v)
+    if not out:
+        return [1, 2, 5]
+    return out
+
+
+def resolve_topk_attempts(base_topk: int, vocab_size: int, topk_multipliers: Optional[Sequence[int]] = None) -> List[int]:
+    base = max(1, int(base_topk))
+    vmax = max(1, int(vocab_size))
+    multipliers = _coerce_topk_multipliers(topk_multipliers)
+    out: List[int] = []
+    for m in multipliers:
+        k = min(vmax, max(1, base * int(m)))
+        if k not in out:
+            out.append(k)
+    if not out:
+        out = [min(vmax, base)]
+    return out
 
 
 def artifact_model_family(artifact: Dict) -> str:
@@ -64,7 +96,46 @@ def best_legal_from_topk(topk_tokens: List[str], context: List[str]) -> str:
     return ""
 
 
-def infer_from_artifact(artifact: Dict, context: List[str], winner_side: str, topk: int) -> Dict:
+def _decode_best_legal_from_next_logits(
+    *,
+    logits_1d: torch.Tensor,
+    inv_vocab: Dict[int, str],
+    context: List[str],
+    topk: int,
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
+) -> Dict:
+    vocab_size = int(logits_1d.shape[-1])
+    attempts = resolve_topk_attempts(topk, vocab_size, fallback_topk_multipliers)
+    topk_tokens_last: List[str] = []
+    used_k = attempts[-1] if attempts else max(1, min(int(topk), vocab_size))
+    for k in attempts:
+        pred_ids = logits_1d.topk(int(k), dim=-1).indices.detach().cpu().tolist()
+        topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]
+        legal = best_legal_from_topk(topk_tokens, context)
+        topk_tokens_last = topk_tokens
+        used_k = int(k)
+        if legal:
+            return {
+                "best_legal": legal,
+                "topk": topk_tokens,
+                "decode_topk_attempts": attempts,
+                "decode_topk_used": int(k),
+            }
+    return {
+        "best_legal": "",
+        "topk": topk_tokens_last,
+        "decode_topk_attempts": attempts,
+        "decode_topk_used": int(used_k),
+    }
+
+
+def infer_from_artifact(
+    artifact: Dict,
+    context: List[str],
+    winner_side: str,
+    topk: int,
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
+) -> Dict:
     vocab = artifact["vocab"]
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
     cfg = artifact["config"]
@@ -86,19 +157,28 @@ def infer_from_artifact(artifact: Dict, context: List[str], winner_side: str, to
 
     with torch.no_grad():
         logits = model(tokens, lengths, winners, phases, side_to_moves)
-        k = max(1, min(int(topk), int(logits.shape[-1])))
-        pred_ids = logits.topk(k, dim=1).indices[0].tolist()
-
-    topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]
-    legal = best_legal_from_topk(topk_tokens, context)
+        decoded = _decode_best_legal_from_next_logits(
+            logits_1d=logits[0],
+            inv_vocab=inv_vocab,
+            context=context,
+            topk=topk,
+            fallback_topk_multipliers=fallback_topk_multipliers,
+        )
     return {
-        "topk": topk_tokens,
-        "best_legal": legal,
+        "topk": list(decoded.get("topk") or []),
+        "best_legal": str(decoded.get("best_legal") or ""),
+        "decode_topk_attempts": list(decoded.get("decode_topk_attempts") or []),
+        "decode_topk_used": int(decoded.get("decode_topk_used") or 0),
     }
 
 
 def infer_from_artifact_on_device(
-    artifact: Dict, context: List[str], winner_side: str, topk: int, device_str: str = "cpu"
+    artifact: Dict,
+    context: List[str],
+    winner_side: str,
+    topk: int,
+    device_str: str = "cpu",
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
 ) -> Dict:
     vocab = artifact["vocab"]
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
@@ -124,14 +204,18 @@ def infer_from_artifact_on_device(
 
     with torch.no_grad():
         logits = model(tokens, lengths, winners, phases, side_to_moves)
-        k = max(1, min(int(topk), int(logits.shape[-1])))
-        pred_ids = logits.topk(k, dim=1).indices[0].detach().cpu().tolist()
-
-    topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]
-    legal = best_legal_from_topk(topk_tokens, context)
+        decoded = _decode_best_legal_from_next_logits(
+            logits_1d=logits[0],
+            inv_vocab=inv_vocab,
+            context=context,
+            topk=topk,
+            fallback_topk_multipliers=fallback_topk_multipliers,
+        )
     return {
-        "topk": topk_tokens,
-        "best_legal": legal,
+        "topk": list(decoded.get("topk") or []),
+        "best_legal": str(decoded.get("best_legal") or ""),
+        "decode_topk_attempts": list(decoded.get("decode_topk_attempts") or []),
+        "decode_topk_used": int(decoded.get("decode_topk_used") or 0),
         "device": str(device),
     }
 
@@ -147,11 +231,155 @@ def _best_legal_from_topk_for_board(topk_tokens: List[str], board: chess.Board) 
     return ""
 
 
+def _legal_candidates_for_board(topk_tokens: List[str], board: chess.Board) -> List[str]:
+    out: List[str] = []
+    for tok in topk_tokens:
+        try:
+            mv = chess.Move.from_uci(tok)
+        except Exception:
+            continue
+        if mv in board.legal_moves:
+            out.append(tok)
+    return out
+
+
+def _rollout_sequence_from_first_token(
+    *,
+    first_token: str,
+    board_start: chess.Board,
+    topk_tokens_all: List[List[str]],
+) -> List[str]:
+    board = board_start.copy(stack=False)
+    try:
+        first_mv = chess.Move.from_uci(first_token)
+    except Exception:
+        return []
+    if first_mv not in board.legal_moves:
+        return []
+    board.push(first_mv)
+    out = [first_token]
+    for step in range(1, len(topk_tokens_all)):
+        chosen = _best_legal_from_topk_for_board(topk_tokens_all[step], board)
+        if not chosen:
+            break
+        mv = chess.Move.from_uci(chosen)
+        if mv not in board.legal_moves:
+            break
+        board.push(mv)
+        out.append(chosen)
+        if board.is_game_over(claim_draw=True):
+            break
+    return out
+
+
+def _decode_sequence_first_move(
+    *,
+    logits: torch.Tensor,
+    vocab: Dict[str, int],
+    inv_vocab: Dict[int, str],
+    context: List[str],
+    topk: int,
+    sequence_decode_policy: str,
+    fallback_topk_multipliers: Optional[Sequence[int]],
+) -> Dict:
+    policy = str(sequence_decode_policy or "sequence_path").strip().lower()
+    if policy not in {"sequence_path", "step1_legal"}:
+        raise ValueError(f"Unsupported sequence_decode_policy: {sequence_decode_policy}")
+
+    board_start = chess.Board()
+    for uci in context:
+        mv = chess.Move.from_uci(uci)
+        if mv not in board_start.legal_moves:
+            raise ValueError(f"Illegal context move: {uci}")
+        board_start.push(mv)
+
+    vocab_size = int(logits.shape[-1])
+    attempts = resolve_topk_attempts(topk, vocab_size, fallback_topk_multipliers)
+    log_probs = torch.log_softmax(logits[0], dim=-1)
+
+    topk_step1_last: List[str] = []
+    topk_ids_all_last: List[List[int]] = []
+    used_k = attempts[-1] if attempts else max(1, min(int(topk), vocab_size))
+    for k in attempts:
+        topk_ids_all = logits.topk(int(k), dim=-1).indices[0].detach().cpu().tolist()
+        topk_tokens_all = [[inv_vocab.get(i, "") for i in step_ids] for step_ids in topk_ids_all]
+        topk_step1 = list(topk_tokens_all[0] if topk_tokens_all else [])
+        legal_first = _legal_candidates_for_board(topk_step1, board_start)
+        topk_step1_last = topk_step1
+        topk_ids_all_last = topk_ids_all
+        used_k = int(k)
+        if not legal_first:
+            continue
+
+        if policy == "step1_legal":
+            chosen_first = legal_first[0]
+            chosen_sequence = _rollout_sequence_from_first_token(
+                first_token=chosen_first,
+                board_start=board_start,
+                topk_tokens_all=topk_tokens_all,
+            )
+            return {
+                "best_legal": chosen_first,
+                "legal_sequence": chosen_sequence,
+                "topk_step1": topk_step1,
+                "decode_topk_attempts": attempts,
+                "decode_topk_used": int(k),
+                "sequence_decode_policy_used": policy,
+            }
+
+        best_first = ""
+        best_sequence: List[str] = []
+        best_score = float("-inf")
+        for tok in legal_first:
+            sequence = _rollout_sequence_from_first_token(
+                first_token=tok,
+                board_start=board_start,
+                topk_tokens_all=topk_tokens_all,
+            )
+            if not sequence:
+                continue
+            score = 0.0
+            for step_i, move_uci in enumerate(sequence):
+                tok_id = vocab.get(move_uci)
+                if tok_id is None:
+                    score += -50.0
+                    continue
+                score += float(log_probs[step_i, int(tok_id)].item())
+            if (score > best_score) or (
+                score == best_score and len(sequence) > len(best_sequence)
+            ):
+                best_score = score
+                best_first = tok
+                best_sequence = sequence
+        if best_first:
+            return {
+                "best_legal": best_first,
+                "legal_sequence": best_sequence,
+                "topk_step1": topk_step1,
+                "decode_topk_attempts": attempts,
+                "decode_topk_used": int(k),
+                "sequence_decode_policy_used": policy,
+            }
+
+    topk_tokens_all_last = [[inv_vocab.get(i, "") for i in step_ids] for step_ids in topk_ids_all_last]
+    return {
+        "best_legal": "",
+        "legal_sequence": [],
+        "topk_step1": topk_step1_last,
+        "topk_tokens_all_last": topk_tokens_all_last,
+        "decode_topk_attempts": attempts,
+        "decode_topk_used": int(used_k),
+        "sequence_decode_policy_used": policy,
+    }
+
+
 def infer_sequence_from_artifact_on_device(
     artifact: Dict,
     context: List[str],
     topk: int,
     device_str: str = "cpu",
+    sequence_decode_policy: str = "sequence_path",
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
 ) -> Dict:
     vocab = artifact["vocab"]
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
@@ -177,34 +405,21 @@ def infer_sequence_from_artifact_on_device(
     side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long, device=device)
     with torch.no_grad():
         logits = model(tokens, lengths, side_to_moves)
-        k = max(1, min(int(topk), int(logits.shape[-1])))
-        step1_ids = logits[:, 0, :].topk(k, dim=-1).indices[0].detach().cpu().tolist()
         pred_ids = logits.argmax(dim=-1)[0].detach().cpu().tolist()
-        topk_ids_all = logits.topk(k, dim=-1).indices[0].detach().cpu().tolist()
+        decoded = _decode_sequence_first_move(
+            logits=logits,
+            vocab=vocab,
+            inv_vocab=inv_vocab,
+            context=context,
+            topk=topk,
+            sequence_decode_policy=sequence_decode_policy,
+            fallback_topk_multipliers=fallback_topk_multipliers,
+        )
 
-    topk_step1 = [inv_vocab.get(i, "") for i in step1_ids]
-    best_legal = best_legal_from_topk(topk_step1, context)
+    topk_step1 = list(decoded.get("topk_step1") or [])
+    best_legal = str(decoded.get("best_legal") or "")
     predicted_sequence = [inv_vocab.get(i, "") for i in pred_ids]
-
-    board = chess.Board()
-    for uci in context:
-        mv = chess.Move.from_uci(uci)
-        if mv not in board.legal_moves:
-            raise ValueError(f"Illegal context move: {uci}")
-        board.push(mv)
-    legal_sequence: List[str] = []
-    for topk_ids in topk_ids_all:
-        topk_tokens = [inv_vocab.get(i, "") for i in topk_ids]
-        chosen = _best_legal_from_topk_for_board(topk_tokens, board)
-        if not chosen:
-            break
-        mv = chess.Move.from_uci(chosen)
-        if mv not in board.legal_moves:
-            break
-        board.push(mv)
-        legal_sequence.append(chosen)
-        if board.is_game_over(claim_draw=True):
-            break
+    legal_sequence = list(decoded.get("legal_sequence") or [])
 
     return {
         "topk_step1": topk_step1,
@@ -214,6 +429,9 @@ def infer_sequence_from_artifact_on_device(
         "first_move": best_legal,
         "horizon": int(artifact_sequence_horizon(artifact)),
         "model_side": artifact_model_side(artifact),
+        "sequence_decode_policy_used": str(decoded.get("sequence_decode_policy_used") or sequence_decode_policy),
+        "decode_topk_attempts": list(decoded.get("decode_topk_attempts") or []),
+        "decode_topk_used": int(decoded.get("decode_topk_used") or 0),
         "device": str(device),
     }
 
@@ -224,6 +442,8 @@ def infer_first_move_dual_artifacts_on_device(
     context: List[str],
     topk: int,
     device_str: str = "cpu",
+    sequence_decode_policy: str = "sequence_path",
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
 ) -> Dict:
     stm = side_to_move_id_from_context_len(len(context))
     side_name = "white" if int(stm) == 0 else "black"
@@ -233,11 +453,14 @@ def infer_first_move_dual_artifacts_on_device(
         context=context,
         topk=topk,
         device_str=device_str,
+        sequence_decode_policy=sequence_decode_policy,
+        fallback_topk_multipliers=fallback_topk_multipliers,
     )
     return {
         **out,
         "selected_model_side": side_name,
         "move_uci": out.get("best_legal", ""),
+        "fallback": not bool(out.get("best_legal", "")),
     }
 
 
@@ -249,6 +472,7 @@ def infer_rollout_from_artifact_on_device(
     rollout_plies: int,
     device_str: str = "cpu",
     fallback_legal: bool = False,
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
 ) -> Dict:
     vocab = artifact["vocab"]
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
@@ -286,10 +510,15 @@ def infer_rollout_from_artifact_on_device(
 
         with torch.no_grad():
             logits = model(tokens, lengths, winners, phases, side_to_moves)
-            k = max(1, min(int(topk), int(logits.shape[-1])))
-            pred_ids = logits.topk(k, dim=1).indices[0].detach().cpu().tolist()
-        topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]
-        legal = best_legal_from_topk(topk_tokens, local_context)
+            decoded = _decode_best_legal_from_next_logits(
+                logits_1d=logits[0],
+                inv_vocab=inv_vocab,
+                context=local_context,
+                topk=topk,
+                fallback_topk_multipliers=fallback_topk_multipliers,
+            )
+        topk_tokens = list(decoded.get("topk") or [])
+        legal = str(decoded.get("best_legal") or "")
         chosen = legal
         fallback_used = False
         if not chosen and fallback_legal and not board.is_game_over(claim_draw=True):
@@ -303,6 +532,8 @@ def infer_rollout_from_artifact_on_device(
                 "best_legal": legal,
                 "chosen": chosen,
                 "fallback": fallback_used,
+                "decode_topk_attempts": list(decoded.get("decode_topk_attempts") or []),
+                "decode_topk_used": int(decoded.get("decode_topk_used") or 0),
             }
         )
         if not chosen:
@@ -335,6 +566,8 @@ def infer_first_move_auto_from_artifact_on_device(
     policy_mode: str = "auto",
     rollout_plies: int = 0,
     rollout_fallback_legal: bool = False,
+    sequence_decode_policy: str = "sequence_path",
+    fallback_topk_multipliers: Optional[Sequence[int]] = None,
 ) -> Dict:
     mode = str(policy_mode or "auto").strip().lower()
     if mode not in {"auto", "next", "rollout"}:
@@ -348,15 +581,18 @@ def infer_first_move_auto_from_artifact_on_device(
             context=context,
             topk=topk,
             device_str=device_str,
+            sequence_decode_policy=sequence_decode_policy,
+            fallback_topk_multipliers=fallback_topk_multipliers,
         )
+        move_uci = str(out.get("best_legal") or "")
         return {
             **out,
             "policy_mode_requested": mode,
             "policy_mode_used": "sequence",
             "artifact_training_objective": objective,
             "artifact_model_family": fam,
-            "move_uci": out.get("best_legal", ""),
-            "fallback": False,
+            "move_uci": move_uci,
+            "fallback": not bool(move_uci),
         }
     if fam != "next_move_lstm":
         raise RuntimeError(f"Unsupported artifact model family for current inference path: {fam}")
@@ -383,6 +619,7 @@ def infer_first_move_auto_from_artifact_on_device(
             rollout_plies=rollout_len,
             device_str=device_str,
             fallback_legal=bool(rollout_fallback_legal),
+            fallback_topk_multipliers=fallback_topk_multipliers,
         )
         return {
             **out,
@@ -400,6 +637,7 @@ def infer_first_move_auto_from_artifact_on_device(
         winner_side=winner_side,
         topk=topk,
         device_str=device_str,
+        fallback_topk_multipliers=fallback_topk_multipliers,
     )
     return {
         **out,

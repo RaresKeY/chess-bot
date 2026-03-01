@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 try:
     import torch
@@ -7,6 +8,7 @@ except Exception:  # pragma: no cover - environment-dependent skip path
 
 if torch is not None:
     from src.chessbot.inference import (
+        infer_sequence_from_artifact_on_device,
         infer_first_move_auto_from_artifact_on_device,
         infer_first_move_dual_artifacts_on_device,
     )
@@ -87,6 +89,84 @@ class DualSequenceInferenceTests(unittest.TestCase):
         )
         self.assertEqual(out["policy_mode_used"], "sequence")
         self.assertEqual(out["move_uci"], "e2e4")
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_sequence_path_policy_uses_horizon_scores(self) -> None:
+        vocab = {
+            "<PAD>": 0,
+            "<UNK>": 1,
+            "e2e4": 2,
+            "d2d4": 3,
+            "a7a6": 4,
+            "e2e3": 5,
+            "h2h3": 6,
+        }
+        artifact = {
+            "artifact_format_version": 1,
+            "model_family": "dual_side_sequence_lstm",
+            "training_objective": "one_shot_sequence_match",
+            "model_side": "white",
+            "state_dict": {},
+            "vocab": vocab,
+            "config": {
+                "horizon": 3,
+                "embed_dim": 4,
+                "hidden_dim": 8,
+                "num_layers": 1,
+                "dropout": 0.0,
+                "use_side_to_move": False,
+                "side_to_move_embed_dim": 4,
+            },
+        }
+
+        class _FakeSeqModel:
+            def __init__(self, *args, **kwargs):
+                self._logits = torch.tensor(
+                    [
+                        [
+                            # step 1 prefers e2e4 over d2d4
+                            [0.0, -10.0, 10.0, 9.0, -10.0, -10.0, -10.0],
+                            # step 2 (black move) prefers a7a6
+                            [0.0, -10.0, -10.0, -10.0, 8.0, -10.0, -10.0],
+                            # step 3 strongly prefers e2e3 over h2h3
+                            [0.0, -10.0, -10.0, -10.0, -10.0, 9.0, 1.0],
+                        ]
+                    ],
+                    dtype=torch.float32,
+                )
+
+            def to(self, *_args, **_kwargs):
+                return self
+
+            def load_state_dict(self, *_args, **_kwargs):
+                return None
+
+            def eval(self):
+                return None
+
+            def __call__(self, *_args, **_kwargs):
+                return self._logits
+
+        with mock.patch("src.chessbot.inference.NextMoveSeqLSTM", _FakeSeqModel):
+            out_step1 = infer_sequence_from_artifact_on_device(
+                artifact=artifact,
+                context=[],
+                topk=2,
+                device_str="cpu",
+                sequence_decode_policy="step1_legal",
+            )
+            out_sequence = infer_sequence_from_artifact_on_device(
+                artifact=artifact,
+                context=[],
+                topk=2,
+                device_str="cpu",
+                sequence_decode_policy="sequence_path",
+            )
+
+        self.assertEqual(out_step1["best_legal"], "e2e4")
+        # sequence_path should prefer d2d4 because step3 can then keep high-score e2e3 legal
+        self.assertEqual(out_sequence["best_legal"], "d2d4")
+        self.assertEqual(out_sequence["legal_sequence"][:2], ["d2d4", "a7a6"])
 
 
 if __name__ == "__main__":

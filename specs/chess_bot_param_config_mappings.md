@@ -186,12 +186,15 @@ Dual-sequence interactions/precedence notes:
 | `--model` | empty | artifact path | Single-artifact inference path (legacy next-move or dual-sequence artifact) | `python scripts/infer_move.py ...` |
 | `--white-model` | empty | artifact path | White dual-sequence artifact path for side-routed inference | same |
 | `--black-model` | empty | artifact path | Black dual-sequence artifact path for side-routed inference | same |
+| `--sequence-decode-policy` | `sequence_path` | `sequence_path`, `step1_legal` | Dual-sequence first-move policy. `sequence_path` scores legal step-1 candidates via horizon continuation; `step1_legal` keeps legacy step-1-first legal selection | same |
+| `--fallback-topk-multipliers` | `1,2,5` | comma-separated positive integers | Progressive top-k multipliers applied before hard no-legal fallback in next/rollout/sequence decode paths | same |
 
 Inference dual-routing interactions:
 - Caller must supply either:
   - `--model`, or
   - both `--white-model` and `--black-model`
 - When both side artifacts are provided, side-to-move is inferred from context parity and selects the artifact.
+- Progressive top-k attempts are `topk * multiplier` (clamped to vocab size), evaluated in order with deduplication.
 
 ## Model-vs-Model Arena CLI (`scripts/play_model_vs_model.py`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -209,6 +212,10 @@ Inference dual-routing interactions:
 | `--topk-b` | `10` | integer `>=1` | Candidate width for participant B inference | same |
 | `--winner-side-a` | `W` | `W`, `B`, `D`, `?` | Winner token conditioning for participant A when using single-artifact inference | same |
 | `--winner-side-b` | `W` | `W`, `B`, `D`, `?` | Winner token conditioning for participant B when using single-artifact inference | same |
+| `--sequence-decode-policy-a` | `sequence_path` | `sequence_path`, `step1_legal` | Dual-sequence decode policy for participant A | same |
+| `--sequence-decode-policy-b` | `sequence_path` | `sequence_path`, `step1_legal` | Dual-sequence decode policy for participant B | same |
+| `--fallback-topk-multipliers-a` | `1,2,5` | comma-separated positive integers | Progressive top-k retry multipliers for participant A decode | same |
+| `--fallback-topk-multipliers-b` | `1,2,5` | comma-separated positive integers | Progressive top-k retry multipliers for participant B decode | same |
 | `--device-a` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Torch device for participant A | same |
 | `--device-b` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Torch device for participant B | same |
 | `--max-plies` | `300` | integer `>=1` | Hard ply cap per game | same |
@@ -224,6 +231,8 @@ Model-vs-model interactions/precedence notes:
   - both side artifacts (`--model-*-white` and `--model-*-black`).
 - Side artifacts switch runtime mode to `dual_pair`; single artifact mode remains `single`.
 - `winner-side-*` only conditions single-artifact inference; dual-pair routing ignores winner token and routes by side-to-move.
+- `sequence-decode-policy-*` affects dual-pair participants only.
+- `fallback-topk-multipliers-*` applies to both single-artifact and dual-pair participants before hard board-iterator fallback move selection.
 
 ## Active-Pods Full Status (`scripts/runpod_active_pods_full_status.sh`)
 | Control | Default | Accepted | Effect | Related Command |

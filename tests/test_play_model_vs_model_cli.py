@@ -104,6 +104,8 @@ class PlayModelVsModelCliTests(unittest.TestCase):
         self.assertIn("--model-a-black", proc.stdout)
         self.assertIn("--model-b-white", proc.stdout)
         self.assertIn("--model-b-black", proc.stdout)
+        self.assertIn("--sequence-decode-policy-a", proc.stdout)
+        self.assertIn("--fallback-topk-multipliers-a", proc.stdout)
 
     @unittest.skipIf(torch is None, "torch not installed")
     def test_dual_pair_vs_single_runs_and_writes_summary(self) -> None:
@@ -156,6 +158,52 @@ class PlayModelVsModelCliTests(unittest.TestCase):
             self.assertEqual(payload["settings"]["model_a_mode"], "dual_pair")
             self.assertEqual(payload["settings"]["model_b_mode"], "single")
             self.assertEqual(int(payload["games"]), 1)
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_progressive_topk_retry_avoids_immediate_hard_fallback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            a_single = tmp / "a_single.pt"
+            b_single = tmp / "b_single.pt"
+            summary_out = tmp / "summary.json"
+
+            torch.save(_build_next_move_artifact(), a_single)
+            torch.save(_build_next_move_artifact(), b_single)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/play_model_vs_model.py",
+                    "--model-a",
+                    str(a_single),
+                    "--model-b",
+                    str(b_single),
+                    "--games",
+                    "1",
+                    "--max-plies",
+                    "2",
+                    "--topk-a",
+                    "1",
+                    "--topk-b",
+                    "1",
+                    "--fallback-topk-multipliers-a",
+                    "1,2",
+                    "--fallback-topk-multipliers-b",
+                    "1,2",
+                    "--no-progress",
+                    "--no-verbose",
+                    "--summary-out",
+                    str(summary_out),
+                ],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(summary_out.read_text(encoding="utf-8"))
+            self.assertEqual(payload["fallback_moves_a_total"], 0)
+            self.assertEqual(payload["fallback_moves_b_total"], 0)
 
 
 if __name__ == "__main__":
