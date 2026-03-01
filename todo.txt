@@ -1,0 +1,23 @@
+# TODO (root-level)
+
+1. Rebuild the codexbox container image with SSH tooling preinstalled.
+   - Required binaries: ssh, ssh-keygen, scp, rsync
+   - Recommended package baseline (Debian/Ubuntu): openssh-client rsync ca-certificates
+
+2. Ensure container runtime allows non-interactive SSH workflow for RunPod scripts.
+   - Keep PATH exposing ssh/ssh-keygen/scp/rsync
+   - Verify managed key generation works without interactive prompts
+
+3. Re-run OpenSSH bootstrap verification after rebuild.
+   - bash scripts/container_ensure_openssh.sh
+
+4. Re-run separated RunPod regression lanes (both must pass):
+   - Direct API lane:
+     python -m pytest -q tests/test_runpod_api_helpers.py tests/test_runpod_direct_api_guardrails.py tests/test_runpod_local_smoke_script.py
+   - SDK lane:
+     python -m pytest -q tests/test_runpod_sdk_component.py tests/test_runpod_sdk_guardrails.py
+   - Shared/Container lane:
+     python -m pytest -q tests/test_runpod_cycle_scripts.py tests/test_runpod_container_openssh_flow.py
+
+5. After toolchain + regressions pass, rerun SDK full smoke end-to-end.
+   - bash scripts/runpod_sdk_cycle_full_smoke.sh

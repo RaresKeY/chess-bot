@@ -11,10 +11,14 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - `scripts/runpod_sdk_cycle_start.sh`
 - `scripts/runpod_sdk_cycle_stop.sh`
 - `scripts/runpod_sdk_cycle_full_smoke.sh`
+- `scripts/container_ensure_openssh.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/runpod_active_pods_full_status.sh`
 - `scripts/train_baseline.py`
+- `scripts/train_dual_sequence.py`
+- `scripts/infer_move.py`
+- `scripts/play_model_vs_model.py`
 
 ## Mapping Rules
 - Every runtime control documented here must include: name, default, accepted values, effect, and related command/script.
@@ -44,7 +48,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_GPU_COUNT` | `2` | integer `>=1` | GPU count for pod + default `nproc` | same |
 | `RUNPOD_CLOUD_TYPE` | start-script default (`COMMUNITY`) unless overridden | `SECURE`, `COMMUNITY` | Cloud tier for provisioning | same |
 | `RUNPOD_INTERRUPTIBLE` | `0` | `0`, `1` | Spot/interruptible request via provision helper | same |
-| `RUNPOD_BENCH_TRIALS` | `fp32,tf32,fp16,bf16,sparsity` | comma-separated trial list | Precision/sparsity trial matrix | same |
+| `RUNPOD_BENCH_TRIALS` | `fp32,tf32,fp16,bf16,sparsity,bf16_2to4` | comma-separated trial list (`fp32`, `tf32`, `fp16`, `bf16`, `fp32_sparse`, `fp16_sparse`, `bf16_sparse`, `sparsity`, `fp16_2to4`, `bf16_2to4`) | Precision/sparsity trial matrix; `*_sparse`/`sparsity` use L1 penalty, `*_2to4` uses structured 2:4 sparsity mode | same |
 | `RUNPOD_BENCH_EPOCHS` | `1` | integer `>=1` | Epochs per trial | same |
 | `RUNPOD_BENCH_BATCH_SIZE` | `auto` | `auto` or integer | Base batch strategy; auto resolves by remote VRAM | same |
 | `RUNPOD_BENCH_NUM_WORKERS` | `8` | integer `>=0` | DataLoader workers per rank | same |
@@ -69,6 +73,10 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_SSH_READY_TIMEOUT_SECONDS` | `360` | integer `>=1` | SSH readiness deadline before start failure | same |
 | `RUNPOD_TERMINATE_ON_SSH_NOT_READY` | `1` | `0`, `1` | Auto-terminate if readiness times out | same |
 
+Explicit-GPU provisioning behavior note (current):
+- when `--gpu-type-id` / `RUNPOD_GPU_TYPE_ID` is set, provision now performs a GraphQL stock preflight (`gpuTypes(input:{id})` + `lowestPrice`) and fails fast if the requested `gpu_count` is not listed in `availableGpuCounts` or stock status is out-of-stock/no-capacity.
+- this is an existing-control behavior refinement (no new runtime flag), intended to improve resource-availability determination before REST pod create attempts.
+
 ## RunPod SDK Component (`scripts/runpod_sdk_component.py`)
 | Control | Default | Accepted | Effect | Related Command |
 |---|---|---|---|---|
@@ -81,6 +89,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `--min-memory-gb` (`gpu-search`, `provision`) | `24` | integer `>=0` | Minimum VRAM filter for SDK GPU ranking | same |
 | `--max-hourly-price` (`gpu-search`, `provision`) | `0.0` | float `>=0` (`0` disables cap) | Optional max price filter for SDK GPU ranking | same |
 | `--template-id` / `--template-name` (`provision`) | `""` / `chess-bot-training` | template id/name | Template selection for pod create via SDK path | same |
+| `--image-name` (`provision`) | `""` | docker image reference | Explicit image for SDK create call; required by some SDK variants when no `template_id` is set | same |
 | `--gpu-type-id` (`provision`) | unset | GPU type id/name | Explicit GPU type override; skips auto-pick from ranked SDK GPU list | same |
 | `--interruptible` (`provision`) | `False` | boolean flag | Requests spot/interruptible pod in SDK provision payload | same |
 | `--wait-ready` (`provision`) | `True` | boolean flag | Poll pod status after create until running/ready or timeout | same |
@@ -93,6 +102,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 |---|---|---|---|---|
 | `RUNPOD_CYCLE_RUN_ID` | `runpod-sdk-cycle-<utc-ts>` (full smoke) / shared helper default | string | Run id for per-run artifacts and telemetry paths | `bash scripts/runpod_sdk_cycle_full_smoke.sh` |
 | `RUNPOD_SDK_TEMPLATE_NAME` | fallback to `RUNPOD_TEMPLATE_NAME` then `chess-bot-training` | template name | SDK-specific template name override for `runpod_sdk_cycle_start.sh` without changing raw start defaults | `bash scripts/runpod_sdk_cycle_start.sh` |
+| `RUNPOD_SDK_IMAGE_NAME` | unset | docker image reference | SDK-specific image override forwarded to `--image-name` in SDK start wrapper | same |
 | `RUNPOD_TEMPLATE_NAME` | `chess-bot-training` | template name | Shared fallback template name if SDK-specific override is unset | same |
 | `RUNPOD_GPU_TYPE_ID` | `NVIDIA GeForce RTX 3090` | GPU type id/display name | Explicit GPU selection for SDK provision call | same |
 | `RUNPOD_GPU_COUNT` | `1` | integer `>=1` | Requested GPU count for SDK provision call | same |
@@ -125,11 +135,95 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 |---|---|---|---|---|
 | `--amp` / `--no-amp` | enabled in presets | boolean | Mixed precision enable/disable | `python scripts/train_baseline.py ...` |
 | `--amp-dtype` | `auto` | `auto`, `fp16`, `bf16` | Autocast dtype selection | same |
-| `--tf32` | preset-controlled | `on`, `off` | TensorFloat32 matmul/cuDNN controls | same |
+| `--tf32` | `auto` | `auto`, `on`, `off` | TensorFloat32 matmul/cuDNN controls | same |
 | `--distributed-backend` | `nccl` in multi-GPU runs | backend id | DDP backend | same |
 | `--runtime-max-samples-per-game` | runtime-dependent | integer `>=0` | Runtime splice cap; must match cache config when cache-required | same |
 | `--require-runtime-splice-cache` | often enabled in cloud HF flows | boolean | Fail on cache miss/mismatch instead of runtime indexing | same |
 | `--max-total-rows` | `0` | integer `>=0` | Row cap for fast subset tests | same |
+| `--sparsity-mode` | `off` | `off`, `l1`, `structured_2to4` | Sparsity behavior: `l1` adds L1 penalty, `structured_2to4` enforces persistent 2:4 masks on linear weights | same |
+| `--sparsity-l1-lambda` | `0.0` | float `>=0` | L1 penalty multiplier when `--sparsity-mode=l1` | same |
+| `--sparsity-include-bias` | `False` | boolean flag | Include bias tensors in L1/stat tracking (applies to `l1` mode) | same |
+
+## Dual Sequence Training CLI (`scripts/train_dual_sequence.py`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `--train` | required | repeatable JSONL path | Training input paths (spliced rows or game rows) | `python scripts/train_dual_sequence.py ...` |
+| `--val` | required | repeatable JSONL path | Validation input paths | same |
+| `--side-mode` | `both` | `white`, `black`, `both` | Train selected side-specific model(s) | same |
+| `--horizon` | `8` | integer `>=1` | One-shot future sequence plies predicted per sample | same |
+| `--epochs` | `20` | integer `>=1` | Training epochs | same |
+| `--batch-size` | `64` | integer `>=1` | Batch size | same |
+| `--lr` | `2e-4` | float `>0` | Adam learning rate | same |
+| `--seed` | `7` | integer | Random seed for model/init/shuffle/runtime splice sampling | same |
+| `--embed-dim` | `256` | integer `>=1` | Token/step embedding dimension | same |
+| `--hidden-dim` | `512` | integer `>=1` | LSTM hidden size | same |
+| `--num-layers` | `2` | integer `>=1` | Encoder/decoder LSTM layer count | same |
+| `--dropout` | `0.15` | float `>=0` | Embedding/head + inter-layer LSTM dropout (`num_layers>1`) | same |
+| `--step-loss-decay` | `1.0` | float `>0` | Geometric per-ply loss weighting across horizon | same |
+| `--side-to-move-feature` / `--no-side-to-move-feature` | enabled | boolean | Enable side-to-move conditioning in sequence decoder | same |
+| `--side-to-move-embed-dim` | `4` | integer `>=1` | Side-to-move embedding dim when feature enabled | same |
+| `--runtime-min-context` | `8` | integer `>=1` | Runtime splice min context for game-row inputs | same |
+| `--runtime-min-target` | `1` | integer `>=1` | Runtime splice min target plies for game-row inputs | same |
+| `--runtime-max-samples-per-game` | `0` | integer `>=0` | Runtime splice cap per game (`0` = no cap) | same |
+| `--mate-bias` / `--no-mate-bias` | enabled | boolean | Enable endgame mate-in-x positive weighting in loss | same |
+| `--mate-in-x` | `3` | integer `>=0` | Mate horizon threshold for mate-bias weight application | same |
+| `--mate-weight` | `1.25` | float `>=1.0` | Multiplicative weight for mate-bias plies | same |
+| `--num-workers` | `0` | integer `>=0` | Train DataLoader worker count | same |
+| `--device` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Device selection; `auto` resolves to `cuda` when available else `cpu` | same |
+| `--verbose` / `--no-verbose` | disabled | boolean | Emit per-epoch train/val summary logs | same |
+| `--out-model-white` | `artifacts/model_white.pt` | filepath | White model artifact output | same |
+| `--out-model-black` | `artifacts/model_black.pt` | filepath | Black model artifact output | same |
+| `--out-metrics` | `artifacts/train_metrics_dual_sequence.json` | filepath | Combined run metrics output | same |
+
+Dual-sequence interactions/precedence notes:
+- Winner filtering is fixed by `--side-mode`; rows with non-matching `winner_side` are dropped automatically.
+- Draw/unknown winner rows are dropped in current implementation.
+- For game-row inputs, runtime splice controls determine sample counts before model-side winner filtering.
+
+## Inference CLI Dual Routing (`scripts/infer_move.py`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `--model` | empty | artifact path | Single-artifact inference path (legacy next-move or dual-sequence artifact) | `python scripts/infer_move.py ...` |
+| `--white-model` | empty | artifact path | White dual-sequence artifact path for side-routed inference | same |
+| `--black-model` | empty | artifact path | Black dual-sequence artifact path for side-routed inference | same |
+
+Inference dual-routing interactions:
+- Caller must supply either:
+  - `--model`, or
+  - both `--white-model` and `--black-model`
+- When both side artifacts are provided, side-to-move is inferred from context parity and selects the artifact.
+
+## Model-vs-Model Arena CLI (`scripts/play_model_vs_model.py`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `--model-a` | empty | artifact path or `latest` | Single-artifact path for participant A | `python scripts/play_model_vs_model.py ...` |
+| `--model-b` | empty | artifact path or `latest` | Single-artifact path for participant B | same |
+| `--model-a-white` | empty | artifact path | Optional white-side artifact for participant A dual-pair routing | same |
+| `--model-a-black` | empty | artifact path | Optional black-side artifact for participant A dual-pair routing | same |
+| `--model-b-white` | empty | artifact path | Optional white-side artifact for participant B dual-pair routing | same |
+| `--model-b-black` | empty | artifact path | Optional black-side artifact for participant B dual-pair routing | same |
+| `--alias-a` | `model_a` | string | Display alias for participant A in summary/PGN headers | same |
+| `--alias-b` | `model_b` | string | Display alias for participant B in summary/PGN headers | same |
+| `--games` | `20` | integer `>=1` | Number of games in the arena set | same |
+| `--topk-a` | `10` | integer `>=1` | Candidate width for participant A inference | same |
+| `--topk-b` | `10` | integer `>=1` | Candidate width for participant B inference | same |
+| `--winner-side-a` | `W` | `W`, `B`, `D`, `?` | Winner token conditioning for participant A when using single-artifact inference | same |
+| `--winner-side-b` | `W` | `W`, `B`, `D`, `?` | Winner token conditioning for participant B when using single-artifact inference | same |
+| `--device-a` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Torch device for participant A | same |
+| `--device-b` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Torch device for participant B | same |
+| `--max-plies` | `300` | integer `>=1` | Hard ply cap per game | same |
+| `--alternate-colors` / `--no-alternate-colors` | enabled | boolean | Alternate A/B colors between games or keep A as white | same |
+| `--summary-out` | empty | filepath | Optional JSON summary output path | same |
+| `--pgn-out` | empty | filepath | Optional PGN output path | same |
+| `--progress` / `--no-progress` | enabled | boolean | Show/hide progress bar | same |
+| `--verbose` / `--no-verbose` | enabled | boolean | Emit per-game/logging diagnostics | same |
+
+Model-vs-model interactions/precedence notes:
+- For each participant (`A`, `B`), caller must provide either:
+  - one single artifact (`--model-a` or `--model-b`), or
+  - both side artifacts (`--model-*-white` and `--model-*-black`).
+- Side artifacts switch runtime mode to `dual_pair`; single artifact mode remains `single`.
+- `winner-side-*` only conditions single-artifact inference; dual-pair routing ignores winner token and routes by side-to-move.
 
 ## Active-Pods Full Status (`scripts/runpod_active_pods_full_status.sh`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -151,4 +245,16 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - `tests/test_config_precedence_matrix.py`
   - script-level precedence/override behavior for active-pod status modes and parser toggle order.
 - `tests/test_runpod_cycle_scripts.py`
-  - benchmark matrix runtime max-samples auto-resolution contract and critical config path assertions.
+  - benchmark matrix runtime max-samples auto-resolution contract, precision/sparsity trial defaults, and structured-2:4 trial wiring assertions.
+- `tests/test_runpod_direct_api_guardrails.py`
+  - direct-API-only guardrails for start/stop/full-smoke wiring and shared-script backend neutrality.
+- `tests/test_runpod_sdk_guardrails.py`
+  - SDK-only guardrails for SDK wrapper wiring and protection against accidental fallback to direct API entrypoints.
+- `tests/test_runpod_container_openssh_flow.py`
+  - container-specific OpenSSH bootstrap behavior in shared RunPod helpers (`apt-get openssh-client` path + keypair prep integration).
+- `tests/test_training_precision_controls.py`
+  - `scripts/train_baseline.py --help` exposes precision/sparsity controls (including `structured_2to4`) and autocast dtype resolver guardrails.
+- `tests/test_train_dual_sequence_cli.py`
+  - `scripts/train_dual_sequence.py --help` exposes dual-sequence controls and side-mode run wiring.
+- `tests/test_play_model_vs_model_cli.py`
+  - `scripts/play_model_vs_model.py --help` exposes dual-pair arena controls and runtime-mode wiring.

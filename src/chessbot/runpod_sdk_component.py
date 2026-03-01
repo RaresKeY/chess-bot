@@ -8,12 +8,14 @@ It provides a side-by-side implementation so teams can choose either path.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
 
 from src.chessbot.secrets import default_dotenv_paths, resolve_secret
 
@@ -25,6 +27,21 @@ DEFAULT_KEYRING_USERNAME = "RUNPOD_API_KEY"
 
 def _print_json(obj: Any) -> None:
     print(json.dumps(obj, indent=2, ensure_ascii=True))
+
+
+def _raise_sdk_runtime_error(context: str, exc: Exception) -> "NoReturn":
+    msg = str(exc)
+    if (
+        "NameResolutionError" in msg
+        or "Failed to resolve" in msg
+        or "No address associated with hostname" in msg
+        or "Temporary failure in name resolution" in msg
+    ):
+        raise SystemExit(
+            f"RunPod SDK {context} failed due to DNS/network resolution error. "
+            "Verify host network/DNS access to api.runpod.io and retry."
+        ) from exc
+    raise SystemExit(f"RunPod SDK {context} failed: {msg}") from exc
 
 
 def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -140,6 +157,13 @@ def _invoke_with_id(fn: Callable[..., Any], pod_id: str) -> Any:
     raise RuntimeError("unreachable")
 
 
+def _call_sdk_quietly(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    # Some runpod SDK versions print debug/raw response lines to stdout.
+    # Suppress those so CLI output remains strict JSON.
+    with contextlib.redirect_stdout(io.StringIO()):
+        return fn(*args, **kwargs)
+
+
 def _normalize_rows(payload: Any, common_list_keys: Iterable[str]) -> List[Dict[str, Any]]:
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
@@ -233,7 +257,10 @@ def _sdk_gpu_types(runpod_mod: Any) -> List[Dict[str, Any]]:
     )
     if fn is None:
         raise SystemExit("RunPod SDK component cannot find a GPU listing method in the installed SDK.")
-    payload = fn()
+    try:
+        payload = fn()
+    except Exception as exc:
+        _raise_sdk_runtime_error("gpu-search", exc)
     return _normalize_rows(payload, ("gpus", "gpuTypes", "items", "results"))
 
 
@@ -257,8 +284,39 @@ def _sdk_templates(runpod_mod: Any, *, include_runpod_templates: bool, include_p
             include_serverless=include_serverless,
         )
     except TypeError:
-        payload = fn()
+        try:
+            payload = fn()
+        except Exception as exc:
+            _raise_sdk_runtime_error("template-list", exc)
+    except Exception as exc:
+        _raise_sdk_runtime_error("template-list", exc)
     return _normalize_rows(payload, ("templates", "items", "results", "data"))
+
+
+def _resolve_template_for_provision(
+    runpod_mod: Any,
+    *,
+    template_id: str,
+    template_name: str,
+    include_runpod_templates: bool,
+    include_public_templates: bool,
+) -> Dict[str, Any]:
+    """Best-effort template resolution with fallback for SDK variants lacking template list APIs."""
+    try:
+        templates = _sdk_templates(
+            runpod_mod,
+            include_runpod_templates=include_runpod_templates,
+            include_public_templates=include_public_templates,
+            include_serverless=False,
+        )
+    except SystemExit as exc:
+        msg = str(exc)
+        no_template_api = "cannot find a template listing method" in msg.lower()
+        # Some SDK versions expose pod/GPU methods but no template-list API.
+        if no_template_api and (template_id or template_name):
+            return {"id": template_id, "name": template_name, "imageName": ""}
+        raise exc
+    return _choose_template(templates, template_id=template_id, template_name=template_name)
 
 
 def _sdk_create_pod(runpod_mod: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,7 +331,44 @@ def _sdk_create_pod(runpod_mod: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     if fn is None:
         raise SystemExit("RunPod SDK component cannot find a pod creation method in the installed SDK.")
-    out = _invoke_with_payload(fn, payload)
+    # Prefer conventional SDK create_pod kwargs when available.
+    gpu_type_ids = payload.get("gpuTypeIds") or []
+    gpu_type_id = str(gpu_type_ids[0]) if gpu_type_ids else None
+    ports_value = payload.get("ports")
+    if isinstance(ports_value, list):
+        ports_value = ",".join(str(x) for x in ports_value if str(x))
+    kwargs = {
+        "name": payload.get("name", ""),
+        "image_name": payload.get("imageName", ""),
+        "gpu_type_id": gpu_type_id,
+        "cloud_type": payload.get("cloudType", "COMMUNITY"),
+        "support_public_ip": bool(payload.get("supportPublicIp", True)),
+        "gpu_count": int(payload.get("gpuCount") or 1),
+        "volume_in_gb": int(payload.get("volumeInGb") or 0),
+        "container_disk_in_gb": int(payload.get("containerDiskInGb") or 0),
+        "ports": ports_value,
+        "volume_mount_path": payload.get("volumeMountPath", "/workspace"),
+        "env": payload.get("env") or {},
+        "template_id": payload.get("templateId") or None,
+    }
+    quiet_fn = lambda *a, **kw: _call_sdk_quietly(fn, *a, **kw)
+    try:
+        out = quiet_fn(**kwargs)
+    except TypeError:
+        try:
+            out = _invoke_with_payload(quiet_fn, payload)
+        except Exception as exc:
+            _raise_sdk_runtime_error("provision", exc)
+    except ValueError as exc:
+        msg = str(exc)
+        if "Either image_name or template_id must be provided" in msg:
+            raise SystemExit(
+                "RunPod SDK create_pod requires image_name or template_id. "
+                "Set --image-name or --template-id (or provide a template-list-capable SDK path)."
+            ) from exc
+        raise
+    except Exception as exc:
+        _raise_sdk_runtime_error("provision", exc)
     return out if isinstance(out, dict) else {"response": out}
 
 
@@ -289,7 +384,10 @@ def _sdk_get_pod(runpod_mod: Any, pod_id: str) -> Dict[str, Any]:
     )
     if fn is None:
         raise SystemExit("RunPod SDK component cannot find a pod status method in the installed SDK.")
-    out = _invoke_with_id(fn, pod_id)
+    try:
+        out = _invoke_with_id(fn, pod_id)
+    except Exception as exc:
+        _raise_sdk_runtime_error("pod-status", exc)
     return out if isinstance(out, dict) else {"response": out}
 
 
@@ -305,7 +403,10 @@ def _sdk_stop_pod(runpod_mod: Any, pod_id: str) -> Dict[str, Any]:
     )
     if fn is None:
         raise SystemExit("RunPod SDK component cannot find a pod stop method in the installed SDK.")
-    out = _invoke_with_id(fn, pod_id)
+    try:
+        out = _invoke_with_id(fn, pod_id)
+    except Exception as exc:
+        _raise_sdk_runtime_error("pod-stop", exc)
     return out if isinstance(out, dict) else {"response": out}
 
 
@@ -322,7 +423,10 @@ def _sdk_terminate_pod(runpod_mod: Any, pod_id: str) -> Dict[str, Any]:
     )
     if fn is None:
         raise SystemExit("RunPod SDK component cannot find a pod terminate/delete method in the installed SDK.")
-    out = _invoke_with_id(fn, pod_id)
+    try:
+        out = _invoke_with_id(fn, pod_id)
+    except Exception as exc:
+        _raise_sdk_runtime_error("pod-terminate", exc)
     return out if isinstance(out, dict) else {"response": out}
 
 
@@ -377,13 +481,13 @@ def cmd_provision(args: argparse.Namespace) -> int:
     runpod_mod = _load_runpod_sdk()
     _set_sdk_api_key(runpod_mod, api_key)
 
-    templates = _sdk_templates(
+    template = _resolve_template_for_provision(
         runpod_mod,
+        template_id=args.template_id,
+        template_name=args.template_name,
         include_runpod_templates=args.include_runpod_templates,
         include_public_templates=args.include_public_templates,
-        include_serverless=False,
     )
-    template = _choose_template(templates, template_id=args.template_id, template_name=args.template_name)
 
     gpu_ids: List[str] = []
     if args.gpu_type_id:
@@ -411,7 +515,7 @@ def cmd_provision(args: argparse.Namespace) -> int:
 
     payload: Dict[str, Any] = {
         "name": args.name,
-        "imageName": template.get("imageName") or template.get("image") or "",
+        "imageName": args.image_name or template.get("imageName") or template.get("image") or "",
         "gpuTypeIds": gpu_ids,
         "cloudType": args.cloud_type,
         "gpuCount": int(args.gpu_count),
@@ -423,7 +527,13 @@ def cmd_provision(args: argparse.Namespace) -> int:
         "interruptible": bool(args.interruptible),
         "supportPublicIp": bool(args.support_public_ip),
         "templateId": template.get("id", ""),
+        "templateName": template.get("name", ""),
     }
+    if not str(payload.get("imageName", "")).strip() and not str(payload.get("templateId", "")).strip():
+        raise SystemExit(
+            "Provision payload lacks both template id and image name. "
+            "Set --image-name or --template-id, or use an SDK path with template-list support."
+        )
     create_out = _sdk_create_pod(runpod_mod, payload)
 
     pod_id = str(create_out.get("id") or create_out.get("podId") or create_out.get("pod_id") or "")
@@ -523,6 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prov.add_argument("--cloud-type", choices=["SECURE", "COMMUNITY"], default="COMMUNITY")
     p_prov.add_argument("--gpu-count", type=int, default=1)
     p_prov.add_argument("--gpu-type-id", default="")
+    p_prov.add_argument("--image-name", default="")
     p_prov.add_argument("--min-memory-gb", type=int, default=24)
     p_prov.add_argument("--max-hourly-price", type=float, default=0.0)
     p_prov.add_argument("--template-id", default="")

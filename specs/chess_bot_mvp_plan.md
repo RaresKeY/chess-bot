@@ -6,6 +6,7 @@ Build a reproducible supervised chess move-prediction pipeline that runs:
 1. PGN validation (`scripts/validate_games.py`)
 2. Splice dataset generation (`scripts/build_splice_dataset.py`)
 3. Baseline training (`scripts/train_baseline.py`)
+3b. Dual side-specific one-shot sequence training (`scripts/train_dual_sequence.py`)
 4. Evaluation (`scripts/eval_model.py`)
 5. Inference (`scripts/infer_move.py`)
 
@@ -45,6 +46,9 @@ Build a reproducible supervised chess move-prediction pipeline that runs:
 - Model outputs:
   - `artifacts/model.pt`
   - `artifacts/train_metrics.json`
+  - `artifacts/model_white.pt` (dual sequence)
+  - `artifacts/model_black.pt` (dual sequence)
+  - `artifacts/train_metrics_dual_sequence.json` (dual sequence)
   - `artifacts/eval_metrics.json`
 - Viewer outputs:
   - `artifacts/viewer/game_viewer.html`

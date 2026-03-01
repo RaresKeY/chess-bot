@@ -9,7 +9,10 @@ Generate top-k candidate move tokens from a model artifact and return the best l
 - Model dependency: `src/chessbot/model.py`
 
 ## Inputs
-- `--model` artifact path
+- `--model` single artifact path (legacy `next_move_lstm` or a single dual-sequence artifact)
+- optional dual pair inputs for side-routed sequence inference:
+  - `--white-model`
+  - `--black-model`
 - `--context` space-separated UCI moves
 - `--winner-side` conditioning token (`W`, `B`, `D`, `?`)
 - `--policy-mode {auto,next,rollout}` (`auto` preserves old-model compatibility and prefers rollout for multistep-trained artifacts)
@@ -31,6 +34,16 @@ When `--rollout-plies > 0`, printed object instead contains rollout-oriented fie
 - `step_debug` per-step top-k / legality / chosen move details
 - `device`
 
+When dual-sequence inference is used (single dual artifact or dual pair routing), output includes sequence-oriented fields:
+- `topk_step1` top-k candidates for ply-1
+- `predicted_sequence` greedy per-ply sequence tokens across configured horizon
+- `legal_sequence` legality-filtered continuation sequence generated step-wise from per-ply top-k
+- `best_legal` legal first move selected from step-1 top-k
+- `move_uci` selected first move
+- `selected_model_side` when dual pair routing is used (`white` or `black`)
+- `horizon`
+- `model_side` artifact-side metadata when present
+
 ## Compatibility / Dispatch Behavior (current)
 - Inference helpers now detect artifact metadata when present:
   - root/runtime `training_objective`
@@ -38,6 +51,11 @@ When `--rollout-plies > 0`, printed object instead contains rollout-oriented fie
   - runtime `rollout_horizon`
 - Old artifacts that lack these fields are treated as legacy single-step next-move models (`single_step_next_move`) and continue using legacy next-move inference behavior
 - `--policy-mode auto` prioritizes new multistep artifacts by using rollout-first-move inference when metadata indicates a multistep objective, while keeping older artifacts on next-move logic
+- `model_family=dual_side_sequence_lstm` now dispatches to one-shot sequence inference and returns `policy_mode_used=sequence`
+- when both `--white-model` and `--black-model` are provided, inference routes to artifact by side-to-move derived from context length parity (white on even plies, black on odd plies)
 
 ## Constraints
 - Context must be legal from starting position; illegal context raises an error.
+- CLI requires either:
+  - `--model`, or
+  - both `--white-model` and `--black-model`

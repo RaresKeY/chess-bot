@@ -13,10 +13,16 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cli_doctor.sh`
 - `scripts/runpod_quick_launch.sh`
 - `scripts/runpod_regression_checks.sh`
+  - now enforces three separate required unit-test steps:
+    - direct API path (`tests/test_runpod_api_helpers.py`, `tests/test_runpod_direct_api_guardrails.py`, `tests/test_runpod_local_smoke_script.py`)
+    - SDK path (`tests/test_runpod_sdk_component.py`, `tests/test_runpod_sdk_guardrails.py`)
+    - shared lifecycle + container OpenSSH guardrails (`tests/test_runpod_cycle_scripts.py`, `tests/test_runpod_container_openssh_flow.py`)
+  - this separation is intentional so SDK-focused edits cannot pass regressions while breaking direct API behavior.
 - `scripts/cloud_connectivity_health_checks.sh`
 - `scripts/cloud_checks/providers/runpod.sh`
 - `scripts/runpod_connectivity_telemetry_checks.sh`
 - `scripts/runpod_cycle_common.sh`
+- `scripts/container_ensure_openssh.sh`
 - `scripts/runpod_cycle_start.sh`
 - `scripts/runpod_cycle_push_dataset.sh`
 - `scripts/runpod_cycle_train.sh`
@@ -100,6 +106,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `scripts/runpod_sdk_cycle_full_smoke.sh`
   - full smoke sequence: SDK provision -> dataset push -> train -> collect -> local validate -> SDK stop
   - SDK start wrapper normalizes provision JSON (`pod_id`/`pod_status`) so existing shared push/train/collect scripts can reuse `runpod_cycle_common.sh` parsing.
+  - SDK start wrapper now passes `--image-name` only when `RUNPOD_SDK_IMAGE_NAME` is non-empty.
+  - SDK start SSH readiness loop now refreshes pod status via SDK `pod-status` and updates `provision.json` each poll so late-arriving public IP / mapped SSH port data can be used before timeout.
+  - SDK start now preflights host `ssh` when `RUNPOD_REQUIRE_SSH_READY=1` and fails fast before provisioning if `ssh` is missing, avoiding avoidable pod create/timeout cycles.
+  - SDK provision template fallback now only applies when template-list methods are missing; runtime template-list errors are surfaced.
 
 ## GraphQL GPU Search Failure Behavior (current)
 - `gpu-search` now converts raw GraphQL `HTTP 403` traces into an actionable error message
@@ -119,6 +129,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - Practical effect:
   - wrapper scripts that pass explicit `--gpu-type-id` no longer trigger GraphQL `gpu-search` access errors during provisioning
   - invalid GPU type IDs are now rejected by RunPod pod creation (REST) instead of local GraphQL pre-validation
+  - explicit GPU requests now run a lightweight GraphQL stock preflight (`gpuTypes(input:{id}) -> lowestPrice`) and fail fast when requested `gpu_count` is not in `availableGpuCounts` or `stockStatus` indicates no capacity, which reduces avoidable create attempts when capacity is clearly unavailable
 
 ## RunPod CLI Helper Scripts
 - `scripts/runpod_cli_doctor.sh`
@@ -147,7 +158,10 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - inherits current `runpod_provision.py` defaults (notably `--use-runpod-training-preset-env` is now opt-in)
 - `scripts/runpod_cycle_common.sh`
   - shared helpers for modular lifecycle scripts (run id paths, keyring token lookup, pod JSON parsing, SSH/connection fields)
+  - container-specific OpenSSH bootstrap: when host `ssh`/`ssh-keygen` is missing and a container marker exists (`/run/.containerenv` or `/.containerenv`), shared helpers attempt `apt-get install openssh-client` automatically before failing.
   - managed temp key only: scripts always use `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}` and do not support personal/local key override variables
+  - managed key preparation accepts an already-present `${RUNPOD_TEMP_SSH_KEY_BASE}` + `.pub` pair without requiring `ssh-keygen` on host (generation is only attempted when pair is missing)
+  - SSH endpoint parsing now falls back to `pod_status.runtime.ports` (`privatePort=22`, `isIpPublic=true`) when legacy `publicIp`/`portMappings` are missing in provision records.
   - hard guard rejects managed-key paths under `${HOME}/.ssh/` (fails fast with explicit error) to prevent accidental personal-key use in RunPod flows
   - shared SSH args disable host agent/keyring import prompts for managed keys (`AddKeysToAgent=no`, `IdentityAgent=none`)
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
@@ -169,8 +183,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - saves provisioning JSON to `artifacts/runpod_cycles/<run_id>/provision.json`
   - initializes a per-run markdown report under `artifacts/runpod_cycles/<run_id>/reports/observations.md`
   - appends a `RUNNING` record to the tracked pod registry (`config/runpod_tracked_pods.jsonl`)
+- `scripts/container_ensure_openssh.sh`
+  - explicit container bootstrap helper that installs/verifies `openssh-client` (`ssh`, `ssh-keygen`) through shared RunPod helpers.
 - `scripts/runpod_cycle_push_dataset.sh`
   - pushes a valid local dataset directory (`train.jsonl`, `val.jsonl`) to the pod via `rsync`/SSH
+  - now fails fast when host `ssh` client is missing (before rsync loops)
   - defaults local dataset source to `data/dataset/_smoke_runpod`
   - waits for remote `REPO_DIR` to exist and become writable before `mkdir`/`rsync` (avoids startup race with repo clone/chown)
   - readiness wait is controlled with `RUNPOD_REMOTE_READY_TIMEOUT_SECONDS` / `RUNPOD_REMOTE_READY_POLL_SECONDS`
@@ -209,6 +226,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - exports `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` so training fails on runtime-cache miss/mismatch instead of runtime index fallback
 - `scripts/runpod_cycle_collect.sh`
   - pulls remote run artifacts and timing logs into local `artifacts/runpod_cycles/<run_id>/collected/`
+  - now fails fast when host `ssh` client is missing (before rsync/remote snapshot steps)
   - supports fast-collect mode via `RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS=0` (default include is `1`) to skip heavy `epoch_checkpoints/**` trees during rsync
   - automatically writes a best-effort runtime log bundle under `.../collected/logs_auto/`:
     - `remote_state_snapshot.txt` (GPU/process/service + train/progress log tails)

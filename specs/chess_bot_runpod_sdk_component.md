@@ -26,7 +26,11 @@ The SDK component is intentionally modular and independent. Changes here should 
   - supports optional template-name filter and pod-only filtering
 - `provision`
   - chooses template by id/name
+  - supports explicit `--image-name` for SDK versions that require `image_name` or `template_id` on create
+  - when template-list API is unavailable, template fallback now applies only to the "template method missing" case (it no longer masks auth/runtime template-list errors)
+  - fails fast with an explicit error when both resolved `template_id` and `image_name` are empty before calling SDK `create_pod`
   - supports explicit `--gpu-type-id` or constraint-based auto-pick from SDK GPU list
+  - supports fallback template handling for SDK variants that lack template-list APIs (uses provided `--template-id`/`--template-name` directly in provision payload)
   - supports env injection (`--env KEY=VALUE`)
   - supports interruptible mode and wait-until-ready polling
 - `pod-status`
@@ -37,6 +41,8 @@ The SDK component is intentionally modular and independent. Changes here should 
   - requests pod termination/deletion
 - SDK smoke flow wrappers:
   - `scripts/runpod_sdk_cycle_start.sh` provisions via SDK and records compatible `provision.json`
+    - passes `--image-name` only when non-empty (avoids empty-arg ambiguity)
+    - during SSH readiness wait, refreshes pod status via SDK `pod-status` and updates local `provision.json` so delayed public IP / SSH port mappings are picked up before timeout
   - `scripts/runpod_sdk_cycle_stop.sh` stops pod via SDK (`pod-stop`)
   - `scripts/runpod_sdk_cycle_full_smoke.sh` runs:
     - sdk-start -> dataset push -> train -> collect -> local-validate -> sdk-stop
@@ -58,6 +64,7 @@ The SDK component is intentionally modular and independent. Changes here should 
   - SDK-specific compatibility logic stays in `src/chessbot/runpod_sdk_component.py`
 - Keep output shape explicit:
   - top-level JSON output includes `"component": "runpod_sdk"` so operators can distinguish source path from raw component outputs.
+  - SDK calls suppress third-party stdout noise (for example raw response debug prints) so CLI output remains valid JSON for wrapper consumers.
 - Backward compatibility:
   - adding SDK method probes is acceptable
   - do not remove existing raw component behavior from this SDK component spec
@@ -68,6 +75,10 @@ The SDK component is intentionally modular and independent. Changes here should 
 
 ## Tests
 - `tests/test_runpod_sdk_component.py`
-  - verifies nested callable discovery, GPU ranking behavior, template selection, API key dotenv fallback, parser defaults, and provision-path behavior with a mocked SDK object.
+  - verifies nested callable discovery, GPU ranking behavior, template selection, API key dotenv fallback, parser defaults, provision-path behavior with a mocked SDK object, template-fallback behavior when SDK template-list methods are unavailable, non-fallback behavior for runtime template-list errors, and fail-fast guard when neither template id nor image name is available.
 - `tests/test_runpod_cycle_scripts.py`
-  - verifies SDK smoke wrappers exist and that SDK full smoke flow calls SDK start/stop plus existing shared train/collect validation steps.
+  - verifies SDK smoke wrappers exist, SDK full smoke flow calls SDK start/stop plus shared train/collect validation steps, SDK CLI wrapper help runs from repo-root path, SDK start wrapper only passes `--image-name` when non-empty, SDK start readiness logic refreshes endpoint fields via `pod-status`, and SSH-dependent wrappers fail fast when host `ssh` binary is missing.
+- `tests/test_runpod_sdk_guardrails.py`
+  - SDK/direct isolation guards: SDK start/stop/full-smoke wrappers must remain bound to `runpod_sdk_component.py` and must not drift to direct `runpod_provision.py` flows.
+- `tests/test_runpod_direct_api_guardrails.py`
+  - direct API isolation guards run separately to ensure SDK changes do not alter direct start/stop/full-smoke wiring.

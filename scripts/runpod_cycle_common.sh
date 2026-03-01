@@ -22,6 +22,40 @@ runpod_cycle_require_cmd() {
   }
 }
 
+runpod_cycle_try_install_openssh_client() {
+  local container_marker="${1:-/run/.containerenv}"
+  local -a elevate=()
+  if [[ ! -f "${container_marker}" && ! -f "/.containerenv" ]]; then
+    return 1
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    return 1
+  fi
+  if [[ "$(id -u)" != "0" ]]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      return 1
+    fi
+    if ! sudo -n true >/dev/null 2>&1; then
+      return 1
+    fi
+    elevate=(sudo -n)
+  fi
+  echo "[runpod-cycle] container bootstrap: installing openssh-client" >&2
+  "${elevate[@]}" apt-get update -y >/dev/null
+  "${elevate[@]}" apt-get install -y openssh-client >/dev/null
+}
+
+runpod_cycle_ensure_ssh_binary() {
+  if command -v ssh >/dev/null 2>&1; then
+    return 0
+  fi
+  runpod_cycle_try_install_openssh_client || true
+  command -v ssh >/dev/null 2>&1 || {
+    echo "[runpod-cycle] missing required command: ssh (container bootstrap unavailable; install openssh-client)" >&2
+    exit 1
+  }
+}
+
 runpod_cycle_run_id() {
   printf '%s\n' "${RUNPOD_CYCLE_RUN_ID:-runpod-cycle-$(date -u +%Y%m%dT%H%M%SZ)}"
 }
@@ -115,7 +149,16 @@ runpod_cycle_pod_field() {
 
 runpod_cycle_public_ip() {
   local pod_json="$1"
-  runpod_cycle_pod_field "${pod_json}" '(.pod_status.publicIp // .create_response.publicIp // "")'
+  runpod_cycle_pod_field "${pod_json}" '(
+    .pod_status.publicIp
+    // .create_response.publicIp
+    // (
+      [
+        ((.pod_status.runtime.ports // [])[] | select(((.privatePort | tostring) == "22") and (.isIpPublic == true)) | .ip)
+      ][0]
+    )
+    // ""
+  )'
 }
 
 runpod_cycle_ssh_port() {
@@ -124,7 +167,18 @@ runpod_cycle_ssh_port() {
     printf '%s\n' "${RUNPOD_SSH_PORT}"
     return 0
   fi
-  runpod_cycle_pod_field "${pod_json}" '((.pod_status.portMappings["22"] // .create_response.portMappings["22"] // "22") | tostring)'
+  runpod_cycle_pod_field "${pod_json}" '(
+    (
+      .pod_status.portMappings["22"]
+      // .create_response.portMappings["22"]
+      // (
+        [
+          ((.pod_status.runtime.ports // [])[] | select(((.privatePort | tostring) == "22") and (.isIpPublic == true)) | .publicPort)
+        ][0]
+      )
+      // "22"
+    ) | tostring
+  )'
 }
 
 runpod_cycle_pod_id() {
@@ -182,14 +236,21 @@ runpod_cycle_ensure_ssh_keypair() {
   runpod_cycle_assert_managed_ssh_key_path
   key_path="$(runpod_cycle_ssh_key)"
   pub_path="$(runpod_cycle_ssh_pubkey_path)"
+  if [[ -f "${key_path}" && -f "${pub_path}" ]]; then
+    chmod 600 "${key_path}" 2>/dev/null || true
+    return 0
+  fi
+  if [[ -f "${key_path}" || -f "${pub_path}" ]]; then
+    rm -f "${key_path}" "${pub_path}"
+  fi
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    runpod_cycle_try_install_openssh_client || true
+  fi
   command -v ssh-keygen >/dev/null 2>&1 || {
-    echo "[runpod-cycle] missing required command: ssh-keygen" >&2
+    echo "[runpod-cycle] missing required command: ssh-keygen (or provide existing managed keypair at ${key_path} + ${pub_path})" >&2
     exit 1
   }
-  if [[ ! -f "${key_path}" || ! -f "${pub_path}" ]]; then
-    rm -f "${key_path}" "${pub_path}"
-    ssh-keygen -t ed25519 -N "" -f "${key_path}" -C "codex-runpod-temp" >/dev/null
-  fi
+  ssh-keygen -t ed25519 -N "" -f "${key_path}" -C "codex-runpod-temp" >/dev/null
   chmod 600 "${key_path}" 2>/dev/null || true
 }
 
@@ -212,6 +273,7 @@ runpod_cycle_ssh_known_hosts_file() {
 
 runpod_cycle_prepare_ssh_client_files() {
   local repo_root="$1"
+  runpod_cycle_ensure_ssh_binary
   runpod_cycle_ensure_ssh_keypair
   local known_hosts
   known_hosts="$(runpod_cycle_ssh_known_hosts_file "${repo_root}")"

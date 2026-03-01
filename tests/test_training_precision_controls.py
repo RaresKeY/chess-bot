@@ -21,6 +21,7 @@ def test_train_baseline_help_exposes_precision_flags() -> None:
     assert "--tf32" in proc.stdout
     assert "--sparsity-mode" in proc.stdout
     assert "--sparsity-l1-lambda" in proc.stdout
+    assert "structured_2to4" in proc.stdout
 
 
 def test_resolve_amp_autocast_dtype_disabled_amp_returns_none() -> None:

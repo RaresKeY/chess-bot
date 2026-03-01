@@ -27,11 +27,21 @@ run_step() {
 
 cd "${REPO_ROOT}"
 
-run_step "unit-tests (runpod helpers/scripts)" \
-  "${PY_BIN}" -m unittest -v \
-    tests.test_runpod_api_helpers \
-    tests.test_runpod_sdk_component \
-    tests.test_runpod_local_smoke_script
+run_step "unit-tests (direct api path)" \
+  "${PY_BIN}" -m pytest -q \
+    tests/test_runpod_api_helpers.py \
+    tests/test_runpod_direct_api_guardrails.py \
+    tests/test_runpod_local_smoke_script.py
+
+run_step "unit-tests (sdk path)" \
+  "${PY_BIN}" -m pytest -q \
+    tests/test_runpod_sdk_component.py \
+    tests/test_runpod_sdk_guardrails.py
+
+run_step "unit-tests (shared script + container openssh guardrails)" \
+  "${PY_BIN}" -m pytest -q \
+    tests/test_runpod_cycle_scripts.py \
+    tests/test_runpod_container_openssh_flow.py
 
 run_step "cli-doctor (REST + GraphQL auth diagnostics)" \
   bash scripts/runpod_cli_doctor.sh

@@ -12,6 +12,7 @@ mkdir -p "${LOGS_DIR}"
 
 runpod_cycle_require_cmd jq
 runpod_cycle_require_cmd rsync
+runpod_cycle_require_cmd ssh
 runpod_cycle_prepare_ssh_client_files "${REPO_ROOT}"
 
 LOCAL_DATASET_DIR="${RUNPOD_LOCAL_DATASET_DIR:-${REPO_ROOT}/data/dataset/_smoke_runpod}"

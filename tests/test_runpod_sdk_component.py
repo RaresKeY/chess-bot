@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,8 +14,12 @@ from src.chessbot.runpod_sdk_component import (
     _invoke_with_payload,
     _load_runpod_sdk,
     _normalize_rows,
+    _raise_sdk_runtime_error,
+    _resolve_template_for_provision,
     _resolve_api_key,
     _rank_gpu_rows,
+    _sdk_create_pod,
+    _sdk_gpu_types,
     build_parser,
     cmd_gpu_search,
     cmd_pod_status,
@@ -64,6 +70,11 @@ class _FakeRunpod:
 
 
 class RunpodSdkComponentTests(unittest.TestCase):
+    def test_raise_sdk_runtime_error_dns_is_actionable(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _raise_sdk_runtime_error("provision", Exception("Failed to resolve 'api.runpod.io'"))
+        self.assertIn("DNS/network resolution error", str(ctx.exception))
+
     def test_first_callable_supports_nested_paths(self):
         class Obj:
             class A:
@@ -175,6 +186,7 @@ class RunpodSdkComponentTests(unittest.TestCase):
             cloud_type="COMMUNITY",
             gpu_count=1,
             gpu_type_id="",
+            image_name="",
             min_memory_gb=24,
             max_hourly_price=1.0,
             template_id="",
@@ -200,7 +212,7 @@ class RunpodSdkComponentTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(fake.api_key, "SECRET")
-        self.assertEqual(fake.created_payload["gpuTypeIds"], ["NVIDIA RTX A5000"])
+        self.assertEqual(fake.created_payload["gpu_type_id"], "NVIDIA RTX A5000")
         self.assertEqual(fake.created_payload["env"]["A"], "1")
         out = print_mock.call_args.args[0]
         self.assertEqual(out["component"], "runpod_sdk")
@@ -215,6 +227,7 @@ class RunpodSdkComponentTests(unittest.TestCase):
             cloud_type="COMMUNITY",
             gpu_count=1,
             gpu_type_id="NVIDIA RTX A5000",
+            image_name="",
             min_memory_gb=24,
             max_hourly_price=1.0,
             template_id="",
@@ -304,6 +317,232 @@ class RunpodSdkComponentTests(unittest.TestCase):
                 self.assertEqual(cmd_pod_terminate(args), 0)
                 self.assertEqual(print_mock.call_args.args[0]["component"], "runpod_sdk")
 
+    def test_resolve_template_fallback_when_sdk_has_no_template_list(self):
+        fake = _FakeRunpod()
+        with mock.patch(
+            "src.chessbot.runpod_sdk_component._sdk_templates",
+            side_effect=SystemExit("RunPod SDK component cannot find a template listing method in the installed SDK."),
+        ):
+            tpl = _resolve_template_for_provision(
+                fake,
+                template_id="",
+                template_name="chess-bot-training",
+                include_runpod_templates=True,
+                include_public_templates=True,
+            )
+        self.assertEqual(tpl["name"], "chess-bot-training")
+
+    def test_resolve_template_does_not_fallback_for_non_method_errors(self):
+        fake = _FakeRunpod()
+        with mock.patch(
+            "src.chessbot.runpod_sdk_component._sdk_templates",
+            side_effect=SystemExit("RunPod SDK template-list failed: unauthorized"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                _resolve_template_for_provision(
+                    fake,
+                    template_id="",
+                    template_name="chess-bot-training",
+                    include_runpod_templates=True,
+                    include_public_templates=True,
+                )
+        self.assertIn("template-list failed", str(ctx.exception))
+
+    def test_provision_falls_back_without_template_list_api(self):
+        class _FakeNoTemplateApi(_FakeRunpod):
+            def get_templates(self):
+                raise AttributeError("no template list API")
+
+        fake = _FakeNoTemplateApi()
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            name="sdk-test",
+            cloud_type="COMMUNITY",
+            gpu_count=1,
+            gpu_type_id="NVIDIA RTX A5000",
+            image_name="ghcr.io/example/chess-bot:latest",
+            min_memory_gb=24,
+            max_hourly_price=1.0,
+            template_id="",
+            template_name="chess-bot-training",
+            include_runpod_templates=True,
+            include_public_templates=True,
+            ports=["22/tcp"],
+            volume_mount_path="/workspace",
+            volume_in_gb=40,
+            container_disk_in_gb=15,
+            env=[],
+            interruptible=False,
+            support_public_ip=True,
+            wait_ready=False,
+            wait_timeout_seconds=1,
+            wait_poll_seconds=1,
+        )
+        with mock.patch("src.chessbot.runpod_sdk_component._resolve_api_key", return_value="SECRET"), mock.patch(
+            "src.chessbot.runpod_sdk_component._load_runpod_sdk", return_value=fake
+        ), mock.patch(
+            "src.chessbot.runpod_sdk_component._sdk_templates",
+            side_effect=SystemExit("RunPod SDK component cannot find a template listing method in the installed SDK."),
+        ), mock.patch(
+            "src.chessbot.runpod_sdk_component._print_json"
+        ):
+            rc = cmd_provision(args)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(fake.created_payload["template_id"])
+
+    def test_provision_fails_fast_when_no_template_id_and_no_image_name(self):
+        class _FakeNoTemplateApi(_FakeRunpod):
+            pass
+
+        fake = _FakeNoTemplateApi()
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            name="sdk-test",
+            cloud_type="COMMUNITY",
+            gpu_count=1,
+            gpu_type_id="NVIDIA RTX A5000",
+            image_name="",
+            min_memory_gb=24,
+            max_hourly_price=1.0,
+            template_id="",
+            template_name="chess-bot-training",
+            include_runpod_templates=True,
+            include_public_templates=True,
+            ports=["22/tcp"],
+            volume_mount_path="/workspace",
+            volume_in_gb=40,
+            container_disk_in_gb=15,
+            env=[],
+            interruptible=False,
+            support_public_ip=True,
+            wait_ready=False,
+            wait_timeout_seconds=1,
+            wait_poll_seconds=1,
+        )
+        with mock.patch("src.chessbot.runpod_sdk_component._resolve_api_key", return_value="SECRET"), mock.patch(
+            "src.chessbot.runpod_sdk_component._load_runpod_sdk", return_value=fake
+        ), mock.patch(
+            "src.chessbot.runpod_sdk_component._sdk_templates",
+            side_effect=SystemExit("RunPod SDK component cannot find a template listing method in the installed SDK."),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                cmd_provision(args)
+        self.assertIn("lacks both template id and image name", str(ctx.exception))
+
+    def test_sdk_create_pod_uses_conventional_snake_case_kwargs(self):
+        class _FakeConventional(_FakeRunpod):
+            def create_pod(self, **kwargs):
+                self.created_payload = kwargs
+                return {"id": "pod-kw"}
+
+        fake = _FakeConventional()
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            name="sdk-test",
+            cloud_type="COMMUNITY",
+            gpu_count=1,
+            gpu_type_id="NVIDIA RTX A5000",
+            image_name="ghcr.io/example/chess-bot:latest",
+            min_memory_gb=24,
+            max_hourly_price=1.0,
+            template_id="",
+            template_name="chess-bot-training",
+            include_runpod_templates=True,
+            include_public_templates=True,
+            ports=["22/tcp", "8888/http"],
+            volume_mount_path="/workspace",
+            volume_in_gb=40,
+            container_disk_in_gb=15,
+            env=["A=1"],
+            interruptible=False,
+            support_public_ip=True,
+            wait_ready=False,
+            wait_timeout_seconds=1,
+            wait_poll_seconds=1,
+        )
+        with mock.patch("src.chessbot.runpod_sdk_component._resolve_api_key", return_value="SECRET"), mock.patch(
+            "src.chessbot.runpod_sdk_component._load_runpod_sdk", return_value=fake
+        ), mock.patch("src.chessbot.runpod_sdk_component._print_json"):
+            rc = cmd_provision(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.created_payload["image_name"], "ghcr.io/example/chess-bot:latest")
+        self.assertEqual(fake.created_payload["gpu_type_id"], "NVIDIA RTX A5000")
+        self.assertEqual(fake.created_payload["ports"], "22/tcp,8888/http")
+
+    def test_sdk_create_pod_network_error_is_actionable(self):
+        class _FakeNetFail:
+            @staticmethod
+            def create_pod(**kwargs):
+                raise RuntimeError("NameResolutionError: Failed to resolve api.runpod.io")
+
+        with self.assertRaises(SystemExit) as ctx:
+            _sdk_create_pod(
+                _FakeNetFail(),
+                {
+                    "name": "x",
+                    "imageName": "ghcr.io/example/chess-bot:latest",
+                    "gpuTypeIds": ["NVIDIA RTX A5000"],
+                    "cloudType": "COMMUNITY",
+                    "gpuCount": 1,
+                    "volumeInGb": 40,
+                    "containerDiskInGb": 15,
+                    "ports": ["22/tcp"],
+                    "volumeMountPath": "/workspace",
+                    "env": {},
+                    "templateId": "",
+                    "supportPublicIp": True,
+                },
+            )
+        self.assertIn("DNS/network resolution error", str(ctx.exception))
+
+    def test_sdk_create_pod_suppresses_noisy_sdk_stdout(self):
+        class _FakeNoisy:
+            @staticmethod
+            def create_pod(**_kwargs):
+                print("raw_response: {'data': {'podFindAndDeployOnDemand': {'id': 'pod-noisy'}}}")
+                return {"id": "pod-noisy"}
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            out = _sdk_create_pod(
+                _FakeNoisy(),
+                {
+                    "name": "x",
+                    "imageName": "ghcr.io/example/chess-bot:latest",
+                    "gpuTypeIds": ["NVIDIA RTX A5000"],
+                    "cloudType": "COMMUNITY",
+                    "gpuCount": 1,
+                    "volumeInGb": 40,
+                    "containerDiskInGb": 15,
+                    "ports": ["22/tcp"],
+                    "volumeMountPath": "/workspace",
+                    "env": {},
+                    "templateId": "",
+                    "supportPublicIp": True,
+                },
+            )
+        self.assertEqual(out["id"], "pod-noisy")
+        self.assertEqual(captured.getvalue(), "")
+
+    def test_sdk_gpu_types_network_error_is_actionable(self):
+        class _FakeGpuNetFail:
+            @staticmethod
+            def get_gpu_types():
+                raise RuntimeError("Temporary failure in name resolution")
+
+        with self.assertRaises(SystemExit) as ctx:
+            _sdk_gpu_types(_FakeGpuNetFail())
+        self.assertIn("DNS/network resolution error", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+    _raise_sdk_runtime_error,
+    _sdk_create_pod,
+    _sdk_gpu_types,

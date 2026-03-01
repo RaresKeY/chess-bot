@@ -111,6 +111,8 @@ def _http_json(
         if body:
             detail += f": {body}"
         raise SystemExit(detail)
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"Network/DNS error for {method} {url}: {exc}") from exc
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
@@ -146,8 +148,11 @@ def _graphql_json(
         },
         data=json.dumps({"query": query, "variables": variables or {}}).encode("utf-8"),
     )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"Network/DNS error for GraphQL {endpoint}: {exc}") from exc
     payload = json.loads(body)
     if payload.get("errors"):
         raise RuntimeError(json.dumps(payload["errors"], ensure_ascii=True))
@@ -229,6 +234,66 @@ def _gpu_types(api_key: str, *, graphql_endpoint: str = GRAPHQL_BASE) -> List[Di
         _raise_graphql_access_error(exc, operation="gpu-search")
     items = ((payload.get("data") or {}).get("gpuTypes") or [])
     return [x for x in items if isinstance(x, dict)]
+
+
+def _gpu_lowest_price_stock_status(
+    api_key: str,
+    *,
+    gpu_type_id: str,
+    cloud_type: str,
+    gpu_count: int,
+    graphql_endpoint: str = GRAPHQL_BASE,
+) -> Dict[str, Any]:
+    want_secure = str(cloud_type).upper() == "SECURE"
+    query = """
+    query GpuStockStatus($gpuTypeId: String!, $gpuCount: Int!, $secureCloud: Boolean!) {
+      gpuTypes(input: {id: $gpuTypeId}) {
+        id
+        displayName
+        lowestPrice(
+          input: {
+            gpuCount: $gpuCount
+            secureCloud: $secureCloud
+          }
+        ) {
+          stockStatus
+          uninterruptablePrice
+          minimumBidPrice
+          maxUnreservedGpuCount
+          availableGpuCounts
+        }
+      }
+    }
+    """
+    try:
+        payload = _graphql_json(
+            graphql_endpoint,
+            api_key=api_key,
+            query=query,
+            variables={
+                "gpuTypeId": str(gpu_type_id),
+                "gpuCount": int(gpu_count),
+                "secureCloud": bool(want_secure),
+            },
+        )
+    except urllib.error.HTTPError as exc:
+        _raise_graphql_access_error(exc, operation="gpu-stock-status")
+    rows = ((payload.get("data") or {}).get("gpuTypes") or [])
+    row = rows[0] if rows else {}
+    lp = row.get("lowestPrice") if isinstance(row, dict) else {}
+    lp = lp if isinstance(lp, dict) else {}
+    avail = lp.get("availableGpuCounts")
+    if not isinstance(avail, list):
+        avail = []
+    return {
+        "gpu_type_id": str(row.get("id") or gpu_type_id),
+        "display_name": str(row.get("displayName") or gpu_type_id),
+        "stock_status": str(lp.get("stockStatus") or ""),
+        "available_gpu_counts": [int(x) for x in avail if isinstance(x, int) or (isinstance(x, str) and x.isdigit())],
+        "max_unreserved_gpu_count": lp.get("maxUnreservedGpuCount"),
+        "uninterruptable_price": lp.get("uninterruptablePrice"),
+        "minimum_bid_price": lp.get("minimumBidPrice"),
+    }
 
 
 def _rank_gpu_rows(
@@ -395,6 +460,26 @@ def cmd_provision(args: argparse.Namespace) -> int:
             "spot_price_per_hr": None,
             "graphql_lookup_skipped": True,
         }
+        stock = _gpu_lowest_price_stock_status(
+            api_key,
+            gpu_type_id=str(args.gpu_type_id),
+            cloud_type=args.cloud_type,
+            gpu_count=int(args.gpu_count),
+            graphql_endpoint=args.graphql_endpoint,
+        )
+        chosen_gpu["stock_preflight"] = stock
+        available_counts = stock.get("available_gpu_counts") or []
+        stock_status = str(stock.get("stock_status") or "").upper()
+        if available_counts and int(args.gpu_count) not in available_counts:
+            raise SystemExit(
+                f"Requested gpu_count={args.gpu_count} for gpu_type_id={args.gpu_type_id} is not currently advertised "
+                f"as available. available_gpu_counts={available_counts}, stock_status={stock_status or 'unknown'}"
+            )
+        if stock_status in {"OUT_OF_STOCK", "NO_CAPACITY"}:
+            raise SystemExit(
+                f"gpu_type_id={args.gpu_type_id} currently reports stock_status={stock_status}. "
+                f"Try a different GPU type or interruptible mode."
+            )
     else:
         gpu_rows = _gpu_types(api_key, graphql_endpoint=args.graphql_endpoint)
         ranked_gpus = _rank_gpu_rows(

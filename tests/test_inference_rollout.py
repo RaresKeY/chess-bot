@@ -5,6 +5,7 @@ import torch
 from src.chessbot.inference import (
     artifact_training_objective,
     infer_first_move_auto_from_artifact_on_device,
+    infer_from_artifact_on_device,
     infer_rollout_from_artifact_on_device,
 )
 from src.chessbot.model import NextMoveLSTM
@@ -98,6 +99,20 @@ class InferenceRolloutTests(unittest.TestCase):
         self.assertEqual(out["policy_mode_used"], "rollout")
         self.assertEqual(out["move_uci"], "e2e4")
         self.assertIn("rollout", out)
+
+    def test_next_inference_clamps_topk_to_vocab_size(self):
+        artifact = self._build_tiny_artifact()
+        out = infer_from_artifact_on_device(
+            artifact=artifact,
+            context=[],
+            winner_side="W",
+            topk=99,
+            device_str="cpu",
+        )
+        self.assertIn("topk", out)
+        self.assertGreaterEqual(len(out["topk"]), 1)
+        # tiny artifact has vocab size 4; topk must be clamped
+        self.assertLessEqual(len(out["topk"]), 4)
 
 
 if __name__ == "__main__":

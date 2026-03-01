@@ -16,6 +16,7 @@ mkdir -p "${CYCLE_DIR}" "$(dirname "${REPORT_MD}")"
 
 POD_NAME="${RUNPOD_POD_NAME:-chess-bot-cycle-${RUN_ID}}"
 TEMPLATE_NAME="${RUNPOD_SDK_TEMPLATE_NAME:-${RUNPOD_TEMPLATE_NAME:-chess-bot-training}}"
+IMAGE_NAME="${RUNPOD_SDK_IMAGE_NAME:-}"
 CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-COMMUNITY}"
 GPU_COUNT="${RUNPOD_GPU_COUNT:-1}"
 GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 3090}"
@@ -23,6 +24,11 @@ VOLUME_GB="${RUNPOD_VOLUME_GB:-40}"
 CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-15}"
 DEFAULT_REMOTE_REPO_DIR="${RUNPOD_DEFAULT_REMOTE_REPO_DIR:-/workspace/chess-bot-${RUN_ID}}"
 INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-0}"
+SSH_READY_REQUIRED="${RUNPOD_REQUIRE_SSH_READY:-1}"
+
+if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then
+  runpod_cycle_require_cmd ssh
+fi
 
 cmd=(
   "${PY_BIN}" "${REPO_ROOT}/scripts/runpod_sdk_component.py"
@@ -38,6 +44,9 @@ cmd=(
   --container-disk-in-gb "${CONTAINER_DISK_GB}"
   --wait-ready
 )
+if [[ -n "${IMAGE_NAME}" ]]; then
+  cmd+=( --image-name "${IMAGE_NAME}" )
+fi
 if [[ "${INTERRUPTIBLE}" == "1" ]]; then
   cmd+=( --interruptible )
 else
@@ -102,7 +111,6 @@ SSH_USER="$(runpod_cycle_ssh_user)"
 POD_ID="$(runpod_cycle_pod_id "${PROVISION_JSON}")"
 POD_NAME_RECORDED="$(runpod_cycle_pod_name "${PROVISION_JSON}")"
 
-SSH_READY_REQUIRED="${RUNPOD_REQUIRE_SSH_READY:-1}"
 if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then
   SSH_KEY="$(runpod_cycle_ssh_key)"
   SSH_CONNECT_TIMEOUT="${RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS:-15}"
@@ -111,8 +119,34 @@ if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then
   SSH_HOST_KEY_CHECKING="$(runpod_cycle_ssh_host_key_checking)"
   SSH_KNOWN_HOSTS_FILE="$(runpod_cycle_ssh_known_hosts_file "${REPO_ROOT}")"
   SSH_READY_DEADLINE=$(( $(date +%s) + SSH_READY_TIMEOUT_SECONDS ))
+
+  sdk_refresh_status_json() {
+    local status_json tmp_merge
+    status_json="${PROVISION_JSON}.status.json"
+    tmp_merge="${PROVISION_JSON}.status.merge.tmp"
+    if "${PY_BIN}" "${REPO_ROOT}/scripts/runpod_sdk_component.py" \
+      --keyring-service runpod \
+      --keyring-username RUNPOD_API_KEY \
+      pod-status --pod-id "${POD_ID}" > "${status_json}" 2>/dev/null; then
+      jq --slurpfile s "${status_json}" '
+        .pod_status = ($s[0].pod_status // .pod_status // {})
+      ' "${PROVISION_JSON}" > "${tmp_merge}" && mv "${tmp_merge}" "${PROVISION_JSON}"
+    fi
+    rm -f "${status_json}" "${tmp_merge}" 2>/dev/null || true
+  }
+
+  sdk_mapped_ssh_port() {
+    jq -r '((.pod_status.portMappings["22"] // .create_response.portMappings["22"] // "") | tostring)' "${PROVISION_JSON}" 2>/dev/null || true
+  }
+
   while true; do
-    if ssh \
+    sdk_refresh_status_json
+    SSH_HOST="$(runpod_cycle_ssh_host "${PROVISION_JSON}")"
+    mapped_ssh_port="$(sdk_mapped_ssh_port)"
+    if [[ -n "${mapped_ssh_port}" && "${mapped_ssh_port}" != "null" ]]; then
+      SSH_PORT="${mapped_ssh_port}"
+    fi
+    if [[ -n "${SSH_HOST}" && "${SSH_HOST}" != "null" ]] && ssh \
       -i "${SSH_KEY}" \
       -p "${SSH_PORT}" \
       -o BatchMode=yes \

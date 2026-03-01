@@ -17,9 +17,11 @@ from src.chessbot.model import (
 )
 from src.chessbot.training import (
     RuntimeSpliceConfig,
+    _build_structured_2to4_masks,
     _build_rollout_step_weights,
     _index_game_jsonl_paths_cached_or_runtime,
     _prefix_match_len,
+    _structured_2to4_mask_for_weight,
     _try_load_runtime_splice_vocab_rows_meta_for_paths,
     _weighted_rollout_closeness,
     collate_train,
@@ -153,6 +155,46 @@ class TrainingFeatureTests(unittest.TestCase):
         score = _weighted_rollout_closeness([True, False, True, False], [1.0, 0.7, 0.5, 0.35], 4)
         self.assertGreater(score, 0.0)
         self.assertLess(score, 1.0)
+
+    def test_structured_2to4_mask_has_two_kept_weights_per_group(self):
+        weight = torch.tensor(
+            [
+                [1.0, -4.0, 2.0, 3.0, 9.0, -1.0, 5.0, 6.0],
+                [0.1, -0.2, 7.0, 0.3, 0.9, -8.0, 0.7, 0.6],
+            ],
+            dtype=torch.float32,
+        )
+        mask = _structured_2to4_mask_for_weight(weight)
+        self.assertEqual(mask.shape, weight.shape)
+        grouped = mask.view(2, 2, 4)
+        per_group_keep = grouped.sum(dim=2)
+        self.assertTrue(torch.all(per_group_keep == 2))
+
+    def test_structured_2to4_mask_keeps_tail_columns_when_not_multiple_of_four(self):
+        weight = torch.tensor([[1.0, -4.0, 2.0, 3.0, 9.0]], dtype=torch.float32)
+        mask = _structured_2to4_mask_for_weight(weight)
+        self.assertEqual(mask.shape, weight.shape)
+        # First 4 columns enforce 2:4 pattern.
+        self.assertEqual(int(mask[0, :4].sum().item()), 2)
+        # Tail column (not in a 4-wide group) remains unmasked.
+        self.assertEqual(float(mask[0, 4].item()), 1.0)
+
+    def test_build_structured_2to4_masks_targets_linear_layers(self):
+        model = NextMoveLSTM(
+            vocab_size=32,
+            embed_dim=8,
+            hidden_dim=16,
+            num_layers=1,
+            dropout=0.0,
+            use_winner=True,
+            use_phase=True,
+            phase_embed_dim=4,
+            use_side_to_move=True,
+            side_to_move_embed_dim=2,
+        )
+        masks = _build_structured_2to4_masks(model)
+        self.assertIn("classifier.weight", masks)
+        self.assertEqual(masks["classifier.weight"].shape, model.classifier.weight.shape)
 
     def test_model_forward_supports_phase_and_side_features(self):
         torch.manual_seed(0)
@@ -900,6 +942,200 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertIn("rollout_step2_acc", epoch_end["metrics"])
         self.assertIn("rollout_step4_acc", epoch_end["metrics"])
         self.assertIn("rollout_weighted_continuation_score", epoch_end["metrics"])
+
+    def test_train_next_move_model_from_jsonl_paths_structured_2to4_records_sparsity_runtime(self):
+        train_rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+            {"context": ["g1f3"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "middlegame"},
+            {"context": ["c2c4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "middlegame"},
+        ]
+        val_rows = [
+            {"context": ["e2e4", "e7e5"], "target": ["g1f3"], "next_move": "g1f3", "winner_side": "W", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = f"{tmp}/train.jsonl"
+            val_path = f"{tmp}/val.jsonl"
+            with open(train_path, "w", encoding="utf-8") as f:
+                for row in train_rows:
+                    f.write(json.dumps(row) + "\n")
+            with open(val_path, "w", encoding="utf-8") as f:
+                for row in val_rows:
+                    f.write(json.dumps(row) + "\n")
+
+            artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[train_path],
+                val_paths=[val_path],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+                sparsity_mode="structured_2to4",
+            )
+        self.assertEqual(len(history), 1)
+        runtime_sparse = artifact["runtime"]["sparsity"]
+        info_sparse = dataset_info["sparsity"]
+        self.assertEqual(runtime_sparse["mode"], "structured_2to4")
+        self.assertTrue(runtime_sparse["enabled"])
+        self.assertTrue(runtime_sparse["structured_2to4_enabled"])
+        self.assertGreaterEqual(int(runtime_sparse["structured_2to4_mask_count"]), 1)
+        self.assertGreater(float(info_sparse["structured_2to4_zero_fraction"]), 0.0)
+        self.assertEqual(int(info_sparse["structured_2to4_group_total"]), int(info_sparse["structured_2to4_group_compliant"]))
+
+    def test_train_next_move_model_from_jsonl_paths_structured_2to4_rejects_multistep(self):
+        rows = [
+            {"context": ["e2e4"], "target": ["e7e5", "g1f3"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5", "c2c4"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = f"{tmp}/train.jsonl"
+            val_path = f"{tmp}/val.jsonl"
+            with open(train_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+            with open(val_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+
+            with self.assertRaises(ValueError) as exc_info:
+                train_next_move_model_from_jsonl_paths(
+                    train_paths=[train_path],
+                    val_paths=[val_path],
+                    epochs=1,
+                    batch_size=2,
+                    lr=1e-3,
+                    seed=7,
+                    embed_dim=8,
+                    hidden_dim=16,
+                    num_layers=1,
+                    dropout=0.0,
+                    winner_weight=1.0,
+                    use_winner=True,
+                    device_str="cpu",
+                    num_workers=0,
+                    pin_memory=False,
+                    amp=False,
+                    restore_best=True,
+                    use_phase_feature=True,
+                    use_side_to_move_feature=True,
+                    lr_scheduler="none",
+                    early_stopping_patience=0,
+                    verbose=False,
+                    show_progress=False,
+                    sparsity_mode="structured_2to4",
+                    rollout_horizon=2,
+                )
+        self.assertIn("supported only for rollout_horizon=1", str(exc_info.exception))
+
+    def test_train_next_move_model_from_jsonl_paths_l1_zero_lambda_is_disabled(self):
+        rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+            {"context": ["d2d4"], "target": ["d7d5"], "next_move": "d7d5", "winner_side": "B", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = f"{tmp}/train.jsonl"
+            val_path = f"{tmp}/val.jsonl"
+            with open(train_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+            with open(val_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+
+            artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                train_paths=[train_path],
+                val_paths=[val_path],
+                epochs=1,
+                batch_size=2,
+                lr=1e-3,
+                seed=7,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                winner_weight=1.0,
+                use_winner=True,
+                device_str="cpu",
+                num_workers=0,
+                pin_memory=False,
+                amp=False,
+                restore_best=True,
+                use_phase_feature=True,
+                use_side_to_move_feature=True,
+                lr_scheduler="none",
+                early_stopping_patience=0,
+                verbose=False,
+                show_progress=False,
+                sparsity_mode="l1",
+                sparsity_l1_lambda=0.0,
+            )
+        self.assertEqual(len(history), 1)
+        runtime_sparse = artifact["runtime"]["sparsity"]
+        info_sparse = dataset_info["sparsity"]
+        self.assertEqual(runtime_sparse["mode"], "l1")
+        self.assertFalse(runtime_sparse["enabled"])
+        self.assertFalse(runtime_sparse["l1_enabled"])
+        self.assertFalse(info_sparse["enabled"])
+
+    def test_train_next_move_model_from_jsonl_paths_invalid_sparsity_mode_raises(self):
+        rows = [
+            {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = f"{tmp}/train.jsonl"
+            val_path = f"{tmp}/val.jsonl"
+            with open(train_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+            with open(val_path, "w", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+
+            with self.assertRaises(ValueError) as exc_info:
+                train_next_move_model_from_jsonl_paths(
+                    train_paths=[train_path],
+                    val_paths=[val_path],
+                    epochs=1,
+                    batch_size=1,
+                    lr=1e-3,
+                    seed=7,
+                    embed_dim=8,
+                    hidden_dim=16,
+                    num_layers=1,
+                    dropout=0.0,
+                    winner_weight=1.0,
+                    use_winner=True,
+                    device_str="cpu",
+                    num_workers=0,
+                    pin_memory=False,
+                    amp=False,
+                    restore_best=True,
+                    use_phase_feature=True,
+                    use_side_to_move_feature=True,
+                    lr_scheduler="none",
+                    early_stopping_patience=0,
+                    verbose=False,
+                    show_progress=False,
+                    sparsity_mode="nope",
+                )
+        self.assertIn("Unsupported sparsity_mode", str(exc_info.exception))
 
     def test_distributed_non_primary_suppresses_progress_events(self):
         class _DummyDDP(torch.nn.Module):

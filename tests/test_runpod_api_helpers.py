@@ -10,6 +10,8 @@ from unittest import mock
 from deploy.runpod_cloud_training.idle_watchdog import _stop_runpod_pod
 from scripts.runpod_provision import (
     _choose_template,
+    _http_json,
+    _gpu_lowest_price_stock_status,
     _gpu_types,
     _graphql_json,
     _rank_gpu_rows,
@@ -34,6 +36,52 @@ class _BytesResponse:
 
 
 class RunpodApiHelperTests(unittest.TestCase):
+    def test_http_json_urlerror_is_actionable(self):
+        with mock.patch(
+            "scripts.runpod_provision.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("[Errno -2] Name or service not known"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                _http_json("GET", "https://rest.runpod.io/v1/templates", bearer_token="SECRET")
+        self.assertIn("Network/DNS error", str(ctx.exception))
+
+    def test_graphql_json_urlerror_is_actionable(self):
+        with mock.patch(
+            "scripts.runpod_provision.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("[Errno -2] Name or service not known"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                _graphql_json("https://api.runpod.io/graphql", api_key="SECRET", query="query { myself { id } }")
+        self.assertIn("Network/DNS error", str(ctx.exception))
+
+    def test_gpu_lowest_price_stock_status_parses_expected_fields(self):
+        payload = {
+            "data": {
+                "gpuTypes": [
+                    {
+                        "id": "NVIDIA GeForce RTX 3090",
+                        "displayName": "RTX 3090",
+                        "lowestPrice": {
+                            "stockStatus": "IN_STOCK",
+                            "uninterruptablePrice": 0.22,
+                            "minimumBidPrice": 0.11,
+                            "maxUnreservedGpuCount": 8,
+                            "availableGpuCounts": [1, 2, 4],
+                        },
+                    }
+                ]
+            }
+        }
+        with mock.patch("scripts.runpod_provision._graphql_json", return_value=payload):
+            out = _gpu_lowest_price_stock_status(
+                "SECRET",
+                gpu_type_id="NVIDIA GeForce RTX 3090",
+                cloud_type="COMMUNITY",
+                gpu_count=1,
+            )
+        self.assertEqual(out["stock_status"], "IN_STOCK")
+        self.assertEqual(out["available_gpu_counts"], [1, 2, 4])
+
     def test_graphql_uses_bearer_header_and_strips_api_key_query_param(self):
         with mock.patch("scripts.runpod_provision.urllib.request.urlopen") as urlopen_mock:
             urlopen_mock.return_value = _BytesResponse(b'{"data":{"gpuTypes":[]}}')
@@ -133,6 +181,9 @@ class RunpodApiHelperTests(unittest.TestCase):
             "scripts.runpod_provision._gpu_types",
             side_effect=SystemExit("RunPod GraphQL request was denied (HTTP 403) during gpu-search"),
         ), mock.patch(
+            "scripts.runpod_provision._gpu_lowest_price_stock_status",
+            return_value={"stock_status": "IN_STOCK", "available_gpu_counts": [1]},
+        ), mock.patch(
             "scripts.runpod_provision._list_templates",
             return_value=[{"id": "tpl1", "name": "chess-bot-training", "imageName": "ghcr.io/x/y:latest"}],
         ), mock.patch(
@@ -179,6 +230,9 @@ class RunpodApiHelperTests(unittest.TestCase):
         with mock.patch("scripts.runpod_provision._resolve_api_key", return_value="SECRET"), mock.patch(
             "scripts.runpod_provision._gpu_types"
         ) as gpu_types_mock, mock.patch(
+            "scripts.runpod_provision._gpu_lowest_price_stock_status",
+            return_value={"stock_status": "IN_STOCK", "available_gpu_counts": [1]},
+        ), mock.patch(
             "scripts.runpod_provision._list_templates",
             return_value=[{"id": "tpl1", "name": "chess-bot-training", "imageName": "ghcr.io/x/y:latest"}],
         ), mock.patch(
@@ -192,6 +246,44 @@ class RunpodApiHelperTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         gpu_types_mock.assert_not_called()
         self.assertEqual(create_mock.call_args.kwargs["gpu_type_ids"], ["NVIDIA GeForce RTX 3090"])
+
+    def test_provision_explicit_gpu_fails_when_stock_preflight_missing_count(self):
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            rest_base="https://rest.runpod.io/v1",
+            graphql_endpoint="https://api.runpod.io/graphql",
+            verbose=False,
+            name="test-pod",
+            cloud_type="COMMUNITY",
+            gpu_count=2,
+            gpu_type_id="NVIDIA GeForce RTX 3090",
+            min_memory_gb=24,
+            max_hourly_price=3.0,
+            template_id="",
+            template_name="chess-bot-training",
+            include_runpod_templates=True,
+            include_public_templates=True,
+            ports=[],
+            volume_mount_path="/workspace",
+            volume_in_gb=40,
+            container_disk_in_gb=15,
+            env=[],
+            use_runpod_training_preset_env=False,
+            support_public_ip_auto=True,
+            interruptible=False,
+            wait_ready=False,
+            wait_timeout_seconds=30,
+            wait_poll_seconds=5,
+        )
+        with mock.patch("scripts.runpod_provision._resolve_api_key", return_value="SECRET"), mock.patch(
+            "scripts.runpod_provision._gpu_lowest_price_stock_status",
+            return_value={"stock_status": "IN_STOCK", "available_gpu_counts": [1]},
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                cmd_provision(args)
+        self.assertIn("not currently advertised as available", str(ctx.exception))
 
     def test_provision_preset_env_injection_is_opt_in_by_default(self):
         parser = build_parser()
@@ -271,6 +363,9 @@ class RunpodApiHelperTests(unittest.TestCase):
             wait_poll_seconds=5,
         )
         with mock.patch("scripts.runpod_provision._resolve_api_key", return_value="SECRET"), mock.patch(
+            "scripts.runpod_provision._gpu_lowest_price_stock_status",
+            return_value={"stock_status": "IN_STOCK", "available_gpu_counts": [1]},
+        ), mock.patch(
             "scripts.runpod_provision._list_templates",
             return_value=[{"id": "tpl1", "name": "chess-bot-training", "imageName": "ghcr.io/x/y:latest"}],
         ), mock.patch(

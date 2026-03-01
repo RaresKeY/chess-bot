@@ -1242,6 +1242,89 @@ def _sparsity_l1_penalty(model: nn.Module, include_bias: bool = False) -> torch.
     return total_abs / float(total_count)
 
 
+def _iter_structured_2to4_parameters(model: nn.Module):
+    base = _unwrap_model(model)
+    for module_name, module in base.named_modules():
+        if isinstance(module, nn.Linear):
+            weight = getattr(module, "weight", None)
+            if weight is None or not isinstance(weight, torch.Tensor):
+                continue
+            if not bool(weight.requires_grad):
+                continue
+            name = f"{module_name}.weight" if module_name else "weight"
+            yield name, weight
+
+
+def _structured_2to4_mask_for_weight(weight: torch.Tensor) -> torch.Tensor:
+    if weight.dim() != 2:
+        raise ValueError("structured_2to4 mask expects a 2D weight tensor")
+    rows = int(weight.size(0))
+    cols = int(weight.size(1))
+    flat = weight.detach().view(rows, cols)
+    mask = torch.ones_like(flat)
+    usable_cols = (cols // 4) * 4
+    if usable_cols <= 0:
+        return mask.view_as(weight)
+    grouped = flat[:, :usable_cols].abs().view(rows, usable_cols // 4, 4)
+    keep_idx = torch.topk(grouped, k=2, dim=2, largest=True, sorted=False).indices
+    keep_mask = torch.zeros_like(grouped, dtype=torch.bool)
+    keep_mask.scatter_(2, keep_idx, True)
+    mask[:, :usable_cols] = keep_mask.reshape(rows, usable_cols).to(mask.dtype)
+    return mask.view_as(weight)
+
+
+def _build_structured_2to4_masks(model: nn.Module) -> Dict[str, torch.Tensor]:
+    masks: Dict[str, torch.Tensor] = {}
+    for name, weight in _iter_structured_2to4_parameters(model):
+        masks[str(name)] = _structured_2to4_mask_for_weight(weight)
+    return masks
+
+
+@torch.no_grad()
+def _apply_structured_2to4_masks(model: nn.Module, masks: Dict[str, torch.Tensor]) -> None:
+    if not masks:
+        return
+    params = dict(_unwrap_model(model).named_parameters())
+    for name, mask in masks.items():
+        param = params.get(name)
+        if param is None:
+            continue
+        param.mul_(mask.to(device=param.device, dtype=param.dtype))
+
+
+def _compute_structured_2to4_stats(model: nn.Module, masks: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    params = dict(_unwrap_model(model).named_parameters())
+    eligible = 0
+    masked_zero = 0
+    group_total = 0
+    group_compliant = 0
+    with torch.no_grad():
+        for name, mask in masks.items():
+            param = params.get(name)
+            if param is None or param.dim() != 2:
+                continue
+            tensor = param.detach()
+            rows = int(tensor.size(0))
+            cols = int(tensor.size(1))
+            eligible += int(tensor.numel())
+            masked_zero += int((tensor == 0).sum().item())
+            usable_cols = (cols // 4) * 4
+            if usable_cols <= 0:
+                continue
+            grouped = tensor[:, :usable_cols].view(rows, usable_cols // 4, 4)
+            nz_counts = (grouped != 0).sum(dim=2)
+            group_total += int(nz_counts.numel())
+            group_compliant += int((nz_counts == 2).sum().item())
+    return {
+        "structured_2to4_eligible_params": int(eligible),
+        "structured_2to4_zero_params": int(masked_zero),
+        "structured_2to4_zero_fraction": (float(masked_zero) / float(eligible)) if eligible > 0 else 0.0,
+        "structured_2to4_group_total": int(group_total),
+        "structured_2to4_group_compliant": int(group_compliant),
+        "structured_2to4_group_compliance": (float(group_compliant) / float(group_total)) if group_total > 0 else 0.0,
+    }
+
+
 def _compute_model_sparsity_stats(model: nn.Module, include_bias: bool = False) -> Dict[str, float]:
     zero = 0
     total = 0
@@ -2380,7 +2463,6 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         train_model,
         include_bias=bool(sparsity_include_bias),
     )
-
     artifact = {
         "artifact_format_version": 2,
         "model_family": "next_move_lstm",
@@ -2541,10 +2623,12 @@ def train_next_move_model_from_jsonl_paths(
     sparsity_include_bias: bool = False,
 ):
     sparsity_mode_norm = str(sparsity_mode or "off").strip().lower()
-    if sparsity_mode_norm not in {"off", "l1"}:
+    if sparsity_mode_norm not in {"off", "l1", "structured_2to4"}:
         raise ValueError(f"Unsupported sparsity_mode: {sparsity_mode}")
     sparsity_l1_lambda_value = max(0.0, float(sparsity_l1_lambda))
-    sparsity_enabled = bool(sparsity_mode_norm != "off" and sparsity_l1_lambda_value > 0.0)
+    sparsity_l1_enabled = bool(sparsity_mode_norm == "l1" and sparsity_l1_lambda_value > 0.0)
+    sparsity_structured_enabled = bool(sparsity_mode_norm == "structured_2to4")
+    sparsity_enabled = bool(sparsity_l1_enabled or sparsity_structured_enabled)
     if int(rollout_horizon) > 1:
         if sparsity_enabled:
             raise ValueError("sparsity_mode is currently supported only for rollout_horizon=1")
@@ -2928,6 +3012,10 @@ def train_next_move_model_from_jsonl_paths(
     best_state_dict = None
     best_epoch = None
     best_val_loss = None
+    structured_2to4_masks: Dict[str, torch.Tensor] = {}
+    if sparsity_structured_enabled:
+        structured_2to4_masks = _build_structured_2to4_masks(train_model)
+        _apply_structured_2to4_masks(train_model, structured_2to4_masks)
     best_top1 = None
     early_stop_metric_name = str(early_stopping_metric or "val_loss").strip().lower()
     if early_stop_metric_name not in ("val_loss", "top1"):
@@ -3097,6 +3185,9 @@ def train_next_move_model_from_jsonl_paths(
                     "enabled": bool(sparsity_enabled),
                     "l1_lambda": float(sparsity_l1_lambda_value),
                     "include_bias": bool(sparsity_include_bias),
+                    "l1_enabled": bool(sparsity_l1_enabled),
+                    "structured_2to4_enabled": bool(sparsity_structured_enabled),
+                    "structured_2to4_mask_count": int(len(structured_2to4_masks)),
                 },
             },
         }
@@ -3145,7 +3236,7 @@ def train_next_move_model_from_jsonl_paths(
                 )
                 loss = (losses * weights).mean()
                 l1_penalty_value = 0.0
-                if sparsity_enabled:
+                if sparsity_l1_enabled:
                     l1_penalty = _sparsity_l1_penalty(
                         train_model,
                         include_bias=bool(sparsity_include_bias),
@@ -3157,6 +3248,8 @@ def train_next_move_model_from_jsonl_paths(
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            if sparsity_structured_enabled:
+                _apply_structured_2to4_masks(train_model, structured_2to4_masks)
 
             bs = labels.size(0)
             seen += bs
@@ -3386,6 +3479,7 @@ def train_next_move_model_from_jsonl_paths(
         include_bias=bool(sparsity_include_bias),
     )
 
+    structured_2to4_stats = _compute_structured_2to4_stats(train_model, structured_2to4_masks)
     artifact = {
         "artifact_format_version": 2,
         "model_family": "next_move_lstm",
@@ -3435,7 +3529,11 @@ def train_next_move_model_from_jsonl_paths(
                 "enabled": bool(sparsity_enabled),
                 "l1_lambda": float(sparsity_l1_lambda_value),
                 "include_bias": bool(sparsity_include_bias),
+                "l1_enabled": bool(sparsity_l1_enabled),
+                "structured_2to4_enabled": bool(sparsity_structured_enabled),
+                "structured_2to4_mask_count": int(len(structured_2to4_masks)),
                 **sparsity_stats,
+                **structured_2to4_stats,
             },
         },
     }
@@ -3469,7 +3567,11 @@ def train_next_move_model_from_jsonl_paths(
             "enabled": bool(sparsity_enabled),
             "l1_lambda": float(sparsity_l1_lambda_value),
             "include_bias": bool(sparsity_include_bias),
+            "l1_enabled": bool(sparsity_l1_enabled),
+            "structured_2to4_enabled": bool(sparsity_structured_enabled),
+            "structured_2to4_mask_count": int(len(structured_2to4_masks)),
             **sparsity_stats,
+            **structured_2to4_stats,
         },
     }
     if schema_kind == "game":

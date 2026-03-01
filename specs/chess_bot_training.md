@@ -3,6 +3,11 @@
 ## Responsibility
 Train a baseline winner-aware next-move predictor from splice samples and save a reusable model artifact.
 
+This component also coexists with a side-specific one-shot sequence trainer for dual white/black artifacts:
+- CLI: `scripts/train_dual_sequence.py`
+- Core: `src/chessbot/training_dual_sequence.py`
+- Model: `NextMoveSeqLSTM` in `src/chessbot/model.py`
+
 ## Dataset Inputs
 - CLI accepts one or more `--train` JSONL paths and one or more `--val` JSONL paths (repeatable flags)
 - Training auto-detects input schema per path set:
@@ -72,10 +77,16 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
     - default CUDA autocast dtype
     - requested/effective AMP dtype
     - TF32 requested + backend before/after flags
-  - sparsity regularization controls:
-    - `--sparsity-mode {off,l1}` (`l1` enables L1 regularization on trainable weights)
+  - sparsity controls:
+    - `--sparsity-mode {off,l1,structured_2to4}`
+      - `l1` enables L1 regularization on trainable weights
+      - `structured_2to4` enforces persistent 2:4 masks on linear-layer weights (post-step mask reapply)
     - `--sparsity-l1-lambda` (L1 multiplier; `0` disables even when mode is set)
     - `--sparsity-include-bias/--no-sparsity-include-bias` (include bias terms in sparsity tracking/penalty)
+  - structured sparsity telemetry/runtime metadata now includes:
+    - `structured_2to4_enabled`
+    - `structured_2to4_mask_count`
+    - group-compliance stats (`structured_2to4_group_total`, `structured_2to4_group_compliant`, `structured_2to4_group_compliance`)
 - Model/training controls:
   - `--rollout-horizon` (future plies predicted during training objective; `1` preserves baseline behavior)
   - `--closeness-horizon` (validation continuation-closeness horizon; clamped to rollout horizon)
@@ -143,7 +154,7 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
 - model path
 - runtime request fields (`device_requested`, `num_layers`, `dropout`, `num_workers`, `pin_memory`, `amp`, `restore_best`, `verbose`, `progress`)
 - `precision_runtime` summary (`torch_float32_matmul_precision`, `autocast_gpu_dtype_default`, AMP requested/effective dtype, TF32 backend flag state)
-- sparsity request/runtime fields (`sparsity_mode`, `sparsity_l1_lambda`, `sparsity_include_bias`, `sparsity_runtime`)
+- sparsity request/runtime fields (`sparsity_mode`, `sparsity_l1_lambda`, `sparsity_include_bias`, `sparsity_runtime`) including `l1_enabled` and structured-2:4 runtime counters/compliance metrics
 - requested `phase_weights`
 - feature-toggle and embedding-dim settings for phase/side-to-move head inputs
 - LR scheduler request fields and runtime scheduler summary (including final LR)
@@ -177,12 +188,49 @@ Train a baseline winner-aware next-move predictor from splice samples and save a
   - tiny game-dataset training path that confirms cache-backed data loading mode is used when cache is present
   - per-split cache-load reason reporting (`cache_load_reason_by_split`) in dataset metrics/progress setup events for game datasets (hit vs fallback reason)
   - multistep file-backed training path emits rollout metrics/progress fields and multistep runtime metadata
+  - structured sparsity regression checks:
+    - 2:4 mask semantics (two kept weights per 4-wide group + tail-column handling)
+    - structured mode runtime metadata/stats emitted in artifact + dataset info
+    - guardrail: `structured_2to4` rejects `rollout_horizon > 1`
+    - guardrail: invalid `sparsity_mode` values raise `ValueError`
+    - `l1` mode with `sparsity_l1_lambda=0.0` stays disabled (`enabled=false`, `l1_enabled=false`)
   - distributed-path training regression checks with mocked DDP/sampler:
     - non-primary rank suppresses progress callback events
     - primary rank emits progress callback events and distributed metadata
+- `tests/test_training_precision_controls.py` covers:
+  - training CLI help exposes precision/sparsity controls including `structured_2to4`
+  - autocast dtype resolver behavior (`disabled -> None`, `fp16` mapping, invalid mode error)
 - `tests/test_train_baseline_telemetry.py` covers distributed-context parsing helpers for `auto/off/on` CLI mode behavior
 - `tests/test_train_baseline_checkpoint_flags.py` verifies distributed CLI flags are exposed by `scripts/train_baseline.py`
 - `tests/test_game_dataset_architecture.py` covers:
   - compact game-dataset builder CLI output schema (`moves`, no duplicated splice rows)
   - single-step training from compact game-level JSONL via runtime splicing
   - multistep training from compact game-level JSONL via runtime splicing
+
+## Dual Sequence Training (current)
+Separate from baseline next-move training, dual sequence training provides side-specific one-shot future-sequence models:
+
+- Input schemas:
+  - spliced JSONL rows (`context`, `target`, `winner_side`)
+  - game JSONL rows (`moves`/`moves_uci`, `winner_side`) with runtime splice indexing
+- Winner filtering:
+  - white model keeps only `winner_side == W`
+  - black model keeps only `winner_side == B`
+  - draw/unknown rows are dropped
+- Objective:
+  - one-shot sequence logits `[B,H,V]` with masked per-ply CE loss
+  - sequence metrics reported each epoch: `ply_match_rate`, `full_seq_exact_hit_rate`
+  - optional step-loss decay (`step_loss_decay`)
+  - optional endgame mate-in-x positive weighting (`mate_bias`, `mate_in_x`, `mate_weight`)
+- Artifacts:
+  - `artifacts/model_white.pt`
+  - `artifacts/model_black.pt`
+  - `artifacts/train_metrics_dual_sequence.json`
+- Artifact metadata:
+  - `model_family=dual_side_sequence_lstm`
+  - `training_objective=one_shot_sequence_match`
+  - `model_side` (`white` or `black`)
+
+Dual sequence regression coverage:
+- `tests/test_dual_sequence_training.py`
+- `tests/test_train_dual_sequence_cli.py`

@@ -85,6 +85,79 @@ class NextMoveLSTM(nn.Module):
         return self.classifier(x)
 
 
+class NextMoveSeqLSTM(nn.Module):
+    """One-shot horizon sequence predictor from a move-context prefix."""
+
+    def __init__(
+        self,
+        vocab_size: int,
+        horizon: int = 8,
+        embed_dim: int = 128,
+        hidden_dim: int = 256,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+        side_to_move_embed_dim: int = 4,
+        use_side_to_move: bool = True,
+    ) -> None:
+        super().__init__()
+        self.horizon = int(max(1, horizon))
+        self.use_side_to_move = bool(use_side_to_move)
+        dropout = float(max(0.0, dropout))
+        lstm_dropout = dropout if int(num_layers) > 1 else 0.0
+
+        self.token_embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.embed_dropout = nn.Dropout(dropout)
+        self.encoder = nn.LSTM(
+            embed_dim,
+            hidden_dim,
+            num_layers=int(num_layers),
+            dropout=lstm_dropout,
+            batch_first=True,
+        )
+
+        self.step_embed = nn.Embedding(self.horizon, embed_dim)
+        self.side_to_move_embed = nn.Embedding(2, side_to_move_embed_dim) if self.use_side_to_move else None
+        decoder_in = embed_dim + (side_to_move_embed_dim if self.use_side_to_move else 0)
+        self.decoder = nn.LSTM(
+            decoder_in,
+            hidden_dim,
+            num_layers=int(num_layers),
+            dropout=lstm_dropout,
+            batch_first=True,
+        )
+        self.head_dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_dim, vocab_size)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        lengths: torch.Tensor,
+        side_to_move_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        emb = self.embed_dropout(self.token_embed(tokens))
+        packed = nn.utils.rnn.pack_padded_sequence(
+            emb,
+            lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False,
+        )
+        _, (h, c) = self.encoder(packed)
+
+        batch_size = int(tokens.shape[0])
+        step_ids = torch.arange(self.horizon, device=tokens.device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+        dec_inputs = self.step_embed(step_ids)
+        if self.use_side_to_move:
+            if side_to_move_ids is None:
+                side_to_move_ids = (lengths.to(tokens.device) % 2).long()
+            side_feat = self.side_to_move_embed(side_to_move_ids.clamp(min=0, max=1)).unsqueeze(1)
+            side_feat = side_feat.expand(batch_size, self.horizon, -1)
+            dec_inputs = torch.cat([dec_inputs, side_feat], dim=-1)
+
+        dec_out, _ = self.decoder(dec_inputs, (h, c))
+        dec_out = self.head_dropout(dec_out)
+        return self.classifier(dec_out)
+
+
 def build_vocab(samples: List[Dict]) -> Dict[str, int]:
     vocab = {PAD: 0, UNK: 1}
     for sample in samples:

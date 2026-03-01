@@ -540,9 +540,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--sparsity-mode",
-        choices=["off", "l1"],
+        choices=["off", "l1", "structured_2to4"],
         default="off",
-        help="Optional sparsity regularization mode (l1 adds L1 penalty during training).",
+        help="Optional sparsity mode: l1 adds L1 loss penalty; structured_2to4 enforces 2:4 zero masks on linear layers.",
     )
     parser.add_argument(
         "--sparsity-l1-lambda",

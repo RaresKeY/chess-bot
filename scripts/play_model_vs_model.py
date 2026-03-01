@@ -2,7 +2,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import chess
 import chess.pgn
@@ -13,10 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.chessbot.inference import best_legal_from_topk
+from src.chessbot.inference import (
+    artifact_rollout_horizon,
+    artifact_training_objective,
+    infer_first_move_auto_from_artifact_on_device,
+    infer_first_move_dual_artifacts_on_device,
+)
 from src.chessbot.io_utils import ensure_parent, write_json
-from src.chessbot.model import NextMoveLSTM, encode_tokens, side_to_move_id_from_context_len, winner_to_id
-from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_id
 
 
 def _find_latest_model(artifacts_dir: Path) -> Path:
@@ -32,6 +35,13 @@ def _resolve_model_path(text: str) -> Path:
     return Path(text).resolve()
 
 
+def _resolve_optional_model_path(text: str) -> Optional[Path]:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    return _resolve_model_path(value)
+
+
 def _resolve_device(device_arg: str) -> str:
     if device_arg == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -39,89 +49,90 @@ def _resolve_device(device_arg: str) -> str:
 
 
 class LoadedMoveModelRuntime:
-    def __init__(self, model_path: Path, *, device_str: str, alias: str):
-        self.model_path = model_path
+    def __init__(
+        self,
+        *,
+        alias: str,
+        device_str: str,
+        model_path: Optional[Path],
+        model_white_path: Optional[Path],
+        model_black_path: Optional[Path],
+    ):
         self.alias = alias
         self.device = torch.device(device_str)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
 
-        artifact = torch.load(str(model_path), map_location="cpu")
-        self.artifact = artifact
-        runtime_meta = artifact.get("runtime") or {}
-        self.training_objective = str(runtime_meta.get("training_objective") or artifact.get("training_objective") or "single_step_next_move")
-        try:
-            self.artifact_rollout_horizon = max(0, int(runtime_meta.get("rollout_horizon") or 0))
-        except Exception:
+        self.model_path = model_path
+        self.model_white_path = model_white_path
+        self.model_black_path = model_black_path
+
+        if model_white_path is not None and model_black_path is not None:
+            self.mode = "dual_pair"
+            self.white_artifact = torch.load(str(model_white_path), map_location="cpu")
+            self.black_artifact = torch.load(str(model_black_path), map_location="cpu")
+            self.single_artifact = None
+            self.training_objective = "dual_pair_side_routed"
             self.artifact_rollout_horizon = 0
-        self.policy_mode_default = "rollout" if self.training_objective.startswith("multistep_") else "next"
-        self.vocab = artifact["vocab"]
-        self.inv_vocab = {idx: tok for tok, idx in self.vocab.items()}
-        cfg = artifact["config"]
-        self.model = NextMoveLSTM(vocab_size=len(self.vocab), **cfg).to(self.device)
-        self.model.load_state_dict(artifact["state_dict"])
-        self.model.eval()
+            self.policy_mode_default = "sequence"
+            return
+
+        if model_path is not None:
+            self.mode = "single"
+            self.single_artifact = torch.load(str(model_path), map_location="cpu")
+            self.white_artifact = None
+            self.black_artifact = None
+            self.training_objective = artifact_training_objective(self.single_artifact)
+            self.artifact_rollout_horizon = artifact_rollout_horizon(self.single_artifact)
+            self.policy_mode_default = "rollout" if self.training_objective.startswith("multistep_") else "next"
+            return
+
+        raise RuntimeError(
+            f"Participant {alias} must provide --model or both --model-<x>-white and --model-<x>-black"
+        )
 
     def infer(self, context: List[str], winner_side: str, topk: int) -> Dict:
-        original_context_len = len(context)
-        context_ids = encode_tokens(context, self.vocab)
-        if not context_ids:
-            context_ids = [self.vocab.get("<UNK>", 1)]
-        tokens = torch.tensor([context_ids], dtype=torch.long, device=self.device)
-        lengths = torch.tensor([len(context_ids)], dtype=torch.long, device=self.device)
-        winners = torch.tensor([winner_to_id(winner_side)], dtype=torch.long, device=self.device)
-        phase_name = str(classify_context_phase(context).get("phase", PHASE_UNKNOWN))
-        phases = torch.tensor([phase_to_id(phase_name)], dtype=torch.long, device=self.device)
-        side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long, device=self.device)
-        with torch.no_grad():
-            logits = self.model(tokens, lengths, winners, phases, side_to_moves)
-            k = max(1, min(int(topk), int(logits.shape[-1])))
-            pred_ids = logits.topk(k, dim=1).indices[0].detach().cpu().tolist()
-        topk_tokens = [self.inv_vocab.get(i, "") for i in pred_ids]
+        if self.mode == "dual_pair":
+            out = infer_first_move_dual_artifacts_on_device(
+                white_artifact=self.white_artifact,
+                black_artifact=self.black_artifact,
+                context=context,
+                topk=topk,
+                device_str=str(self.device),
+            )
+            topk_tokens = list(out.get("topk_step1") or [])
+            return {
+                "topk": topk_tokens,
+                "best_legal": str(out.get("move_uci") or out.get("best_legal") or ""),
+                "predicted_uci": str(topk_tokens[0] if topk_tokens else ""),
+                "fallback": bool(out.get("fallback", False)),
+                "policy_mode_used": str(out.get("policy_mode_used") or "sequence"),
+                "device": str(self.device),
+            }
+
+        out = infer_first_move_auto_from_artifact_on_device(
+            artifact=self.single_artifact,
+            context=context,
+            winner_side=winner_side,
+            topk=topk,
+            device_str=str(self.device),
+            policy_mode="auto",
+            rollout_plies=0,
+            rollout_fallback_legal=True,
+        )
+        topk_tokens = list(out.get("topk") or out.get("topk_step1") or [])
+        if not topk_tokens:
+            step_debug = list(out.get("step_debug") or [])
+            if step_debug:
+                topk_tokens = list(step_debug[0].get("topk") or [])
+        predicted_uci = str(out.get("predicted_uci") or (topk_tokens[0] if topk_tokens else ""))
         return {
             "topk": topk_tokens,
-            "best_legal": best_legal_from_topk(topk_tokens, context),
+            "best_legal": str(out.get("move_uci") or out.get("best_legal") or out.get("first_move") or ""),
+            "predicted_uci": predicted_uci,
+            "fallback": bool(out.get("fallback", False)),
+            "policy_mode_used": str(out.get("policy_mode_used") or self.policy_mode_default),
             "device": str(self.device),
-        }
-
-    def infer_rollout(self, context: List[str], winner_side: str, topk: int, rollout_plies: int, fallback_legal: bool = True) -> Dict:
-        board = chess.Board()
-        for uci in context:
-            mv = chess.Move.from_uci(uci)
-            if mv not in board.legal_moves:
-                raise ValueError(f"Illegal context move: {uci}")
-            board.push(mv)
-        local_context = list(context)
-        rollout: List[str] = []
-        step_debug: List[Dict] = []
-        for _ in range(max(0, int(rollout_plies))):
-            out = self.infer(local_context, winner_side=winner_side, topk=topk)
-            topk_tokens = out.get("topk", [])
-            legal = out.get("best_legal", "")
-            chosen = legal
-            fallback_used = False
-            if not chosen and fallback_legal and not board.is_game_over(claim_draw=True):
-                fallback_mv = next(iter(board.legal_moves), None)
-                if fallback_mv is not None:
-                    chosen = fallback_mv.uci()
-                    fallback_used = True
-            step_debug.append({"topk": topk_tokens, "best_legal": legal, "chosen": chosen, "fallback": fallback_used})
-            if not chosen:
-                break
-            mv = chess.Move.from_uci(chosen)
-            if mv not in board.legal_moves:
-                break
-            board.push(mv)
-            local_context.append(chosen)
-            rollout.append(chosen)
-            if board.is_game_over(claim_draw=True):
-                break
-        return {
-            "rollout": rollout,
-            "first_move": rollout[0] if rollout else "",
-            "steps_generated": len(rollout),
-            "fallback_moves": sum(1 for x in step_debug if x.get("fallback")),
-            "step_debug": step_debug,
         }
 
 
@@ -132,22 +143,11 @@ def _model_move(
     topk: int,
     board: chess.Board,
 ) -> Dict:
-    if runtime.policy_mode_default == "rollout":
-        rollout_len = max(1, runtime.artifact_rollout_horizon or 1)
-        rout = runtime.infer_rollout(context=context, winner_side=winner_side, topk=topk, rollout_plies=rollout_len, fallback_legal=True)
-        first_move = str(rout.get("first_move") or "")
-        step_debug = rout.get("step_debug") or []
-        first_debug = step_debug[0] if step_debug else {}
-        topk_tokens = list(first_debug.get("topk") or [])
-        predicted_uci = topk_tokens[0] if topk_tokens else ""
-        uci = first_move
-        fallback_flag = bool(first_debug.get("fallback"))
-    else:
-        out = runtime.infer(context=context, winner_side=winner_side, topk=topk)
-        topk_tokens = out.get("topk", [])
-        predicted_uci = topk_tokens[0] if topk_tokens else ""
-        uci = out.get("best_legal", "")
-        fallback_flag = False
+    out = runtime.infer(context=context, winner_side=winner_side, topk=topk)
+    topk_tokens = list(out.get("topk") or [])
+    predicted_uci = str(out.get("predicted_uci") or (topk_tokens[0] if topk_tokens else ""))
+    uci = str(out.get("best_legal") or "")
+    fallback_flag = bool(out.get("fallback", False))
     if uci:
         try:
             mv = chess.Move.from_uci(uci)
@@ -202,8 +202,12 @@ def _render_progress(i: int, total: int, wins: int, draws: int, losses: int) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Play head-to-head matches between two trained model artifacts")
-    parser.add_argument("--model-a", required=True, help="Model A artifact path or 'latest'")
-    parser.add_argument("--model-b", required=True, help="Model B artifact path or 'latest'")
+    parser.add_argument("--model-a", default="", help="Model A artifact path or 'latest'")
+    parser.add_argument("--model-b", default="", help="Model B artifact path or 'latest'")
+    parser.add_argument("--model-a-white", default="", help="Optional white-side artifact path for model A")
+    parser.add_argument("--model-a-black", default="", help="Optional black-side artifact path for model A")
+    parser.add_argument("--model-b-white", default="", help="Optional white-side artifact path for model B")
+    parser.add_argument("--model-b-black", default="", help="Optional black-side artifact path for model B")
     parser.add_argument("--alias-a", default="model_a", help="Display name for model A")
     parser.add_argument("--alias-b", default="model_b", help="Display name for model B")
     parser.add_argument("--games", type=int, default=20, help="Number of games")
@@ -221,8 +225,13 @@ def main() -> None:
     parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
-    model_a_path = _resolve_model_path(args.model_a)
-    model_b_path = _resolve_model_path(args.model_b)
+    model_a_path = _resolve_optional_model_path(args.model_a)
+    model_b_path = _resolve_optional_model_path(args.model_b)
+    model_a_white_path = _resolve_optional_model_path(args.model_a_white)
+    model_a_black_path = _resolve_optional_model_path(args.model_a_black)
+    model_b_white_path = _resolve_optional_model_path(args.model_b_white)
+    model_b_black_path = _resolve_optional_model_path(args.model_b_black)
+
     device_a = _resolve_device(args.device_a)
     device_b = _resolve_device(args.device_b)
 
@@ -230,8 +239,12 @@ def main() -> None:
         print(
             {
                 "match_start": {
-                    "model_a": str(model_a_path),
-                    "model_b": str(model_b_path),
+                    "model_a": str(model_a_path or ""),
+                    "model_b": str(model_b_path or ""),
+                    "model_a_white": str(model_a_white_path or ""),
+                    "model_a_black": str(model_a_black_path or ""),
+                    "model_b_white": str(model_b_white_path or ""),
+                    "model_b_black": str(model_b_black_path or ""),
                     "alias_a": args.alias_a,
                     "alias_b": args.alias_b,
                     "games": args.games,
@@ -247,8 +260,20 @@ def main() -> None:
             }
         )
 
-    runtime_a = LoadedMoveModelRuntime(model_a_path, device_str=device_a, alias=args.alias_a)
-    runtime_b = LoadedMoveModelRuntime(model_b_path, device_str=device_b, alias=args.alias_b)
+    runtime_a = LoadedMoveModelRuntime(
+        alias=args.alias_a,
+        device_str=device_a,
+        model_path=model_a_path,
+        model_white_path=model_a_white_path,
+        model_black_path=model_a_black_path,
+    )
+    runtime_b = LoadedMoveModelRuntime(
+        alias=args.alias_b,
+        device_str=device_b,
+        model_path=model_b_path,
+        model_white_path=model_b_white_path,
+        model_black_path=model_b_black_path,
+    )
     if args.verbose:
         print(
             {
@@ -257,11 +282,13 @@ def main() -> None:
                         "training_objective": runtime_a.training_objective,
                         "policy_mode_default": runtime_a.policy_mode_default,
                         "artifact_rollout_horizon": runtime_a.artifact_rollout_horizon,
+                        "mode": runtime_a.mode,
                     },
                     "model_b": {
                         "training_objective": runtime_b.training_objective,
                         "policy_mode_default": runtime_b.policy_mode_default,
                         "artifact_rollout_horizon": runtime_b.artifact_rollout_horizon,
+                        "mode": runtime_b.mode,
                     },
                 }
             }
@@ -285,8 +312,12 @@ def main() -> None:
         b_color = chess.BLACK if a_color == chess.WHITE else chess.WHITE
         game.headers["White"] = args.alias_a if a_color == chess.WHITE else args.alias_b
         game.headers["Black"] = args.alias_b if a_color == chess.WHITE else args.alias_a
-        game.headers["ModelA"] = str(model_a_path)
-        game.headers["ModelB"] = str(model_b_path)
+        game.headers["ModelA"] = str(model_a_path or "")
+        game.headers["ModelB"] = str(model_b_path or "")
+        game.headers["ModelAWhite"] = str(model_a_white_path or "")
+        game.headers["ModelABlack"] = str(model_a_black_path or "")
+        game.headers["ModelBWhite"] = str(model_b_white_path or "")
+        game.headers["ModelBBlack"] = str(model_b_black_path or "")
         node = game
 
         context: List[str] = []
@@ -349,8 +380,12 @@ def main() -> None:
             print({"game_done": rec})
 
     summary = {
-        "model_a_path": str(model_a_path),
-        "model_b_path": str(model_b_path),
+        "model_a_path": str(model_a_path or ""),
+        "model_b_path": str(model_b_path or ""),
+        "model_a_white_path": str(model_a_white_path or ""),
+        "model_a_black_path": str(model_a_black_path or ""),
+        "model_b_white_path": str(model_b_white_path or ""),
+        "model_b_black_path": str(model_b_black_path or ""),
         "alias_a": args.alias_a,
         "alias_b": args.alias_b,
         "games": args.games,
@@ -377,6 +412,8 @@ def main() -> None:
             "policy_mode_b": runtime_b.policy_mode_default,
             "artifact_rollout_horizon_a": runtime_a.artifact_rollout_horizon,
             "artifact_rollout_horizon_b": runtime_b.artifact_rollout_horizon,
+            "model_a_mode": runtime_a.mode,
+            "model_b_mode": runtime_b.mode,
         },
         "per_game": per_game,
     }

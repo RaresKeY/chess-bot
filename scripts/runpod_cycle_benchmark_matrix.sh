@@ -62,7 +62,7 @@ FLOW_DISTRIBUTED_BACKEND="${RUNPOD_BENCH_DISTRIBUTED_BACKEND:-nccl}"
 FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-auto}"
 FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED=""
 FLOW_MAX_TOTAL_ROWS="${RUNPOD_BENCH_MAX_TOTAL_ROWS:-0}"
-FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity}"
+FLOW_TRIALS_RAW="${RUNPOD_BENCH_TRIALS:-fp32,tf32,fp16,bf16,sparsity,bf16_2to4}"
 FLOW_SPARSITY_L1_LAMBDA="${RUNPOD_BENCH_SPARSITY_L1_LAMBDA:-1e-6}"
 FLOW_SPARSITY_L1_LAMBDAS_RAW="${RUNPOD_BENCH_SPARSITY_L1_LAMBDAS:-}"
 FLOW_TERMINATE_POD="${RUNPOD_BENCH_TERMINATE_POD:-0}"
@@ -654,6 +654,12 @@ for raw_trial in "${FLOW_TRIALS[@]}"; do
       ;;
     bf16_sparse|sparsity)
       train_extra_args+=" --amp --amp-dtype bf16 --tf32 on --sparsity-mode l1 --sparsity-l1-lambda ${trial_sparse_lambda}"
+      ;;
+    fp16_2to4)
+      train_extra_args+=" --amp --amp-dtype fp16 --tf32 on --sparsity-mode structured_2to4"
+      ;;
+    bf16_2to4)
+      train_extra_args+=" --amp --amp-dtype bf16 --tf32 on --sparsity-mode structured_2to4"
       ;;
     *)
       trial_status="skipped"

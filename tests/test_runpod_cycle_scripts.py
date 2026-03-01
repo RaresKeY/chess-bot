@@ -138,6 +138,7 @@ OUT
             "scripts/runpod_sdk_cycle_full_smoke.sh",
             "scripts/runpod_full_train_easy.sh",
             "scripts/runpod_sdk_component.py",
+            "scripts/container_ensure_openssh.sh",
         ]
         for name in names:
             self.assertTrue(Path(name).is_file(), name)
@@ -173,10 +174,26 @@ OUT
         stop = Path("scripts/runpod_sdk_cycle_stop.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/runpod_sdk_component.py", start)
         self.assertIn("provision", start)
+        self.assertIn('if [[ -n "${IMAGE_NAME}" ]]; then', start)
+        self.assertIn('cmd+=( --image-name "${IMAGE_NAME}" )', start)
+        self.assertIn("sdk_refresh_status_json()", start)
+        self.assertIn("pod-status --pod-id", start)
+        self.assertIn("sdk_mapped_ssh_port()", start)
+        self.assertIn('if [[ "${SSH_READY_REQUIRED}" == "1" ]]; then', start)
+        self.assertIn("runpod_cycle_require_cmd ssh", start)
         self.assertIn("runpod_sdk_cycle_start.sh", start)
         self.assertIn("scripts/runpod_sdk_component.py", stop)
         self.assertIn("pod-stop", stop)
         self.assertIn("runpod_sdk_cycle_stop.sh", stop)
+
+    def test_sdk_component_script_help_runs_from_repo_root(self):
+        proc = subprocess.run(
+            ["python3", "scripts/runpod_sdk_component.py", "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("RunPod SDK component", proc.stdout)
 
     def test_stop_script_uses_graphql_pod_stop(self):
         text = Path("scripts/runpod_cycle_stop.sh").read_text(encoding="utf-8")
@@ -222,6 +239,40 @@ OUT
                 env=env,
             )
             self.assertEqual(proc.stdout, "dotenv-token-999")
+
+    def test_common_ssh_endpoint_falls_back_to_runtime_ports(self):
+        with tempfile.TemporaryDirectory() as td:
+            pod_json = Path(td) / "provision.json"
+            pod_json.write_text(
+                json.dumps(
+                    {
+                        "pod_status": {
+                            "runtime": {
+                                "ports": [
+                                    {"ip": "100.65.0.2", "isIpPublic": False, "privatePort": 8000, "publicPort": 50000},
+                                    {"ip": "203.0.113.10", "isIpPublic": True, "privatePort": 22, "publicPort": 40321},
+                                ]
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-lc",
+                    f"source scripts/runpod_cycle_common.sh && "
+                    f"host=\"$(runpod_cycle_ssh_host '{pod_json}')\" && "
+                    f"port=\"$(runpod_cycle_ssh_port '{pod_json}')\" && "
+                    f"printf '%s:%s' \"$host\" \"$port\"",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.stdout, "203.0.113.10:40321")
 
     def test_cycle_ssh_scripts_use_batch_mode_and_connect_timeout(self):
         for name in [
@@ -310,7 +361,7 @@ OUT
     def test_benchmark_matrix_script_exists_and_covers_precision_trials(self):
         text = Path("scripts/runpod_cycle_benchmark_matrix.sh").read_text(encoding="utf-8")
         self.assertIn("RUNPOD_BENCH_TRIALS", text)
-        self.assertIn("fp32,tf32,fp16,bf16,sparsity", text)
+        self.assertIn("fp32,tf32,fp16,bf16,sparsity,bf16_2to4", text)
         self.assertIn('FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RAW="${RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME:-auto}"', text)
         self.assertIn('FLOW_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED=""', text)
         self.assertIn("resolve_runtime_max_samples_from_cache()", text)
@@ -338,6 +389,9 @@ OUT
         self.assertIn("fp32_sparse", text)
         self.assertIn("fp16_sparse", text)
         self.assertIn("bf16_sparse", text)
+        self.assertIn("fp16_2to4", text)
+        self.assertIn("bf16_2to4", text)
+        self.assertIn("--sparsity-mode structured_2to4", text)
         self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA A40", text)
         self.assertIn("RUNPOD_GPU_COUNT:-2", text)
         self.assertIn("TRAIN_NPROC_PER_NODE", text)
@@ -474,8 +528,18 @@ OUT
             self.assertIn("runpod_cycle_ssh_host_key_checking", text, name)
             self.assertIn("runpod_cycle_ssh_known_hosts_file", text, name)
 
+    def test_push_and_collect_fail_fast_when_ssh_missing(self):
+        push_text = Path("scripts/runpod_cycle_push_dataset.sh").read_text(encoding="utf-8")
+        collect_text = Path("scripts/runpod_cycle_collect.sh").read_text(encoding="utf-8")
+        self.assertIn("runpod_cycle_require_cmd ssh", push_text)
+        self.assertIn("runpod_cycle_require_cmd ssh", collect_text)
+
     def test_managed_temp_key_path_only_no_legacy_key_overrides(self):
         text = Path("scripts/runpod_cycle_common.sh").read_text(encoding="utf-8")
+        self.assertIn("runpod_cycle_try_install_openssh_client()", text)
+        self.assertIn("container bootstrap: installing openssh-client", text)
+        self.assertIn("runpod_cycle_ensure_ssh_binary()", text)
+        self.assertIn("runpod_cycle_ensure_ssh_binary", text)
         self.assertIn('printf \'%s\\n\' "${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}"', text)
         self.assertIn("runpod_cycle_assert_managed_ssh_key_path()", text)
         self.assertIn("refusing personal SSH key path under", text)
@@ -502,6 +566,26 @@ OUT
             )
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("refusing personal SSH key path under", proc.stderr)
+
+    def test_common_ensure_ssh_keypair_uses_preexisting_managed_keypair_without_ssh_keygen(self):
+        with tempfile.TemporaryDirectory() as td:
+            key_base = Path(td) / "managed_key"
+            key_base.write_text("dummy-private\n", encoding="utf-8")
+            key_base.with_suffix(".pub").write_text("dummy-public\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["RUNPOD_TEMP_SSH_KEY_BASE"] = str(key_base)
+            proc = subprocess.run(
+                [
+                    "bash",
+                    "-lc",
+                    "source scripts/runpod_cycle_common.sh && runpod_cycle_ensure_ssh_keypair && printf ok",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.stdout, "ok")
 
     def test_full_train_hf_context_probe_uses_quoted_heredoc(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")

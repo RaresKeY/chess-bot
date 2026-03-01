@@ -31,6 +31,11 @@ Current default-style settings used in recent comparisons:
 - policy mode:
   - multistep artifacts auto-use `rollout`
   - legacy single-step artifacts auto-use `next`
+  - dual side-routed pair uses `sequence` via `--model-*-white` + `--model-*-black`
+
+Participant runtime modes:
+- `single`: participant supplied via `--model-a` / `--model-b`
+- `dual_pair`: participant supplied via both side artifacts (`--model-a-white` + `--model-a-black`, same for B)
 
 ## Important Caveats
 - These matches are often highly deterministic and draw-heavy.
@@ -78,6 +83,16 @@ Each participant entry should include:
 - Type: multistep teacher-forced recursive (`rollout_horizon=4`) trained from compact game-level dataset via runtime splicing
 - Role: first 20-epoch GPU model on new compact game dataset architecture
 
+7. `dualseq10k_white` (March 1, 2026)
+- Artifact: `artifacts/experiments/model_dualseq10k_20260301T072356Z_white.pt`
+- Type: dual side-specific one-shot sequence (`horizon=8`)
+- Role: white-side artifact from explicit 10k/2k spliced training subset
+
+8. `dualseq10k_black` (March 1, 2026)
+- Artifact: `artifacts/experiments/model_dualseq10k_20260301T072356Z_black.pt`
+- Type: dual side-specific one-shot sequence (`horizon=8`)
+- Role: black-side artifact from explicit 10k/2k spliced training subset
+
 ## Add / Remove Procedure (manual spec maintenance)
 
 To add a participant:
@@ -112,12 +127,31 @@ Example command template:
   --no-progress
 ```
 
+Dual-pair vs single template:
+
+```bash
+.venv/bin/python scripts/play_model_vs_model.py \
+  --model-a-white <white_artifact_a> \
+  --model-a-black <black_artifact_a> \
+  --model-b <single_artifact_b> \
+  --alias-a <dual_pair_id> \
+  --alias-b <single_id> \
+  --games 6 \
+  --summary-out artifacts/reports/<dual_pair_id>_vs_<single_id>_g6.json \
+  --pgn-out artifacts/reports/<dual_pair_id>_vs_<single_id>_g6.pgn \
+  --no-progress
+```
+
 ## Recent Verified Comparison Artifacts (examples)
 - `artifacts/reports/game_runtime20k20e_vs_base_g6.json`
 - `artifacts/reports/game_runtime20k20e_vs_combined_g6.json`
 - `artifacts/reports/game_runtime20k20e_vs_cloudfull_g6.json`
 - `artifacts/reports/model_vs_model_subset2layer_vs_8x64_g12.json`
 - `artifacts/reports/rr_cloudfull_vs_base_g6.json`
+- `artifacts/reports/dualseq10k_20260301T072356Z_arena_dual_proper_vs_old10k_g6.json`
+- `artifacts/reports/dualseq10k_20260301T072356Z_arena_dual_swapped_vs_old10k_g6.json`
+- `artifacts/reports/dualseq10k_20260301T072356Z_arena_white_as_white_vs_old_black_g4.json`
+- `artifacts/reports/dualseq10k_20260301T072356Z_arena_old_white_vs_black_as_black_g4.json`
 
 ## Next Method Improvements (not yet canonical)
 1. Use `winner_side='?'` to reduce conditioning bias in rankings
