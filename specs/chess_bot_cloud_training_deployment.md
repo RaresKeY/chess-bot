@@ -76,6 +76,9 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Idle autostop watchdog script included for RunPod-style workflows
 - RunPod API helpers use the shared secrets resolver contract (canonical mapping in `specs/chess_bot_secrets_contract.md`).
 - Container guidance in this workspace: prefer dotenv provider path (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`) over keyring.
+- RunPod cloud-tier deploy policy:
+  - use `SECURE` cloud as the baseline target for cloud deploys.
+  - `COMMUNITY` is not an approved fallback for standard RunPod deploy/training flows in this project policy.
 - RunPod account API keys are treated as high-sensitivity control credentials:
   - send only to RunPod API endpoints
   - pass via `Authorization: Bearer ...` headers (not URL query params)

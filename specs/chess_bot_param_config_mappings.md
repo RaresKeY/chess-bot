@@ -52,7 +52,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 |---|---|---|---|---|
 | `RUNPOD_GPU_TYPE_ID` | `NVIDIA A40` | RunPod GPU type id/display name | Pod GPU selection | `bash scripts/runpod_cycle_benchmark_matrix.sh` |
 | `RUNPOD_GPU_COUNT` | `2` | integer `>=1` | GPU count for pod + default `nproc` | same |
-| `RUNPOD_CLOUD_TYPE` | start-script default (`COMMUNITY`) unless overridden | `SECURE`, `COMMUNITY` | Cloud tier for provisioning | same |
+| `RUNPOD_CLOUD_TYPE` | `SECURE` | `SECURE`, `COMMUNITY` | Cloud tier for provisioning | same |
 | `RUNPOD_INTERRUPTIBLE` | `0` | `0`, `1` | Spot/interruptible request via provision helper | same |
 | `RUNPOD_BENCH_TRIALS` | `fp32,tf32,fp16,bf16,sparsity,bf16_2to4` | comma-separated trial list (`fp32`, `tf32`, `fp16`, `bf16`, `fp32_sparse`, `fp16_sparse`, `bf16_sparse`, `sparsity`, `fp16_2to4`, `bf16_2to4`) | Precision/sparsity trial matrix; `*_sparse`/`sparsity` use L1 penalty, `*_2to4` uses structured 2:4 sparsity mode | same |
 | `RUNPOD_BENCH_EPOCHS` | `1` | integer `>=1` | Epochs per trial | same |
@@ -84,6 +84,10 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_SSH_READY_TIMEOUT_SECONDS` | `360` | integer `>=1` | SSH readiness deadline before start failure | same |
 | `RUNPOD_TERMINATE_ON_SSH_NOT_READY` | `1` | `0`, `1` | Auto-terminate if readiness times out | same |
 
+RunPod cloud-tier deployment policy:
+- deployment specs require `RUNPOD_CLOUD_TYPE=SECURE` as the baseline for RunPod cloud deploys.
+- `RUNPOD_CLOUD_TYPE=COMMUNITY` is not an approved fallback for standard RunPod deploy/training flows in this project policy.
+
 Explicit-GPU provisioning behavior note (current):
 - when `--gpu-type-id` / `RUNPOD_GPU_TYPE_ID` is set, provision now performs a GraphQL stock preflight (`gpuTypes(input:{id})` + `lowestPrice`) and fails fast if the requested `gpu_count` is not listed in `availableGpuCounts` or stock status is out-of-stock/no-capacity.
 - this is an existing-control behavior refinement (no new runtime flag), intended to improve resource-availability determination before REST pod create attempts.
@@ -114,7 +118,7 @@ Direct `runpod_provision.py pod-resume` controls:
 | `--keyring-service` | `runpod` | string | Keyring service for API key lookup | same |
 | `--keyring-username` | `RUNPOD_API_KEY` | string | Keyring username for API key lookup | same |
 | `RUNPOD_SDK_DOTENV_PATH` | unset | dotenv filepath | SDK-component-specific dotenv override for API key fallback | same |
-| `--cloud-type` (`gpu-search`, `provision`) | `COMMUNITY` | `SECURE`, `COMMUNITY` | Cloud tier used for GPU ranking/filtering | same |
+| `--cloud-type` (`gpu-search`, `provision`) | `SECURE` | `SECURE`, `COMMUNITY` | Cloud tier used for GPU ranking/filtering | same |
 | `--min-memory-gb` (`gpu-search`, `provision`) | `24` | integer `>=0` | Minimum VRAM filter for SDK GPU ranking | same |
 | `--max-hourly-price` (`gpu-search`, `provision`) | `0.0` | float `>=0` (`0` disables cap) | Optional max price filter for SDK GPU ranking | same |
 | `--template-id` / `--template-name` (`provision`) | `""` / `chess-bot-training` | template id/name | Template selection for pod create via SDK path | same |
@@ -138,7 +142,7 @@ Direct `runpod_provision.py pod-resume` controls:
 | `RUNPOD_TEMPLATE_NAME` | `chess-bot-training` | template name | Shared fallback template name if SDK-specific override is unset | same |
 | `RUNPOD_GPU_TYPE_ID` | `NVIDIA GeForce RTX 3090` | GPU type id/display name | Explicit GPU selection for SDK provision call | same |
 | `RUNPOD_GPU_COUNT` | `1` | integer `>=1` | Requested GPU count for SDK provision call | same |
-| `RUNPOD_CLOUD_TYPE` | `COMMUNITY` | `SECURE`, `COMMUNITY` | Cloud tier for SDK provision | same |
+| `RUNPOD_CLOUD_TYPE` | `SECURE` | `SECURE`, `COMMUNITY` | Cloud tier for SDK provision | same |
 | `RUNPOD_INTERRUPTIBLE` | `0` | `0`, `1` | Mapped to `--interruptible/--no-interruptible` in SDK start wrapper | same |
 | `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV` | `1` | `0`, `1` | Inject managed temp SSH pubkey env vars (`AUTHORIZED_KEYS`, `PUBLIC_KEY`) during SDK provision | same |
 | `RUNPOD_SET_UNIQUE_REPO_DIR` | `1` | `0`, `1` | Inject per-run `REPO_DIR` to avoid stale persistent-volume repos | same |

@@ -778,7 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_gpu = sub.add_parser("gpu-search", help="List/rank GPU types through RunPod SDK")
-    p_gpu.add_argument("--cloud-type", choices=["SECURE", "COMMUNITY"], default="COMMUNITY")
+    p_gpu.add_argument("--cloud-type", choices=["SECURE", "COMMUNITY"], default="SECURE")
     p_gpu.add_argument("--min-memory-gb", type=int, default=24)
     p_gpu.add_argument("--max-hourly-price", type=float, default=0.0)
     p_gpu.add_argument("--limit", type=int, default=20)
@@ -794,7 +794,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_prov = sub.add_parser("provision", help="Provision pod through RunPod SDK")
     p_prov.add_argument("--name", default="chess-bot-sdk-pod")
-    p_prov.add_argument("--cloud-type", choices=["SECURE", "COMMUNITY"], default="COMMUNITY")
+    p_prov.add_argument("--cloud-type", choices=["SECURE", "COMMUNITY"], default="SECURE")
     p_prov.add_argument("--gpu-count", type=int, default=1)
     p_prov.add_argument("--gpu-type-id", default="")
     p_prov.add_argument("--image-name", default="")

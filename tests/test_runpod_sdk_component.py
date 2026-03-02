@@ -129,8 +129,12 @@ class RunpodSdkComponentTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["provision"])
         self.assertEqual(args.template_name, "chess-bot-training")
+        self.assertEqual(args.cloud_type, "SECURE")
         self.assertTrue(args.wait_ready)
         self.assertFalse(args.interruptible)
+
+        gpu_args = parser.parse_args(["gpu-search"])
+        self.assertEqual(gpu_args.cloud_type, "SECURE")
 
     def test_parser_bool_overrides_for_template_list(self):
         parser = build_parser()

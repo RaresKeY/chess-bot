@@ -387,6 +387,7 @@ OUT
         self.assertIn("RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON", text)
         self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 5090", text)
         self.assertIn("RUNPOD_GPU_COUNT:-2", text)
+        self.assertIn('RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"', text)
         self.assertIn("RUNPOD_FULL_TRAIN_NPROC_PER_NODE", text)
         self.assertIn("runpod_cycle_prepare_ssh_client_files", text)
         self.assertIn("temp_ssh_key=$(runpod_cycle_ssh_key)", text)
@@ -412,6 +413,7 @@ OUT
         self.assertIn("RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON:-${RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON}", text)
         self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 5090", text)
         self.assertIn("RUNPOD_GPU_COUNT:-2", text)
+        self.assertIn('RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"', text)
         self.assertIn("RUNPOD_FULL_TRAIN_NPROC_PER_NODE:-${RUNPOD_GPU_COUNT}", text)
         self.assertIn("RUNPOD_SMOKE_EVENT_LOG", text)
         self.assertIn("RUNPOD_SMOKE_SUMMARY_JSON", text)
@@ -581,6 +583,7 @@ OUT
     def test_cycle_start_uses_managed_ssh_key_toggle_only(self):
         text = Path("scripts/runpod_cycle_start.sh").read_text(encoding="utf-8")
         self.assertIn('RUNPOD_INJECT_MANAGED_SSH_KEY_ENV', text)
+        self.assertIn('CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"', text)
         self.assertIn('INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-0}"', text)
         self.assertIn('RESUME_STOPPED_POD="${RUNPOD_RESUME_STOPPED_POD:-1}"', text)
         self.assertIn('RESUME_POD_ID="${RUNPOD_RESUME_POD_ID:-${RUNPOD_POD_ID:-}}"', text)
@@ -687,6 +690,7 @@ OUT
 
     def test_full_train_hf_context_probe_uses_quoted_heredoc(self):
         text = Path("scripts/runpod_cycle_full_train_hf.sh").read_text(encoding="utf-8")
+        self.assertIn('FLOW_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"', text)
         self.assertIn('FLOW_GPU_COUNT="${RUNPOD_GPU_COUNT:-1}"', text)
         self.assertIn('FLOW_TRAIN_NPROC_PER_NODE="${RUNPOD_FULL_TRAIN_NPROC_PER_NODE:-${FLOW_GPU_COUNT}}"', text)
         self.assertIn('FLOW_ROLLOUT_HORIZON="${RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON:-${TRAIN_ROLLOUT_HORIZON:-8}}"', text)

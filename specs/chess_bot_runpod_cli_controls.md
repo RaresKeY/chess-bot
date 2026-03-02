@@ -65,6 +65,12 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - explicit keyring workflows are not available (`keyring` module unavailable in-container).
   - prefer dotenv provider path (`RUNPOD_DOTENV_PATH`/`CHESSBOT_DOTENV_PATH`) over keyring.
 
+## Cloud Tier Policy (RunPod Deploy)
+- Deployment policy: use `SECURE` cloud for RunPod deploys.
+- Operational default for deploy wrappers and manual runs:
+  - set `RUNPOD_CLOUD_TYPE=SECURE`.
+- `COMMUNITY` is not an approved fallback for standard RunPod deploy/training flows in this project policy.
+
 ## RunPod Pod Lifecycle Terms (Do Not Conflate)
 - `provision` / `start`: create a new RunPod pod resource and start compute.
 - `stop`: RunPod `podStop` action on an existing pod. This halts compute, but the pod resource and attached storage can remain.
@@ -618,9 +624,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 ## Current GPU Availability Query (2026-02-26 host run)
 - `gpu-search` is working again and should be used before ad-hoc relaunch retries.
 - Exact command used:
-  - ``RUNPOD_DOTENV_PATH=/work/.env .venv/bin/python scripts/runpod_provision.py gpu-search --cloud-type COMMUNITY --limit 20``
+  - ``RUNPOD_DOTENV_PATH=/work/.env .venv/bin/python scripts/runpod_provision.py gpu-search --cloud-type SECURE --limit 20``
 - Practical use:
-  - pick a cheap/community GPU from the live list (for example `RTX A5000`, `RTX A4000`, `RTX 3070`, `RTX 3080`) instead of retrying a stale hardcoded SKU
+  - pick a `SECURE`-tier GPU from the live list instead of retrying a stale hardcoded SKU
   - then set `RUNPOD_GPU_TYPE_ID` explicitly for `scripts/runpod_cycle_start.sh` or `scripts/runpod_full_train_easy_smoke_test.sh`
 - Reminder:
   - the list is an API capability/pricing snapshot and does not guarantee capacity on the next provision call; transient `500`/`no instances` can still happen
@@ -634,14 +640,14 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - Practical implication for manual recovery/testing:
   - if a pod is rented and `RUNNING`, prefer waiting longer (or resuming later) before deleting it, unless there is a confirmed terminal error/state from the API
 
-## SECURE vs COMMUNITY for SSH-Based Cycle Flows (2026-02-26)
-- `scripts/runpod_provision.py provision --wait-ready` currently waits for `publicIp` to become non-empty.
-- The helper also auto-sets `supportPublicIp=true` only for `COMMUNITY` (`--support-public-ip-auto` behavior).
-- Consequence:
-  - `SECURE` cloud pods launched via current helper defaults can remain `RUNNING` with empty `publicIp` indefinitely from the wrapper's perspective (not a pod failure, but incompatible with this readiness check + direct SSH workflow).
-- For `scripts/runpod_cycle_*` and `scripts/runpod_full_train_easy*.sh` (direct SSH/rsync flows):
-  - prefer `RUNPOD_CLOUD_TYPE=COMMUNITY`
-  - or patch the provisioning/readiness logic before attempting `SECURE`
+## SECURE vs COMMUNITY Historical Note (2026-02-26)
+- Historical observation:
+  - older direct SSH readiness behavior relied on public-IP visibility and could make some `SECURE` runs appear stalled from wrapper perspective.
+- Current policy remains:
+  - prefer `SECURE` for RunPod deploys.
+- Compatibility guidance:
+  - when using direct SSH/rsync cycle flows, ensure readiness/networking logic is compatible with your `SECURE` setup.
+  - do not treat `COMMUNITY` as a fallback path in this project policy; fix `SECURE` readiness/networking issues instead.
 
 ## Compact Dataset Smoke Bottleneck (2026-02-26)
 - Full-easy smoke against `validated_datasets/elite_2025-11_game` (compact game dataset, full month) successfully reached:
@@ -749,7 +755,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `Tesla V100-SXM2-32GB | V100 SXM2 32GB | 32`
 - `unknown | unknown | 0`
 
-## RunPod GPU Availability Snapshot (2026-02-27, COMMUNITY)
+## RunPod GPU Availability Snapshot (2026-02-27, COMMUNITY, Historical)
+- Historical snapshot only; not a recommended cloud tier for current deploy policy.
 - Command:
   - ``RUNPOD_DOTENV_PATH=/work/.env .venv/bin/python scripts/runpod_provision.py gpu-search --cloud-type COMMUNITY --min-memory-gb 12 --limit 120``
 - Raw/dated outputs saved:
@@ -763,6 +770,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `NVIDIA GeForce RTX 5090` was present but higher cost (`price_per_hr=0.69`, `max_gpu_count=8`, `memory_gb=32`).
 
 ## Manual 2-GPU Custom-10k DDP Flow (Saved Runbook, 2026-02-27)
+- Historical community example retained for dated run evidence; current deploy policy is `SECURE`.
 - Purpose: run a quick single-node multi-GPU validation with a manually pushed local custom dataset, without HF fetch/publish side effects.
 - Successful reference run:
   - run id: `runpod-cycle-20260227T101419Z`
@@ -770,9 +778,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - gpu: `2 x NVIDIA RTX A4000` (community)
   - ssh endpoint at run time: `runner@87.197.146.56:40320`
 
-1. Start a 2-GPU pod from the host (`COMMUNITY`, cheap SKU first):
-   - `RUNPOD_GPU_COUNT=2 RUNPOD_GPU_TYPE_ID='NVIDIA RTX A5000' RUNPOD_CLOUD_TYPE=COMMUNITY RUNPOD_TEMPLATE_NAME='chess-bot-training' bash scripts/runpod_cycle_start.sh`
-   - If capacity returns REST `500`/`no instances`, retry with next-cheapest 2-GPU type (for example `NVIDIA RTX A4000`).
+1. Start a 2-GPU pod from the host (`SECURE` policy):
+   - `RUNPOD_GPU_COUNT=2 RUNPOD_GPU_TYPE_ID='NVIDIA RTX A5000' RUNPOD_CLOUD_TYPE=SECURE RUNPOD_TEMPLATE_NAME='chess-bot-training' bash scripts/runpod_cycle_start.sh`
+   - If capacity returns REST `500`/`no instances`, keep `RUNPOD_CLOUD_TYPE=SECURE` and retry with another compatible `SECURE` GPU type from live `gpu-search`.
 2. Push manual local dataset (no HF train mode):
    - `RUNPOD_CYCLE_RUN_ID=<run_id> RUNPOD_LOCAL_DATASET_DIR=<repo>/data/dataset/_custom_test_10k_all_months_game RUNPOD_REMOTE_DATASET_NAME=_custom_test_10k_all_months_game bash scripts/runpod_cycle_push_dataset.sh`
 3. Run explicit DDP training over 2 GPUs via `torchrun` on the pod:

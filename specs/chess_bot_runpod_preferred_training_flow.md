@@ -55,6 +55,7 @@ Define the current preferred end-to-end RunPod training flow, including exact op
 - GPU default:
   - `RUNPOD_GPU_TYPE_ID` default in easy flow is `NVIDIA GeForce RTX 5090`
   - `RUNPOD_GPU_COUNT` default in easy flow is `2`
+  - cloud tier policy for deploys: `RUNPOD_CLOUD_TYPE=SECURE` (required policy target; `COMMUNITY` is not a fallback path in this project policy)
   - `RUNPOD_FULL_TRAIN_NPROC_PER_NODE` defaults to `${RUNPOD_GPU_COUNT}` in easy flow (multi-process train launch)
   - set `RUNPOD_GPU_COUNT=1` and/or `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=1` to keep single-GPU single-process behavior
 - SSH handling:
@@ -103,6 +104,7 @@ bash scripts/runpod_cycle_terminate_all_tracked.sh --yes
 export RUNPOD_HF_DATASET_REPO_ID="LogicLark-QuantumQuill/chess-bot-datasets"
 export RUNPOD_HF_DATASET_PATH_PREFIX="validated_datasets"
 export RUNPOD_HF_DATASET_SCHEMA_FILTER="game_jsonl_runtime_splice_v1"
+export RUNPOD_CLOUD_TYPE="SECURE"
 export RUNPOD_FULL_TRAIN_EPOCHS="20"
 export RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON="8"
 export RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON="8"
