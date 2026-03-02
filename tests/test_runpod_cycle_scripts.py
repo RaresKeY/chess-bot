@@ -326,6 +326,7 @@ OUT
         text = Path("scripts/runpod_cycle_collect.sh").read_text(encoding="utf-8")
         self.assertIn('LOCAL_AUTO_LOGS_DIR="${LOCAL_COLLECT_DIR}/logs_auto"', text)
         self.assertIn('COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS:-1}"', text)
+        self.assertLess(text.index("printf -v RSYNC_SSH"), text.index("collect_rsync_args=( -az --info=stats1 --progress -e"))
         self.assertIn('--exclude "manual_bench/*/epoch_checkpoints/***"', text)
         self.assertIn("remote_state_snapshot.txt", text)
         self.assertIn("train_log_indexing_summary.json", text)
@@ -390,6 +391,19 @@ OUT
         self.assertIn("max_total_rows=${RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS:-<unset>}", text)
         self.assertIn("final_report=artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md", text)
         self.assertIn("scripts/runpod_cycle_full_train_hf.sh", text)
+
+    def test_easy_full_train_smoke_wrapper_defaults_5090_and_runs_verify_and_terminate(self):
+        text = Path("scripts/runpod_full_train_easy_smoke_test.sh").read_text(encoding="utf-8")
+        self.assertIn("RUNPOD_FULL_TRAIN_EPOCHS", text)
+        self.assertIn("RUNPOD_HF_DATASET_PATH_PREFIX", text)
+        self.assertIn("RUNPOD_HF_DATASET_NAME", text)
+        self.assertIn("RUNPOD_HF_DATASET_SCHEMA_FILTER", text)
+        self.assertIn("RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME:-auto", text)
+        self.assertIn("RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 5090", text)
+        self.assertIn("scripts/runpod_full_train_easy.sh", text)
+        self.assertIn("scripts/runpod_cycle_verify_full_hf_run.py", text)
+        self.assertIn("--require-terminated", text)
+        self.assertIn("scripts/runpod_cycle_terminate.sh", text)
 
     def test_benchmark_matrix_script_exists_and_covers_precision_trials(self):
         text = Path("scripts/runpod_cycle_benchmark_matrix.sh").read_text(encoding="utf-8")
@@ -641,6 +655,10 @@ OUT
         self.assertIn('TRAIN_NPROC_PER_NODE="${FLOW_TRAIN_NPROC_PER_NODE:-1}"', text)
         self.assertIn('export TRAIN_NPROC_PER_NODE', text)
         self.assertIn('export TRAIN_EXTRA_ARGS="--epochs ${FLOW_EPOCHS} --early-stopping-patience 0"', text)
+        self.assertIn('if [[ "${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}" == "auto" ]]; then', text)
+        self.assertIn("runtime_splice_cache_manifest", text)
+        self.assertIn("runtime_max_samples_per_game_request=${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}", text)
+        self.assertIn("runtime_max_samples_per_game_resolved=${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}", text)
         self.assertNotIn("--no-progress", text)
         self.assertIn('if [[ "${gpu_name_for_batch}" == *"RTX 5090"* ]]; then', text)
 

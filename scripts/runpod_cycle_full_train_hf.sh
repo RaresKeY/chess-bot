@@ -585,9 +585,91 @@ export HF_DATASET_PATH_PREFIX="${HF_DATASET_PATH_PREFIX}"
 export HF_DATASET_SCHEMA_FILTER="${HF_DATASET_SCHEMA_FILTER}"
 export HF_DATASET_FETCH_MANIFEST="${REMOTE_HF_FETCH_MANIFEST}"
 export HF_DATASET_CACHE_DIR="${REMOTE_REPO_DIR}/data/hf_datasets"
-export TRAIN_RUNTIME_MIN_CONTEXT="${FLOW_RUNTIME_MIN_CONTEXT}"
-export TRAIN_RUNTIME_MIN_TARGET="${FLOW_RUNTIME_MIN_TARGET}"
-export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
+TRAIN_RUNTIME_MIN_CONTEXT_RESOLVED="${FLOW_RUNTIME_MIN_CONTEXT}"
+TRAIN_RUNTIME_MIN_TARGET_RESOLVED="${FLOW_RUNTIME_MIN_TARGET}"
+TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED="${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
+TRAIN_RUNTIME_RESOLUTION_SOURCE="flow_env"
+if [[ "${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}" == "auto" ]]; then
+  runtime_auto_fields="$('/opt/venvs/chessbot/bin/python' - "${REMOTE_HF_FETCH_MANIFEST}" "${HF_DATASET_SCHEMA_FILTER}" "${FLOW_RUNTIME_MIN_CONTEXT}" "${FLOW_RUNTIME_MIN_TARGET}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+schema_filter = (sys.argv[2] or "auto").strip()
+default_min_context = str(sys.argv[3]).strip()
+default_min_target = str(sys.argv[4]).strip()
+
+def resolve_schema(agg_by_format: dict, requested: str) -> str:
+    if requested and requested not in {"", "auto"}:
+        return requested
+    if "game_jsonl_runtime_splice_v1" in agg_by_format:
+        return "game_jsonl_runtime_splice_v1"
+    if "splice_rows_legacy" in agg_by_format:
+        return "splice_rows_legacy"
+    return ""
+
+def safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+default_min_context_i = safe_int(default_min_context, 8)
+default_min_target_i = safe_int(default_min_target, 1)
+
+try:
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+except Exception:
+    print(f"{default_min_context_i}\t{default_min_target_i}\t0\tfallback_manifest_read_error")
+    raise SystemExit(0)
+
+agg_by_format = data.get("aggregate_by_format", {}) or {}
+schema = resolve_schema(agg_by_format, schema_filter)
+if schema != "game_jsonl_runtime_splice_v1":
+    print(f"{default_min_context_i}\t{default_min_target_i}\t0\tnon_game_schema")
+    raise SystemExit(0)
+
+train_paths = (agg_by_format.get(schema, {}) or {}).get("train_paths", []) or []
+if not train_paths:
+    train_paths = (data.get("aggregate", {}) or {}).get("train_paths", []) or []
+if not train_paths:
+    print(f"{default_min_context_i}\t{default_min_target_i}\t0\tmissing_train_paths")
+    raise SystemExit(0)
+
+train_path = Path(str(train_paths[0]))
+cache_manifest = train_path.parent / "runtime_splice_cache" / "manifest.json"
+if not cache_manifest.is_file():
+    print(f"{default_min_context_i}\t{default_min_target_i}\t0\tmissing_cache_manifest")
+    raise SystemExit(0)
+
+try:
+    cache_data = json.loads(cache_manifest.read_text(encoding="utf-8"))
+except Exception:
+    print(f"{default_min_context_i}\t{default_min_target_i}\t0\tinvalid_cache_manifest")
+    raise SystemExit(0)
+
+cfg = cache_data.get("config") or {}
+min_context = safe_int(cfg.get("min_context"), default_min_context_i)
+min_target = safe_int(cfg.get("min_target"), default_min_target_i)
+max_samples = safe_int(cfg.get("max_samples_per_game"), 0)
+print(f"{min_context}\t{min_target}\t{max_samples}\truntime_splice_cache_manifest")
+PY
+)"
+  IFS=$'\t' read -r TRAIN_RUNTIME_MIN_CONTEXT_RESOLVED TRAIN_RUNTIME_MIN_TARGET_RESOLVED TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED TRAIN_RUNTIME_RESOLUTION_SOURCE <<< "${runtime_auto_fields}"
+fi
+if ! [[ "${TRAIN_RUNTIME_MIN_CONTEXT_RESOLVED}" =~ ^[0-9]+$ ]]; then
+  TRAIN_RUNTIME_MIN_CONTEXT_RESOLVED="${FLOW_RUNTIME_MIN_CONTEXT}"
+fi
+if ! [[ "${TRAIN_RUNTIME_MIN_TARGET_RESOLVED}" =~ ^[0-9]+$ ]]; then
+  TRAIN_RUNTIME_MIN_TARGET_RESOLVED="${FLOW_RUNTIME_MIN_TARGET}"
+fi
+if ! [[ "${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED}" =~ ^[0-9]+$ ]]; then
+  TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED=0
+fi
+export TRAIN_RUNTIME_MIN_CONTEXT="${TRAIN_RUNTIME_MIN_CONTEXT_RESOLVED}"
+export TRAIN_RUNTIME_MIN_TARGET="${TRAIN_RUNTIME_MIN_TARGET_RESOLVED}"
+export TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME="${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME_RESOLVED}"
 export TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1
 export TRAIN_MAX_TOTAL_ROWS="${FLOW_MAX_TOTAL_ROWS}"
 export TRAIN_MAX_TRAIN_ROWS="${FLOW_MAX_TRAIN_ROWS}"
@@ -616,7 +698,9 @@ fi
   echo "[runpod-cycle-full-train-hf] batch_size=${TRAIN_BATCH_SIZE} num_workers_per_rank=${TRAIN_NUM_WORKERS} effective_total_num_workers=${effective_total_num_workers} epochs=${FLOW_EPOCHS}"
   echo "[runpod-cycle-full-train-hf] train_nproc_per_node=${TRAIN_NPROC_PER_NODE}"
   echo "[runpod-cycle-full-train-hf] hf_dataset_schema_filter=${HF_DATASET_SCHEMA_FILTER}"
-  echo "[runpod-cycle-full-train-hf] runtime_min_context=${TRAIN_RUNTIME_MIN_CONTEXT} runtime_min_target=${TRAIN_RUNTIME_MIN_TARGET} runtime_max_samples_per_game=${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"
+  echo "[runpod-cycle-full-train-hf] runtime_max_samples_per_game_request=${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}"
+  echo "[runpod-cycle-full-train-hf] runtime_config_resolution_source=${TRAIN_RUNTIME_RESOLUTION_SOURCE}"
+  echo "[runpod-cycle-full-train-hf] runtime_min_context=${TRAIN_RUNTIME_MIN_CONTEXT} runtime_min_target=${TRAIN_RUNTIME_MIN_TARGET} runtime_max_samples_per_game_resolved=${TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME}"
   echo "[runpod-cycle-full-train-hf] subset_caps max_total_rows=${TRAIN_MAX_TOTAL_ROWS} max_train_rows=${TRAIN_MAX_TRAIN_ROWS} max_val_rows=${TRAIN_MAX_VAL_ROWS}"
   echo "[runpod-cycle-full-train-hf] progress_jsonl=${REMOTE_PROGRESS_JSONL}"
   echo "[runpod-cycle-full-train-hf] best_checkpoint_out=${TRAIN_BEST_CHECKPOINT_OUT}"

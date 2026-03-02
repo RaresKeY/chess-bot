@@ -38,6 +38,10 @@ AUTO_COLLECT_MANIFEST_JSON="${LOCAL_AUTO_LOGS_DIR}/collection_manifest.json"
 mkdir -p "${LOCAL_COLLECT_DIR}" "${LOCAL_AUTO_LOGS_DIR}"
 
 COLLECT_INCLUDE_EPOCH_CHECKPOINTS="${RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS:-1}"
+
+printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
+  "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
+
 collect_rsync_args=( -az --info=stats1 --progress -e "${RSYNC_SSH}" )
 if [[ "${COLLECT_INCLUDE_EPOCH_CHECKPOINTS}" != "1" ]]; then
   # Keep summary-critical trial artifacts while skipping heavy checkpoint fanout.
@@ -46,9 +50,6 @@ if [[ "${COLLECT_INCLUDE_EPOCH_CHECKPOINTS}" != "1" ]]; then
     --exclude "manual_*/epoch_checkpoints/***"
   )
 fi
-
-printf -v RSYNC_SSH 'ssh -i %q -p %q -o BatchMode=yes -o ConnectTimeout=%q -o IdentitiesOnly=yes -o AddKeysToAgent=no -o IdentityAgent=none -o StrictHostKeyChecking=%q -o UserKnownHostsFile=%q' \
-  "${SSH_KEY}" "${SSH_PORT}" "${SSH_CONNECT_TIMEOUT}" "${SSH_HOST_KEY_CHECKING}" "${SSH_KNOWN_HOSTS_FILE}"
 
 {
   printf '[runpod-cycle-collect] ssh=%s@%s:%s\n' "${SSH_USER}" "${SSH_HOST}" "${SSH_PORT}"

@@ -275,6 +275,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - forwards `RUNPOD_HF_DATASET_SCHEMA_FILTER` to the remote preset and direct fallback path so compact game datasets (`game_jsonl_runtime_splice_v1`) can be selected explicitly from mixed HF repos
   - supports single-dataset remote HF fetch for smoke/targeted runs via `RUNPOD_HF_DATASET_NAME` and optional `RUNPOD_HF_DATASET_VERSION` (otherwise defaults to `--all-latest` under `RUNPOD_HF_DATASET_PATH_PREFIX`)
   - forwards runtime-splice smoke throttles (`RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT`, `RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET`, `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME`) into the remote preset/direct fallback for compact `*_game` dataset smoke runs
+  - when `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=auto`, remote launch resolves runtime splice cache config from fetched `runtime_splice_cache/manifest.json` and uses that resolved config for strict cache-required training
   - enforces runtime splice cache usage in remote training (`TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` / `--require-runtime-splice-cache`); cache miss/mismatch now fails the run instead of falling back to runtime index build
   - remote training launcher now prefers the repo copy of `deploy/runpod_cloud_training/train_baseline_preset.sh` over the image-baked `/opt/...` copy to avoid stale image-script behavior
   - if the selected preset lacks HF aggregate support, wrapper falls back to a direct `scripts/train_baseline.py` invocation using paths from the already-fetched HF manifest
@@ -477,6 +478,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `bash scripts/runpod_full_train_easy_smoke_test.sh`
     - uses the same easy/full-HF path, then verifies local artifacts + stop response + termination response
     - defaults to a single compact month fetch (`RUNPOD_HF_DATASET_NAME=elite_2025-11_game`) instead of aggregate `--all-latest` to reduce smoke runtime/cost
+    - defaults `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=auto` so runtime splice settings align with fetched cache manifests during strict cache-required training
   - supervised-run references:
     - monitoring snapshot loop: `bash scripts/runpod_cycle_status.sh --watch`
     - concise progress summary: `python scripts/runpod_cycle_report_style.py --run-id <run_id>`

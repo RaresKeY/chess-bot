@@ -14,6 +14,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - `scripts/container_ensure_openssh.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_full_train_easy.sh`
+- `scripts/runpod_full_train_easy_smoke_test.sh`
 - `scripts/runpod_active_pods_full_status.sh`
 - `scripts/train_baseline.py`
 - `scripts/train_dual_sequence.py`
@@ -121,16 +122,23 @@ Explicit-GPU provisioning behavior note (current):
 | `RUNPOD_POD_JSON` | `artifacts/runpod_cycles/<run_id>/provision.json` | filepath | Override provision record path consumed by SDK stop and shared cycle scripts | `bash scripts/runpod_sdk_cycle_stop.sh` |
 | `RUNPOD_POD_ID` | from provision JSON | string | Explicit pod id override for SDK stop wrapper | same |
 
-## Full-Train Wrappers (`scripts/runpod_full_train_easy.sh`, `scripts/runpod_cycle_full_train_hf.sh`)
+## Full-Train Wrappers (`scripts/runpod_full_train_easy.sh`, `scripts/runpod_full_train_easy_smoke_test.sh`, `scripts/runpod_cycle_full_train_hf.sh`)
 | Control | Default | Accepted | Effect | Related Command |
 |---|---|---|---|---|
 | `RUNPOD_HF_DATASET_REPO_ID` | project default | HF repo id | Source dataset repo for remote fetch | `bash scripts/runpod_full_train_easy.sh` |
 | `RUNPOD_HF_DATASET_PATH_PREFIX` | `validated_datasets` | repo prefix | Dataset path root in HF repo | same |
 | `RUNPOD_HF_DATASET_SCHEMA_FILTER` | `game_jsonl_runtime_splice_v1` | schema id string | Chooses dataset format from HF manifests | same |
 | `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS` | unset/`0` | integer `>=0` | Training subset cap | same |
+| `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` | `auto` (smoke wrapper) / `0` (full-HF flow default) | `auto` or integer `>=0` | Runtime splice per-game cap for game-format datasets. When set to `auto` with cache-required mode, full-HF flow resolves cache-matching runtime config from fetched `runtime_splice_cache/manifest.json` before training | same |
 | `RUNPOD_FULL_TRAIN_NPROC_PER_NODE` | `${RUNPOD_GPU_COUNT}` | integer `>=1` | Torchrun process count | same |
 | `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` | unset | integer `>=0` | Override auto worker policy | same |
 | `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE` | `1` in HF flow | `0`, `1` | Force cache-only runtime splice indexing | same |
+| `RUNPOD_CYCLE_RUN_ID` | `easy-smoke-<utc-ts>` (smoke wrapper) / shared helper default | string | Per-run artifact/telemetry directory id forwarded through easy/full-train flow | `bash scripts/runpod_full_train_easy_smoke_test.sh` |
+| `RUNPOD_GPU_TYPE_ID` | `NVIDIA GeForce RTX 5090` (smoke wrapper) / `NVIDIA GeForce RTX 5090` (easy wrapper) | RunPod GPU type id/display name | Default GPU selection for both easy and smoke wrappers; callers can override per run when targeting specific capacity/cost tiers | `bash scripts/runpod_full_train_easy_smoke_test.sh`, `bash scripts/runpod_full_train_easy.sh` |
+
+Full-train runtime splice interactions:
+- `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` remains enforced in the full-HF flow.
+- when `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=auto`, the flow resolves runtime splice config from the fetched dataset cache manifest (`runtime_splice_cache/manifest.json`) and uses those resolved values for `TRAIN_RUNTIME_MIN_CONTEXT`, `TRAIN_RUNTIME_MIN_TARGET`, and `TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` before launching training.
 
 ## Training CLI (`scripts/train_baseline.py`)
 | Control | Default | Accepted | Effect | Related Command |
