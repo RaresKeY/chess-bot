@@ -186,6 +186,17 @@ Interactive flow precedence/interaction notes:
 | `RUNPOD_POD_JSON` | `artifacts/runpod_cycles/<run_id>/provision.json` | filepath | Override provision record path consumed by SDK stop and shared cycle scripts | `bash scripts/runpod_sdk_cycle_stop.sh` |
 | `RUNPOD_POD_ID` | from provision JSON | string | Explicit pod id override for SDK stop wrapper | same |
 
+## Artifact Collection (`scripts/runpod_cycle_collect.sh`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `RUNPOD_COLLECT_INCLUDE_EPOCH_CHECKPOINTS` | `1` | `0`, `1` | Include/exclude heavy `epoch_checkpoints` trees during `rsync` collection | `bash scripts/runpod_cycle_collect.sh` |
+| `RUNPOD_COLLECT_CONFIRMATION_PROFILE` | `generic` | `generic`, `full_hf` | Chooses sent-back confirmation rules written to `collected/logs_auto/collection_confirmation.json` (`full_hf` requires HF/context/GPU sample artifacts in addition to model/metrics/exit-code) | same |
+| `RUNPOD_COLLECT_REQUIRE_TRAIN_ARTIFACTS` | `0` | `0`, `1` | When `1`, collection exits non-zero if confirmation checks fail (artifacts not confirmed sent-back) | same |
+
+Artifact collection confirmation outputs:
+- `artifacts/runpod_cycles/<run_id>/collected/logs_auto/collection_confirmation.json` always records `artifacts_sent_back_confirmed`, required checks, and resolved artifact paths.
+- full-HF flow runs collect with `RUNPOD_COLLECT_CONFIRMATION_PROFILE=full_hf` and can require strict confirmation before auto-stop.
+
 ## Full-Train Wrappers (`scripts/runpod_full_train_easy.sh`, `scripts/runpod_full_train_easy_smoke_test.sh`, `scripts/runpod_cycle_full_train_hf.sh`)
 | Control | Default | Accepted | Effect | Related Command |
 |---|---|---|---|---|
@@ -198,6 +209,8 @@ Interactive flow precedence/interaction notes:
 | `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` | `auto` (smoke wrapper) / `0` (full-HF flow default) | `auto` or integer `>=0` | Runtime splice per-game cap for game-format datasets. When set to `auto` with cache-required mode, full-HF flow resolves cache-matching runtime config from fetched `runtime_splice_cache/manifest.json` before training | same |
 | `RUNPOD_FULL_TRAIN_NPROC_PER_NODE` | `${RUNPOD_GPU_COUNT}` | integer `>=1` | Torchrun process count; smoke wrapper defaults to one process per requested GPU (`2`) | same |
 | `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` | unset (smoke wrapper auto mode) | integer `>=0` | Optional manual DataLoader workers-per-rank override; when unset in smoke wrapper, auto worker policy is used | same |
+| `RUNPOD_FULL_TRAIN_REQUIRE_ARTIFACT_CONFIRMATION` | `1` | `0`, `1` | Require local sent-back confirmation (`collection_confirmation.json`) after collect. When enabled and checks fail, full-HF flow exits with pod left running for inspection | same |
+| `RUNPOD_FULL_TRAIN_STOP_AFTER_ARTIFACT_CONFIRMATION` | `1` | `0`, `1` | Auto-stop compute only after artifact confirmation stage. `0` keeps pod running after successful full flow | same |
 | `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE` | `1` in HF flow | `0`, `1` | Force cache-only runtime splice indexing | same |
 | `RUNPOD_CYCLE_RUN_ID` | `easy-smoke-<utc-ts>` (smoke wrapper) / shared helper default | string | Per-run artifact/telemetry directory id forwarded through easy/full-train flow | `bash scripts/runpod_full_train_easy_smoke_test.sh` |
 | `RUNPOD_GPU_TYPE_ID` | `NVIDIA GeForce RTX 5090` (smoke wrapper) / `NVIDIA GeForce RTX 5090` (easy wrapper) | RunPod GPU type id/display name | Default GPU selection for both easy and smoke wrappers; callers can override per run when targeting specific capacity/cost tiers | `bash scripts/runpod_full_train_easy_smoke_test.sh`, `bash scripts/runpod_full_train_easy.sh` |
@@ -228,6 +241,10 @@ Full-train runtime splice interactions:
 - smoke-wrapper auto-batch precedence:
   - if `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` / `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` are unset in caller env, smoke wrapper intentionally unsets them so full-HF auto selection remains active.
   - if caller provides either override env var, smoke wrapper preserves it and forwards it unchanged to `runpod_full_train_easy.sh`.
+- artifact confirmation and stop sequencing:
+  - full-HF flow collects artifacts with `RUNPOD_COLLECT_CONFIRMATION_PROFILE=full_hf`.
+  - when `RUNPOD_FULL_TRAIN_REQUIRE_ARTIFACT_CONFIRMATION=1`, missing confirmation skips failure auto-stop and leaves pod running for manual inspection/recovery.
+  - when `RUNPOD_FULL_TRAIN_STOP_AFTER_ARTIFACT_CONFIRMATION=1`, stop is invoked only after `artifacts_sent_back_confirmed=true`.
 
 ## Cloud Train Preset (`deploy/runpod_cloud_training/train_baseline_preset.sh`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -362,7 +379,7 @@ Model-vs-model interactions/precedence notes:
 | `RUNPOD_STOP_CONFIRMATION` | unset | `YES` | Required confirmation token when `RUNPOD_STOP_REQUIRE_CONFIRMATION=1` | same |
 
 Pod-stop interactions:
-- full-flow wrappers that call `runpod_cycle_stop.sh` stop compute by default (auto-stop).
+- full-flow wrappers that call `runpod_cycle_stop.sh` auto-stop by default only after artifact confirmation succeeds in full-HF flow.
 - to require manual confirmation before stop, set `RUNPOD_STOP_REQUIRE_CONFIRMATION=1`; then explicit stop should include `RUNPOD_STOP_CONFIRMATION=YES`.
 
 ## Active-Pods Full Status (`scripts/runpod_active_pods_full_status.sh`)

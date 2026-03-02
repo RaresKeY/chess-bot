@@ -63,6 +63,11 @@ Interactive/manual iteration is intentionally documented separately in `specs/ch
 - SSH handling:
   - managed temp key auto-generated on host at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
   - only the managed temp keypair path is used by runpod cycle scripts
+- Artifact confirmation + stop sequencing:
+  - `RUNPOD_FULL_TRAIN_REQUIRE_ARTIFACT_CONFIRMATION=1` (default in easy/full-HF flow)
+  - `RUNPOD_FULL_TRAIN_STOP_AFTER_ARTIFACT_CONFIRMATION=1` (default auto-stop mode)
+  - collect stage writes `artifacts/runpod_cycles/<run_id>/collected/logs_auto/collection_confirmation.json`
+  - full-HF flow only auto-stops after `artifacts_sent_back_confirmed=true`; on confirmation failure it exits and leaves pod running for manual inspection.
 
 ## Exact Training Parameter Profile (Current)
 The flow runs `train_baseline.py` via preset (or direct fallback when needed) with this profile:
@@ -140,6 +145,8 @@ bash scripts/telemetry_control.sh status --json
 6. Validate result artifacts locally:
 - Collected artifacts path:
   - `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/`
+- Collection confirmation (sent-back check):
+  - `artifacts/runpod_cycles/<run_id>/collected/logs_auto/collection_confirmation.json`
 - Quick play command file:
   - `artifacts/runpod_cycles/<run_id>/quick_play_command.txt`
 - Easy-style progress report:
@@ -171,9 +178,10 @@ python scripts/runpod_cycle_report_style.py --run-id <run_id>
 4. Completion checks:
 - `train_exit_code.txt` equals `0`.
 - local model present under `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/`.
+- `collection_confirmation.json` has `artifacts_sent_back_confirmed=true`.
 - easy report exists at `artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md`.
 5. Cost control:
-- flow stops pod automatically by default (`runpod_cycle_stop.sh` with `RUNPOD_STOP_REQUIRE_CONFIRMATION=0` default).
+- flow stops pod automatically by default only after artifact confirmation succeeds.
 - optional confirmation gate for supervised/manual safety:
 ```bash
 RUNPOD_CYCLE_RUN_ID="<run_id>" RUNPOD_STOP_REQUIRE_CONFIRMATION=1 \
@@ -189,7 +197,7 @@ RUNPOD_CYCLE_RUN_ID="<run_id>" bash scripts/runpod_cycle_terminate.sh
 - Uses managed temporary SSH key by default for provision + SSH lifecycle commands.
 - Uses cache-first runtime splice behavior and fails fast if runtime splice cache cannot be used.
 - Trainer can persist `best` and `epoch-end` checkpoints to disk during training when flow-provided paths are set; watcher attempts to copy those artifacts locally each epoch end.
-- Full flow calls `runpod_cycle_stop.sh` and auto-stops compute by default; confirmation-gated stop is opt-in via `RUNPOD_STOP_REQUIRE_CONFIRMATION=1`.
+- Full flow writes local collection confirmation and only auto-stops after confirmed artifact send-back; manual `RUNPOD_STOP_REQUIRE_CONFIRMATION=1` remains an optional extra gate.
 
 ## Iteration Policy
 Update this spec whenever training-flow behavior or preferred parameter defaults change (GPU tier, epoch count, schema filter, cache policy, watcher behavior, or artifact checks).

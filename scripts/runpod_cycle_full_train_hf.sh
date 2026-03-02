@@ -28,6 +28,8 @@ FLOW_MIN_MEMORY_GB="${RUNPOD_GPU_MIN_MEMORY_GB:-24}"
 FLOW_MAX_HOURLY_PRICE="${RUNPOD_GPU_MAX_HOURLY_PRICE:-0}"
 FLOW_GPU_SAMPLE_SECONDS="${RUNPOD_GPU_SAMPLE_SECONDS:-5}"
 FLOW_AUTO_STOP_ON_FAILURE="${RUNPOD_STOP_ON_FAILURE:-1}"
+FLOW_REQUIRE_ARTIFACT_CONFIRMATION="${RUNPOD_FULL_TRAIN_REQUIRE_ARTIFACT_CONFIRMATION:-1}"
+FLOW_STOP_AFTER_ARTIFACT_CONFIRMATION="${RUNPOD_FULL_TRAIN_STOP_AFTER_ARTIFACT_CONFIRMATION:-1}"
 FLOW_SKIP_START="${RUNPOD_CYCLE_SKIP_START:-0}"
 FLOW_RUNTIME_MIN_CONTEXT="${RUNPOD_FULL_TRAIN_RUNTIME_MIN_CONTEXT:-${TRAIN_RUNTIME_MIN_CONTEXT:-8}}"
 FLOW_RUNTIME_MIN_TARGET="${RUNPOD_FULL_TRAIN_RUNTIME_MIN_TARGET:-${TRAIN_RUNTIME_MIN_TARGET:-1}}"
@@ -62,6 +64,7 @@ PLAY_CMD_TXT="${CYCLE_DIR}/quick_play_command.txt"
 POD_STARTED=0
 FLOW_SUCCESS=0
 FLOW_INTERRUPTED=0
+FLOW_ALLOW_FAILURE_AUTO_STOP=1
 
 cleanup_child_processes() {
   local pids=()
@@ -93,6 +96,9 @@ cleanup_on_error() {
     cleanup_child_processes
   fi
   if [[ "${POD_STARTED}" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${FLOW_ALLOW_FAILURE_AUTO_STOP}" != "1" ]]; then
     return 0
   fi
   if [[ "${FLOW_AUTO_STOP_ON_FAILURE}" != "1" ]]; then
@@ -245,6 +251,8 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Selected GPU type: \`${SELECTED_GPU_DISPLAY_NAME:-$SELECTED_GPU_TYPE_ID}\`" \
   "- Requested GPU count: \`${FLOW_GPU_COUNT}\`" \
   "- Requested train nproc-per-node: \`${FLOW_TRAIN_NPROC_PER_NODE}\`" \
+  "- Require artifact confirmation before stop: \`${FLOW_REQUIRE_ARTIFACT_CONFIRMATION}\`" \
+  "- Auto-stop after artifact confirmation: \`${FLOW_STOP_AFTER_ARTIFACT_CONFIRMATION}\`" \
   "- NCCL safe defaults enabled: \`${FLOW_NCCL_SAFE_DEFAULTS}\`" \
   "- NCCL defaults (ib/p2p/p2p-level/debug): \`${FLOW_NCCL_IB_DISABLE}\`/\`${FLOW_NCCL_P2P_DISABLE}\`/\`${FLOW_NCCL_P2P_LEVEL}\`/\`${FLOW_NCCL_DEBUG}\`" \
   "- Torch NCCL defaults (async/monitoring/heartbeat/blocking/dump/trace): \`${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}\`/\`${FLOW_TORCH_NCCL_ENABLE_MONITORING}\`/\`${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}\`/\`${FLOW_TORCH_NCCL_BLOCKING_WAIT}\`/\`${FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT}\`/\`${FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE}\`" \
@@ -833,16 +841,48 @@ bash "${REPO_ROOT}/scripts/runpod_cycle_watch_progress.sh"
 telemetry_checkpoint "train_watch" "done" "watch progress completed"
 
 telemetry_checkpoint "artifact_collect" "running" "collecting remote artifacts"
-RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh"
+collect_require_train_artifacts=0
+if [[ "${FLOW_REQUIRE_ARTIFACT_CONFIRMATION}" == "1" ]]; then
+  collect_require_train_artifacts=1
+fi
+collect_rc=0
+RUNPOD_CYCLE_RUN_ID="${RUN_ID}" \
+RUNPOD_COLLECT_CONFIRMATION_PROFILE="full_hf" \
+RUNPOD_COLLECT_REQUIRE_TRAIN_ARTIFACTS="${collect_require_train_artifacts}" \
+bash "${REPO_ROOT}/scripts/runpod_cycle_collect.sh" || collect_rc=$?
+if [[ "${collect_rc}" != "0" ]]; then
+  FLOW_ALLOW_FAILURE_AUTO_STOP=0
+  echo "[runpod-cycle-full-train-hf] artifact collection failed rc=${collect_rc}; pod left running for inspection" >&2
+  exit "${collect_rc}"
+fi
 telemetry_checkpoint "artifact_collect" "done" "artifact collection completed"
 
 LOCAL_COLLECT_DIR="${CYCLE_DIR}/collected/run_artifacts"
+LOCAL_COLLECTION_CONFIRMATION_JSON="${CYCLE_DIR}/collected/logs_auto/collection_confirmation.json"
 LOCAL_SPEC_SUGGESTIONS_DIR="${CYCLE_DIR}/spec_suggestions"
 mkdir -p "${LOCAL_SPEC_SUGGESTIONS_DIR}"
 LOCAL_OBS_JSON="${LOCAL_SPEC_SUGGESTIONS_DIR}/gpu_full_training_observation_${RUN_ID}.json"
 LOCAL_OBS_MD="${LOCAL_SPEC_SUGGESTIONS_DIR}/gpu_full_training_observation_${RUN_ID}.md"
 LOCAL_EASY_REPORT_MD="${CYCLE_DIR}/reports/easy_progress_report.md"
 LOCAL_EASY_REPORT_JSON="${CYCLE_DIR}/reports/easy_progress_report.json"
+ARTIFACTS_SENT_BACK_CONFIRMED=0
+if [[ -f "${LOCAL_COLLECTION_CONFIRMATION_JSON}" ]]; then
+  if jq -e '.artifacts_sent_back_confirmed == true' "${LOCAL_COLLECTION_CONFIRMATION_JSON}" >/dev/null 2>&1; then
+    ARTIFACTS_SENT_BACK_CONFIRMED=1
+  fi
+fi
+if [[ "${FLOW_REQUIRE_ARTIFACT_CONFIRMATION}" == "1" && "${ARTIFACTS_SENT_BACK_CONFIRMED}" != "1" ]]; then
+  FLOW_ALLOW_FAILURE_AUTO_STOP=0
+  echo "[runpod-cycle-full-train-hf] artifact confirmation failed; pod left running. see ${LOCAL_COLLECTION_CONFIRMATION_JSON}" >&2
+  runpod_cycle_append_report "${REPORT_MD}" \
+    "## Artifact Confirmation (Failed)" \
+    "- Confirmation required: \`${FLOW_REQUIRE_ARTIFACT_CONFIRMATION}\`" \
+    "- Confirmed sent-back: \`${ARTIFACTS_SENT_BACK_CONFIRMED}\`" \
+    "- Confirmation JSON: \`${LOCAL_COLLECTION_CONFIRMATION_JSON}\`" \
+    "- Note: pod stop skipped because artifacts were not confirmed locally." \
+    ""
+  exit 1
+fi
 
 "${PY_BIN}" - "${LOCAL_COLLECT_DIR}" "${LOCAL_OBS_JSON}" "${LOCAL_OBS_MD}" "${RUN_ID}" <<'PY'
 import csv
@@ -858,7 +898,12 @@ run_id = sys.argv[4]
 context_path = next(iter(sorted(run_artifacts.glob(f"context_probe_{run_id}.json"))), None)
 metrics_path = next(iter(sorted(run_artifacts.glob(f"metrics_{run_id}.json"))), None)
 gpu_csv_path = next(iter(sorted(run_artifacts.glob(f"gpu_usage_samples_{run_id}.csv"))), None)
-model_path = next(iter(sorted(run_artifacts.glob(f"model_{run_id}.pt"))), None)
+model_path = None
+for pattern in (f"model_{run_id}.pt", f"model_full_{run_id}.pt", "model_*.pt", "*.pt"):
+    matches = sorted(run_artifacts.glob(pattern))
+    if matches:
+        model_path = matches[-1]
+        break
 
 context = json.loads(context_path.read_text(encoding="utf-8")) if context_path and context_path.exists() else {}
 metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path and metrics_path.exists() else {}
@@ -959,6 +1004,8 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Local post-run observation MD: \`${LOCAL_OBS_MD}\`" \
   "- Easy progress report MD: \`${LOCAL_EASY_REPORT_MD}\`" \
   "- Easy progress report JSON: \`${LOCAL_EASY_REPORT_JSON}\`" \
+  "- Artifact confirmation JSON: \`${LOCAL_COLLECTION_CONFIRMATION_JSON}\`" \
+  "- Artifacts sent-back confirmed: \`${ARTIFACTS_SENT_BACK_CONFIRMED}\`" \
   "- Quick play command file: \`${PLAY_CMD_TXT}\`" \
   ""
 
@@ -968,7 +1015,16 @@ runpod_cycle_append_report "${REPORT_MD}" \
   --write-md "${LOCAL_EASY_REPORT_MD}" \
   --write-json "${LOCAL_EASY_REPORT_JSON}"
 
-RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_stop.sh"
+if [[ "${FLOW_STOP_AFTER_ARTIFACT_CONFIRMATION}" == "1" ]]; then
+  if [[ "${ARTIFACTS_SENT_BACK_CONFIRMED}" != "1" ]]; then
+    FLOW_ALLOW_FAILURE_AUTO_STOP=0
+    echo "[runpod-cycle-full-train-hf] stop blocked; artifacts not confirmed sent-back" >&2
+    exit 1
+  fi
+  RUNPOD_CYCLE_RUN_ID="${RUN_ID}" bash "${REPO_ROOT}/scripts/runpod_cycle_stop.sh"
+else
+  echo "[runpod-cycle-full-train-hf] auto-stop disabled (RUNPOD_FULL_TRAIN_STOP_AFTER_ARTIFACT_CONFIRMATION=${FLOW_STOP_AFTER_ARTIFACT_CONFIRMATION})"
+fi
 FLOW_SUCCESS=1
 telemetry_checkpoint "full_hf_flow" "done" "flow completed successfully"
 telemetry_event "full_hf_flow_complete" "ok" "runpod full hf flow complete"
