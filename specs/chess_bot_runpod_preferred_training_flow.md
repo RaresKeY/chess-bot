@@ -148,7 +148,12 @@ python scripts/runpod_cycle_report_style.py --run-id <run_id>
 - local model present under `artifacts/runpod_cycles/<run_id>/collected/run_artifacts/`.
 - easy report exists at `artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md`.
 5. Cost control:
-- flow stops pod automatically (`runpod_cycle_stop.sh`).
+- flow stops pod automatically by default (`runpod_cycle_stop.sh` with `RUNPOD_STOP_REQUIRE_CONFIRMATION=0` default).
+- optional confirmation gate for supervised/manual safety:
+```bash
+RUNPOD_CYCLE_RUN_ID="<run_id>" RUNPOD_STOP_REQUIRE_CONFIRMATION=1 \
+RUNPOD_STOP_CONFIRMATION=YES bash scripts/runpod_cycle_stop.sh
+```
 - terminate explicitly when done with volume/pod lifecycle:
 ```bash
 RUNPOD_CYCLE_RUN_ID="<run_id>" bash scripts/runpod_cycle_terminate.sh
@@ -159,7 +164,7 @@ RUNPOD_CYCLE_RUN_ID="<run_id>" bash scripts/runpod_cycle_terminate.sh
 - Uses managed temporary SSH key by default for provision + SSH lifecycle commands.
 - Uses cache-first runtime splice behavior and fails fast if runtime splice cache cannot be used.
 - Trainer can persist `best` and `epoch-end` checkpoints to disk during training when flow-provided paths are set; watcher attempts to copy those artifacts locally each epoch end.
-- Stops pod at end of flow (`runpod_cycle_stop.sh`); explicit termination remains a separate operator action.
+- Full flow calls `runpod_cycle_stop.sh` and auto-stops compute by default; confirmation-gated stop is opt-in via `RUNPOD_STOP_REQUIRE_CONFIRMATION=1`.
 
 ## Iteration Policy
 Update this spec whenever training-flow behavior or preferred parameter defaults change (GPU tier, epoch count, schema filter, cache policy, watcher behavior, or artifact checks).

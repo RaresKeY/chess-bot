@@ -15,16 +15,52 @@ runpod_cycle_require_cmd curl
 
 POD_ID="${RUNPOD_POD_ID:-$(runpod_cycle_pod_id "${PROVISION_JSON}")}"
 GRAPHQL_ENDPOINT="${RUNPOD_GRAPHQL_ENDPOINT:-https://api.runpod.io/graphql}"
-TOKEN="$(runpod_cycle_api_token "${PY_BIN}" "${REPO_ROOT}")"
-[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-stop] missing RunPod API token (checked RUNPOD_API_KEY, keyring runpod/RUNPOD_API_KEY, and .env fallback)" >&2; exit 1; }
-[[ -n "${POD_ID}" ]] || { echo "[runpod-cycle-stop] missing pod id (set RUNPOD_POD_ID or provide provision json)" >&2; exit 1; }
-
-mkdir -p "${CYCLE_DIR}"
-OUT_JSON="${CYCLE_DIR}/stop_response.json"
+STOP_REQUIRE_CONFIRMATION="${RUNPOD_STOP_REQUIRE_CONFIRMATION:-0}"
+STOP_CONFIRMATION="${RUNPOD_STOP_CONFIRMATION:-}"
 POD_NAME="${RUNPOD_POD_NAME:-}"
 if [[ -z "${POD_NAME}" && -f "${PROVISION_JSON}" ]]; then
   POD_NAME="$(runpod_cycle_pod_name "${PROVISION_JSON}" || true)"
 fi
+
+mkdir -p "${CYCLE_DIR}"
+OUT_JSON="${CYCLE_DIR}/stop_response.json"
+
+if [[ "${STOP_REQUIRE_CONFIRMATION}" == "1" && "${STOP_CONFIRMATION}" != "YES" ]]; then
+  jq -nc \
+    --arg pod_id "${POD_ID}" \
+    --arg run_id "${RUN_ID}" \
+    --arg reason "stop_confirmation_required" \
+    --arg required_value "YES" \
+    '{skipped:true, reason:$reason, run_id:$run_id, pod_id:$pod_id, required_confirmation_value:$required_value}' \
+    | tee "${OUT_JSON}"
+  if [[ -n "${POD_ID}" ]]; then
+    runpod_cycle_registry_record \
+      "${REPO_ROOT}" \
+      "runpod_cycle_stop.sh" \
+      "stop" \
+      "STOP_SKIPPED_UNCONFIRMED" \
+      "${POD_ID}" \
+      "${RUN_ID}" \
+      "${POD_NAME}" \
+      "" \
+      "" \
+      "" \
+      "Skip stop: confirmation required (set RUNPOD_STOP_CONFIRMATION=YES)"
+  fi
+  runpod_cycle_append_report "${REPORT_MD}" \
+    "## Pod Stop (Skipped)" \
+    "- Pod ID: \`${POD_ID:-<unknown>}\`" \
+    "- Stop response: \`${OUT_JSON}\`" \
+    "- Tracked pods registry: \`$(runpod_cycle_registry_file "${REPO_ROOT}")\`" \
+    "- Note: stop confirmation required; rerun with \`RUNPOD_STOP_CONFIRMATION=YES\` to stop compute." \
+    ""
+  echo "[runpod-cycle-stop] confirmation required; rerun with RUNPOD_STOP_CONFIRMATION=YES (or keep default RUNPOD_STOP_REQUIRE_CONFIRMATION=0 for auto-stop)"
+  exit 0
+fi
+
+TOKEN="$(runpod_cycle_api_token "${PY_BIN}" "${REPO_ROOT}")"
+[[ -n "${TOKEN}" ]] || { echo "[runpod-cycle-stop] missing RunPod API token (checked RUNPOD_API_KEY, keyring runpod/RUNPOD_API_KEY, and .env fallback)" >&2; exit 1; }
+[[ -n "${POD_ID}" ]] || { echo "[runpod-cycle-stop] missing pod id (set RUNPOD_POD_ID or provide provision json)" >&2; exit 1; }
 
 resp="$(
   curl -sS "${GRAPHQL_ENDPOINT}" \

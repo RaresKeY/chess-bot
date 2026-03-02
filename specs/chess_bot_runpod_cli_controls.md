@@ -234,6 +234,8 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - exports local `PYTHONPATH=${REPO_ROOT}` before invoking `scripts/infer_move.py` so direct script execution resolves `src.*` imports reliably on the host
 - `scripts/runpod_cycle_stop.sh`
   - cleanly requests pod stop via RunPod GraphQL `podStop` using the shared secrets resolver contract (see `specs/chess_bot_secrets_contract.md`) plus saved `pod_id`
+  - default behavior is auto-stop (`RUNPOD_STOP_REQUIRE_CONFIRMATION=0`)
+  - optional confirmation gate: set `RUNPOD_STOP_REQUIRE_CONFIRMATION=1`; then `RUNPOD_STOP_CONFIRMATION=YES` is required before sending `podStop`, otherwise it writes `stop_response.json` as skipped and records `STOP_SKIPPED_UNCONFIRMED`
   - stop mutation payload now requests object subfields (`id`, `desiredStatus`) to match the current GraphQL schema and avoid validation failures
   - appends a `STOPPED` record to the tracked pod registry for operator bookkeeping
   - note: `stop` halts compute but does not delete the pod; storage charges can still apply until termination
@@ -326,7 +328,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - logs effective HF prefix/schema filter and runtime-splice smoke throttle overrides when provided
   - prints the canonical easy-style report destination (`artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md`)
 - `scripts/runpod_full_train_easy_smoke_test.sh`
-  - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, runtime-splice sample cap)
+  - end-to-end smoke wrapper around the easy HF flow using cheap/fast defaults (single epoch, compact month prefix, strict cache-compatible runtime splice auto resolution)
+  - now defaults to `RUNPOD_GPU_COUNT=2`, `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=2`, and `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS=5000`
+  - leaves batch size / workers in auto mode by default (unsets override env vars unless caller explicitly sets them)
+  - writes a timestamp-prefixed event log to `artifacts/runpod_cycles/<run_id>/logs/full_smoke_events.log` (override with `RUNPOD_SMOKE_EVENT_LOG`)
+  - writes a post-run summary JSON (`timing`, metrics tail, progress tail, GPU sample stats) to `artifacts/runpod_cycles/<run_id>/reports/smoke_summary.json` (override with `RUNPOD_SMOKE_SUMMARY_JSON`)
   - verifies local collected artifacts with `scripts/runpod_cycle_verify_full_hf_run.py`
   - terminates the pod after verification and re-verifies termination markers
 - `scripts/runpod_cycle_benchmark_matrix.sh`
@@ -420,6 +426,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - Override path with `RUNPOD_TRACKED_PODS_FILE`
 - Typical states written by scripts:
   - `RUNNING` (after `runpod_cycle_start.sh`)
+  - `STOP_SKIPPED_UNCONFIRMED` (after `runpod_cycle_stop.sh` when optional confirmation gating is enabled and confirmation is missing)
   - `STOPPED` (after `runpod_cycle_stop.sh`; pod still exists unless later terminated)
   - `TERMINATED` (after `runpod_cycle_terminate_all_tracked.sh`; pod resource deleted via REST)
 
@@ -447,13 +454,13 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 ## Modular Lifecycle Flow (host-side)
 - Full cycle (defaults to a short smoke run and local `_smoke_runpod` dataset):
   - `bash scripts/runpod_cycle_full_smoke.sh`
-  - ends with `stop` only (compute halt), not termination/deletion
+  - ends with a call to `runpod_cycle_stop.sh` (auto-stop by default)
   - current smoke defaults intentionally disable optional pod services (Jupyter/inference/HF-watchdog/idle-watchdog) unless explicitly overridden, to prevent `entrypoint.sh` `wait -n` child-exit cleanup from killing `sshd` during the CLI smoke
 - Full sequential HF training cycle (100-epoch-oriented wrapper with local progress bar):
   - `export RUNPOD_HF_DATASET_REPO_ID='LogicLark-QuantumQuill/chess-bot-datasets'`
   - optional GPU/cost overrides: `RUNPOD_GPU_TYPE_ID`, `RUNPOD_GPU_MIN_MEMORY_GB`, `RUNPOD_GPU_MAX_HOURLY_PRICE`
   - `bash scripts/runpod_cycle_full_train_hf.sh`
-  - wrapper currently fetches HF datasets first, writes remote context/spec-suggestion artifacts (dataset rows/size + GPU/VRAM snapshot + suggested params), runs async training with progress JSONL + GPU sampling, collects artifacts, and stops the pod
+  - wrapper currently fetches HF datasets first, writes remote context/spec-suggestion artifacts (dataset rows/size + GPU/VRAM snapshot + suggested params), runs async training with progress JSONL + GPU sampling, collects artifacts, and then calls `runpod_cycle_stop.sh` (auto-stop by default)
   - if the local progress watcher crashes near the end of training, check the remote `train_exit_code.txt` / train log under `${REPO_DIR}/artifacts/runpod_cycles/<run_id>/`, then restart the same pod and run `RUNPOD_CYCLE_RUN_ID=<run_id> bash scripts/runpod_cycle_collect.sh`
 - One-command "just run it" wrapper (same full flow, opinionated defaults):
   - `bash scripts/runpod_full_train_easy.sh`
@@ -478,7 +485,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `bash scripts/runpod_full_train_easy_smoke_test.sh`
     - uses the same easy/full-HF path, then verifies local artifacts + stop response + termination response
     - defaults to a single compact month fetch (`RUNPOD_HF_DATASET_NAME=elite_2025-11_game`) instead of aggregate `--all-latest` to reduce smoke runtime/cost
+    - defaults `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS=5000` for fast subset training and leaves batch/workers in auto mode unless caller explicitly provides override env vars
     - defaults `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=auto` so runtime splice settings align with fetched cache manifests during strict cache-required training
+    - emits a timestamped full event log (`RUNPOD_SMOKE_EVENT_LOG`) and post-run summary JSON (`RUNPOD_SMOKE_SUMMARY_JSON`) for later run forensics
   - supervised-run references:
     - monitoring snapshot loop: `bash scripts/runpod_cycle_status.sh --watch`
     - concise progress summary: `python scripts/runpod_cycle_report_style.py --run-id <run_id>`
@@ -491,6 +500,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   4. `bash scripts/runpod_cycle_collect.sh`
   5. `bash scripts/runpod_cycle_local_validate.sh`
   6. `bash scripts/runpod_cycle_stop.sh`
+  - optional confirmation-gated variant: `RUNPOD_STOP_REQUIRE_CONFIRMATION=1 RUNPOD_STOP_CONFIRMATION=YES bash scripts/runpod_cycle_stop.sh`
   - HF aggregate training variant (skip dataset push):
     - `export RUNPOD_TRAIN_FROM_HF_LATEST_ALL=1`
     - `export RUNPOD_HF_DATASET_REPO_ID='LogicLark-QuantumQuill/chess-bot-datasets'`

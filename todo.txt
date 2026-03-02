@@ -26,3 +26,32 @@
    - Current unpushed commit on `main`: f0eecf1 (`feat: add dual-sequence training and runpod ssh guardrails`)
    - Authenticate git in the container for `https://github.com/RaresKeY/chess-bot.git` (for example: `gh auth login` or PAT-backed credential helper)
    - Push: `git push origin main`
+
+## 2026-03-01 RunPod smoke follow-ups
+
+1. Build and push a new RunPod image that includes patched entrypoint repo-writability enforcement.
+   - File: deploy/runpod_cloud_training/entrypoint.sh
+   - Required in image: ensure_repo_writable_for_runner (chown + chmod fallback, fail-fast if still non-writable)
+
+2. Update RunPod template/image tag to the newly built image.
+   - Current failed smoke used: ghcr.io/rareskey/chess-bot-runpod:4d68463
+
+3. Re-run full smoke after image update and confirm full phase progression.
+   - Expected path: start -> push -> train -> collect -> local-validate -> stop
+
+4. Verify direct smoke with extended SSH readiness settings when needed.
+   - RUNPOD_SSH_READY_TIMEOUT_SECONDS=900
+   - RUNPOD_SSH_READY_POLL_SECONDS=10
+
+5. Ensure no leaked active pod from runpod-cycle-20260301T105207Z.
+   - Pod id: 7j2z60x6wbts31
+   - Stop or terminate if still RUNNING.
+
+6. Commit and push latest local fixes before cloud reruns (repo pull is source for runtime scripts).
+   - scripts/runpod_sdk_cycle_start.sh
+   - scripts/runpod_cycle_common.sh
+   - scripts/runpod_cycle_train.sh
+   - deploy/runpod_cloud_training/entrypoint.sh
+   - tests/test_runpod_cycle_scripts.py
+   - tests/test_runpod_entrypoint_script.py
+   - specs/* updates tied to these fixes
