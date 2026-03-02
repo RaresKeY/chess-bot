@@ -112,6 +112,7 @@ OUT
         names = [
             "scripts/runpod_cycle_common.sh",
             "scripts/runpod_cycle_report_style.py",
+            "scripts/runpod_cycle_interactive_test.sh",
             "scripts/runpod_cycle_status.sh",
             "scripts/runpod_cycle_start.sh",
             "scripts/runpod_cycle_watchdog.sh",
@@ -603,6 +604,28 @@ OUT
         self.assertIn('RUNPOD_TERMINATE_ON_SSH_NOT_READY', text)
         self.assertIn('ssh readiness timed out', text)
         self.assertNotIn('RUNPOD_INJECT_LOCAL_SSH_KEY_ENV', text)
+
+    def test_interactive_test_flow_script_has_resume_and_training_control(self):
+        text = Path("scripts/runpod_cycle_interactive_test.sh").read_text(encoding="utf-8")
+        self.assertIn("RUNPOD_TEST_SESSION_ID", text)
+        self.assertIn('RUNPOD_CYCLE_RUN_ID', text)
+        self.assertIn('RUNPOD_INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-1}"', text)
+        self.assertIn('RUNPOD_RESUME_STOPPED_POD="${RUNPOD_RESUME_STOPPED_POD:-1}"', text)
+        self.assertIn('RUNPOD_TERMINATE_ON_SSH_NOT_READY="${RUNPOD_TERMINATE_ON_SSH_NOT_READY:-0}"', text)
+        self.assertIn("cmd_train_start()", text)
+        self.assertIn("cmd_train_stop()", text)
+        self.assertIn("cmd_watch()", text)
+        self.assertIn("RUNPOD_INTERACTIVE_STOP_EXISTING", text)
+        self.assertIn("RUNPOD_INTERACTIVE_FETCH_POLICY", text)
+        self.assertIn("RUNPOD_INTERACTIVE_TRAIN_EPOCHS", text)
+        self.assertIn("RUNPOD_INTERACTIVE_TRAIN_BATCH_SIZE_OVERRIDE", text)
+        self.assertIn("RUNPOD_INTERACTIVE_TRAIN_NUM_WORKERS_OVERRIDE", text)
+        self.assertIn("RUNPOD_INTERACTIVE_TRAIN_NPROC_PER_NODE", text)
+        self.assertIn("HF_FETCH_LATEST_ALL_DATASETS=1", text)
+        self.assertIn("train_background_launcher.sh", text)
+        self.assertIn("pkill -f '/opt/venvs/chessbot/bin/torchrun'", text)
+        self.assertIn("scripts/runpod_cycle_start.sh", text)
+        self.assertIn("scripts/runpod_cycle_watch_progress.sh", text)
 
     def test_active_pods_full_status_script_uses_registry_api_and_ssh_probe(self):
         text = Path("scripts/runpod_active_pods_full_status.sh").read_text(encoding="utf-8")

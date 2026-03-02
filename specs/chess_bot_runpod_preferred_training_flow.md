@@ -3,6 +3,8 @@
 ## Responsibility
 Define the current preferred end-to-end RunPod training flow, including exact operator steps and run parameters we want to keep stable across iterations.
 
+Interactive/manual iteration is intentionally documented separately in `specs/chess_bot_runpod_interactive_testing_flow.md` so this full-flow contract remains stable and independently testable.
+
 ## Scope
 - Host-side orchestration script: `scripts/runpod_full_train_easy.sh`
 - Underlying lifecycle: `scripts/runpod_cycle_full_train_hf.sh` and `scripts/runpod_cycle_*.sh`

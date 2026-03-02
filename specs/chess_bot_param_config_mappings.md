@@ -6,6 +6,7 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 ## Scope
 - `scripts/runpod_cycle_benchmark_matrix.sh`
 - `scripts/runpod_cycle_start.sh`
+- `scripts/runpod_cycle_interactive_test.sh`
 - `scripts/runpod_provision.py`
 - `scripts/runpod_sdk_component.py`
 - `scripts/runpod_sdk_cycle_start.sh`
@@ -109,6 +110,36 @@ Direct `runpod_provision.py pod-resume` controls:
 - `--bid-per-gpu` (default `0.2`, float `>0`): required for interruptible spot-bid resume path.
 - `--wait-ready` / `--no-wait-ready` (default `--wait-ready`): poll pod status until running/ready after resume.
 - `--wait-timeout-seconds` (default `600`) / `--wait-poll-seconds` (default `10`): resume wait timing controls.
+
+## Interactive Testing Flow (`scripts/runpod_cycle_interactive_test.sh`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `RUNPOD_TEST_SESSION_ID` | `default` | string | Session namespace used to derive reusable interactive run id when `RUNPOD_CYCLE_RUN_ID` is unset | `bash scripts/runpod_cycle_interactive_test.sh up` |
+| `RUNPOD_CYCLE_RUN_ID` | `runpod-interactive-<session_id>` | string | Stable run id/session root reused across `up`/`down`/manual train control commands | same |
+| `RUNPOD_INTERRUPTIBLE` | `1` (interactive wrapper default) | `0`, `1` | Interactive `up` default requests spot/interruptible unless caller overrides | same |
+| `RUNPOD_CLOUD_TYPE` | `SECURE` (interactive wrapper default) | `SECURE`, `COMMUNITY` | Cloud tier for interactive `up` path | same |
+| `RUNPOD_RESUME_STOPPED_POD` | `1` | `0`, `1` | Interactive `up` keeps resume-first behavior (reuse stopped pod before creating new capacity) | same |
+| `RUNPOD_TERMINATE_ON_SSH_NOT_READY` | `0` (interactive wrapper default) | `0`, `1` | Interactive `up` avoids auto-terminate on SSH readiness timeout by default | same |
+| `RUNPOD_INTERACTIVE_TRAIN_ID` | `manual_<utc-ts>` | string | Manual train run id suffix and remote manual directory name (`manual_*`) | `bash scripts/runpod_cycle_interactive_test.sh train-start` |
+| `RUNPOD_INTERACTIVE_STOP_EXISTING` | `1` | `0`, `1` | Before new manual train launch, terminate prior `train_baseline.py`/`torchrun`/preset processes | same |
+| `RUNPOD_INTERACTIVE_FETCH_POLICY` | `if_missing` | `if_missing`, `always`, `never` | Controls whether interactive train-start refreshes HF aggregate fetch manifest | same |
+| `RUNPOD_HF_DATASET_REPO_ID` | `LogicLark-QuantumQuill/chess-bot-datasets` | HF dataset repo id | Source repo for interactive HF aggregate fetch | same |
+| `RUNPOD_HF_DATASET_PATH_PREFIX` | `validated_datasets` | path prefix string | Prefix scanned for `--all-latest` HF dataset fetch in interactive mode | same |
+| `RUNPOD_HF_DATASET_SCHEMA_FILTER` | `game_jsonl_runtime_splice_v1` | schema string (`auto` or explicit) | Schema selection forwarded to preset/script for interactive run | same |
+| `RUNPOD_INTERACTIVE_TRAIN_EPOCHS` | `1` | integer `>=1` | Epochs for manual interactive train launch | same |
+| `RUNPOD_INTERACTIVE_TRAIN_BATCH_SIZE_OVERRIDE` | unset | integer `>=1` | Optional fixed batch override for interactive run (unset keeps preset auto/default behavior) | same |
+| `RUNPOD_INTERACTIVE_TRAIN_NUM_WORKERS_OVERRIDE` | unset | integer `>=0` | Optional fixed DataLoader workers override for interactive run | same |
+| `RUNPOD_INTERACTIVE_TRAIN_MAX_TOTAL_ROWS` | `0` | integer `>=0` | Optional total-row cap passed via preset extra args (`0` disables cap) | same |
+| `RUNPOD_INTERACTIVE_TRAIN_ROLLOUT_HORIZON` | `8` | integer `>=1` | Rollout horizon for interactive train extra args | same |
+| `RUNPOD_INTERACTIVE_TRAIN_CLOSENESS_HORIZON` | `${RUNPOD_INTERACTIVE_TRAIN_ROLLOUT_HORIZON}` | integer `>=1` | Closeness horizon for interactive train extra args | same |
+| `RUNPOD_INTERACTIVE_TRAIN_NPROC_PER_NODE` | `${RUNPOD_FULL_TRAIN_NPROC_PER_NODE}` or `${RUNPOD_GPU_COUNT}` or `1` | integer `>=1` | Distributed process count for interactive training launch | same |
+| `RUNPOD_INTERACTIVE_REQUIRE_RUNTIME_SPLICE_CACHE` | `1` | `0`, `1` | Interactive train cache requirement forwarded to preset (`TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE`) | same |
+
+Interactive flow precedence/interaction notes:
+- interactive script defaults are wrapper-level and can be overridden by explicitly exported env vars.
+- training-stop and watch target the last tracked manual run from:
+  - `artifacts/runpod_cycles/<run_id>/interactive/latest_manual_train.json`
+- interactive train launch writes remote `manual_*` subdirectories and does not auto-stop pod compute on completion.
 
 ## RunPod SDK Component (`scripts/runpod_sdk_component.py`)
 | Control | Default | Accepted | Effect | Related Command |

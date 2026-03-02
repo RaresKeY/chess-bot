@@ -34,6 +34,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
 - `scripts/runpod_cycle_full_smoke.sh`
 - `scripts/runpod_cycle_watch_progress.sh`
 - `scripts/runpod_cycle_watchdog.sh`
+- `scripts/runpod_cycle_interactive_test.sh`
 - `scripts/runpod_active_pods_full_status.sh`
 - `scripts/runpod_cycle_full_train_hf.sh`
 - `scripts/runpod_cycle_report_style.py`
@@ -207,6 +208,21 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - saves provisioning JSON to `artifacts/runpod_cycles/<run_id>/provision.json`
   - initializes a per-run markdown report under `artifacts/runpod_cycles/<run_id>/reports/observations.md`
   - appends a `RUNNING` record to the tracked pod registry (`config/runpod_tracked_pods.jsonl`)
+- `scripts/runpod_cycle_interactive_test.sh`
+  - separate interactive/manual testing wrapper with reusable session model (`RUNPOD_TEST_SESSION_ID` -> `RUNPOD_CYCLE_RUN_ID`)
+  - `up` uses resume-first start defaults for iterative testing:
+    - `RUNPOD_INTERRUPTIBLE=1` default
+    - `RUNPOD_CLOUD_TYPE=SECURE` default
+    - `RUNPOD_RESUME_STOPPED_POD=1` default
+    - `RUNPOD_TERMINATE_ON_SSH_NOT_READY=0` default
+  - provides explicit manual training control commands:
+    - `train-start`: optional pre-stop of existing train processes, optional HF fetch refresh, background launch into `manual_*` remote run dir
+    - `train-stop`: controlled stop/kill of tracked manual training process and sentinel exit write
+    - `train-status`: quick remote GPU/process/progress/log snapshot for tracked manual run
+    - `watch`: attaches existing progress watcher to tracked manual run paths
+  - tracks active manual-run paths in:
+    - `artifacts/runpod_cycles/<run_id>/interactive/latest_manual_train.json`
+  - keeps full-flow orchestration unchanged (no modification of `runpod_full_train_easy.sh` or `runpod_cycle_full_train_hf.sh` behavior)
 - `scripts/container_ensure_openssh.sh`
   - explicit container bootstrap helper that installs/verifies `openssh-client` (`ssh`, `ssh-keygen`) through shared RunPod helpers.
 - `scripts/runpod_cycle_push_dataset.sh`
