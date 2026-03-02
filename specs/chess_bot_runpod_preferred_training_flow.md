@@ -32,6 +32,19 @@ Define the current preferred end-to-end RunPod training flow, including exact op
     - `num_workers_per_rank = min(cpu_based_per_rank, ddp_suggested_per_rank, hard_cap_per_rank)`
   - batch size chosen by remote VRAM tier heuristic
   - on RTX 5090 without explicit batch override, flow now uses an auto retry ladder (`4096 -> 3072 -> 2048`) and falls back on OOM
+- Distributed startup safety defaults (multi-GPU):
+  - `RUNPOD_FULL_TRAIN_NCCL_SAFE_DEFAULTS=1` (default)
+  - when `RUNPOD_FULL_TRAIN_NPROC_PER_NODE>1`, flow applies default envs if not already set in pod env:
+    - `NCCL_IB_DISABLE=1`
+    - `NCCL_P2P_DISABLE=1`
+    - `NCCL_P2P_LEVEL=LOC`
+    - `TORCH_NCCL_ASYNC_ERROR_HANDLING=1`
+    - `TORCH_NCCL_ENABLE_MONITORING=1`
+    - `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800`
+    - `TORCH_NCCL_BLOCKING_WAIT=1`
+    - `TORCH_NCCL_DUMP_ON_TIMEOUT=1`
+    - `TORCH_NCCL_TRACE_BUFFER_SIZE=2000`
+    - `NCCL_DEBUG=WARN`
 - Fast-stage subset option:
   - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS` can cap effective train+val rows after indexing/cache load (auto split by original train/val ratio)
   - optional explicit split caps: `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`, `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`

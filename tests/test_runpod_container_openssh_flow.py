@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -68,9 +69,9 @@ exit 0
                     "bash",
                     "-lc",
                     f"source scripts/runpod_cycle_common.sh && "
-                    f"PATH='{fakebin}:/bin:/usr/bin' runpod_cycle_try_install_openssh_client '{marker}' && "
-                    f"PATH='{fakebin}:/bin:/usr/bin' command -v ssh >/dev/null && "
-                    f"PATH='{fakebin}:/bin:/usr/bin' command -v ssh-keygen >/dev/null && "
+                    f"PATH='{fakebin}:/bin' runpod_cycle_try_install_openssh_client '{marker}' && "
+                    f"PATH='{fakebin}:/bin' command -v ssh >/dev/null && "
+                    f"PATH='{fakebin}:/bin' command -v ssh-keygen >/dev/null && "
                     "printf ok",
                 ],
                 check=True,
@@ -89,13 +90,15 @@ exit 0
             log_path = root / "apt.log"
             self._write_fake_apt_get(fakebin, log_path)
             key_base = root / "managed_key"
+            path_env = f"{fakebin}:/bin"
+            had_ssh_keygen_before = shutil.which("ssh-keygen", path=path_env) is not None
             proc = subprocess.run(
                 [
                     "bash",
                     "-lc",
                     f"source scripts/runpod_cycle_common.sh && "
                     f"export RUNPOD_TEMP_SSH_KEY_BASE='{key_base}' && "
-                    f"PATH='{fakebin}:/bin:/usr/bin' runpod_cycle_prepare_ssh_client_files /work && "
+                    f"PATH='{path_env}' runpod_cycle_prepare_ssh_client_files /work && "
                     f"test -f '{key_base}' && test -f '{key_base}.pub' && printf ok",
                 ],
                 check=True,
@@ -103,4 +106,5 @@ exit 0
                 text=True,
             )
             self.assertEqual(proc.stdout, "ok")
-            self.assertIn("install -y openssh-client", log_path.read_text(encoding="utf-8"))
+            if not had_ssh_keygen_before:
+                self.assertIn("install -y openssh-client", log_path.read_text(encoding="utf-8"))
