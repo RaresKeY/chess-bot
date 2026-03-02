@@ -272,6 +272,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - single-run telemetry snapshot that merges latest event/checkpoint rows with `runpod_cycle_status.sh --no-write`
 - `scripts/runpod_cycle_full_train_hf.sh`
   - sequential host-side orchestration for a full HF-backed training run: GPU selection (`gpu-search` with fallback), start pod, remote HF fetch, remote context probe/spec suggestions, async remote training, local progress watch, collect artifacts, stop pod
+  - current context-probe mode is minimal/stability-first: writes placeholder context/spec-suggestion artifacts (`context_probe_disabled_minimal`) before training launch
   - runs a remote GPU sampler during training and writes per-run pre-train and post-run GPU/dataset/parameter observation artifacts for tuning future runs
   - writes a quick local play-test command (`.venv/bin/python main.py --model <collected model>`) into the run directory after collection
   - forwards `RUNPOD_HF_DATASET_SCHEMA_FILTER` to the remote preset and direct fallback path so compact game datasets (`game_jsonl_runtime_splice_v1`) can be selected explicitly from mixed HF repos
@@ -290,6 +291,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
     - `hard_cap_per_rank = floor(RUNPOD_FULL_TRAIN_NUM_WORKERS_HARD_CAP / TRAIN_NPROC_PER_NODE)` (default total cap `32`)
     - `auto_num_workers_per_rank = min(cpu_based_per_rank, ddp_suggested_per_rank, hard_cap_per_rank)`
     - effective total workers = `auto_num_workers_per_rank * TRAIN_NPROC_PER_NODE`
+  - multi-GPU full-train now applies NCCL-safe default envs when `RUNPOD_FULL_TRAIN_NCCL_SAFE_DEFAULTS=1` (default) and `TRAIN_NPROC_PER_NODE>1`:
+    - default values: `NCCL_IB_DISABLE=1`, `NCCL_P2P_DISABLE=1`, `NCCL_P2P_LEVEL=LOC`, `TORCH_NCCL_ASYNC_ERROR_HANDLING=1`, `TORCH_NCCL_ENABLE_MONITORING=1`, `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800`, `TORCH_NCCL_BLOCKING_WAIT=1`, `TORCH_NCCL_DUMP_ON_TIMEOUT=1`, `TORCH_NCCL_TRACE_BUFFER_SIZE=2000`, `NCCL_DEBUG=WARN`
+    - each default is overrideable by matching `RUNPOD_FULL_TRAIN_*` controls or by explicitly pre-setting raw `NCCL_*` / `TORCH_NCCL_*` env vars in pod environment
   - supports subset caps for fast-stage runs:
     - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS`
     - `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`

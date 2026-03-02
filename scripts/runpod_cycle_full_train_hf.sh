@@ -44,6 +44,10 @@ FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING="${RUNPOD_FULL_TRAIN_TORCH_NCCL_ASYNC_ERROR
 FLOW_TORCH_NCCL_ENABLE_MONITORING="${RUNPOD_FULL_TRAIN_TORCH_NCCL_ENABLE_MONITORING:-1}"
 FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${RUNPOD_FULL_TRAIN_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}"
 FLOW_NCCL_DEBUG="${RUNPOD_FULL_TRAIN_NCCL_DEBUG:-WARN}"
+FLOW_NCCL_P2P_LEVEL="${RUNPOD_FULL_TRAIN_NCCL_P2P_LEVEL:-LOC}"
+FLOW_TORCH_NCCL_BLOCKING_WAIT="${RUNPOD_FULL_TRAIN_TORCH_NCCL_BLOCKING_WAIT:-1}"
+FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT="${RUNPOD_FULL_TRAIN_TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
+FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE="${RUNPOD_FULL_TRAIN_TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}"
 
 GPU_SEARCH_JSON="${CYCLE_DIR}/gpu_search.json"
 GPU_SELECTION_JSON="${CYCLE_DIR}/gpu_selection.json"
@@ -238,8 +242,8 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Requested GPU count: \`${FLOW_GPU_COUNT}\`" \
   "- Requested train nproc-per-node: \`${FLOW_TRAIN_NPROC_PER_NODE}\`" \
   "- NCCL safe defaults enabled: \`${FLOW_NCCL_SAFE_DEFAULTS}\`" \
-  "- NCCL defaults (ib/p2p/debug): \`${FLOW_NCCL_IB_DISABLE}\`/\`${FLOW_NCCL_P2P_DISABLE}\`/\`${FLOW_NCCL_DEBUG}\`" \
-  "- Torch NCCL defaults (async/monitoring/heartbeat): \`${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}\`/\`${FLOW_TORCH_NCCL_ENABLE_MONITORING}\`/\`${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}\`" \
+  "- NCCL defaults (ib/p2p/p2p-level/debug): \`${FLOW_NCCL_IB_DISABLE}\`/\`${FLOW_NCCL_P2P_DISABLE}\`/\`${FLOW_NCCL_P2P_LEVEL}\`/\`${FLOW_NCCL_DEBUG}\`" \
+  "- Torch NCCL defaults (async/monitoring/heartbeat/blocking/dump/trace): \`${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}\`/\`${FLOW_TORCH_NCCL_ENABLE_MONITORING}\`/\`${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}\`/\`${FLOW_TORCH_NCCL_BLOCKING_WAIT}\`/\`${FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT}\`/\`${FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE}\`" \
   "- GPU search JSON: \`${GPU_SEARCH_JSON}\`" \
   "- GPU selection JSON: \`${GPU_SELECTION_JSON}\`" \
   ""
@@ -317,179 +321,12 @@ telemetry_checkpoint "remote_hf_fetch" "done" "hf datasets fetched"
 
 telemetry_checkpoint "context_probe" "running" "collecting context probe"
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-  "CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' SUGGESTIONS_JSON='${REMOTE_SUGGESTIONS_JSON}' SUGGESTIONS_MD='${REMOTE_SUGGESTIONS_MD}' HF_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' bash -s" \
-  <<'EOF' 2>&1 | tee "${REMOTE_CONTEXT_LOG}"
-set -Eeuo pipefail
-mkdir -p "${REMOTE_RUN_DIR}"
-'/opt/venvs/chessbot/bin/python' - <<'PY'
-import csv
-import json
-import math
-import os
-import subprocess
-from pathlib import Path
-
-def count_jsonl_rows(path: Path) -> int:
-    n = 0
-    with path.open("rb") as f:
-        for line in f:
-            if line.strip():
-                n += 1
-    return n
-
-manifest_path = Path(os.environ["HF_MANIFEST"])
-data = json.loads(manifest_path.read_text(encoding="utf-8"))
-train_paths = [Path(p) for p in data.get("aggregate", {}).get("train_paths", []) if p]
-val_paths = [Path(p) for p in data.get("aggregate", {}).get("val_paths", []) if p]
-
-dataset_files = []
-total_bytes = 0
-total_rows = {"train": 0, "val": 0}
-for split, paths in (("train", train_paths), ("val", val_paths)):
-    for p in paths:
-        size_b = p.stat().st_size if p.exists() else 0
-        rows = count_jsonl_rows(p) if p.exists() else 0
-        total_bytes += size_b
-        total_rows[split] += rows
-        dataset_files.append({
-            "split": split,
-            "path": str(p),
-            "size_bytes": size_b,
-            "rows": rows,
-        })
-
-gpu_rows = []
-try:
-    out = subprocess.check_output(
-        [
-            "nvidia-smi",
-            "--query-gpu=name,memory.total,memory.free,memory.used,driver_version",
-            "--format=csv,noheader,nounits",
-        ],
-        text=True,
-        stderr=subprocess.STDOUT,
-    )
-    for line in out.strip().splitlines():
-        parts = [x.strip() for x in line.split(",")]
-        if len(parts) >= 5:
-            gpu_rows.append(
-                {
-                    "name": parts[0],
-                    "memory_total_mib": int(float(parts[1] or 0)),
-                    "memory_free_mib": int(float(parts[2] or 0)),
-                    "memory_used_mib": int(float(parts[3] or 0)),
-                    "driver_version": parts[4],
-                }
-            )
-except Exception as exc:
-    gpu_rows.append({"nvidia_smi_error": str(exc)})
-
-torch_info = {}
-try:
-    import torch  # type: ignore
-    torch_info = {
-        "torch_version": getattr(torch, "__version__", None),
-        "cuda_is_available": bool(torch.cuda.is_available()),
-        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
-    }
-    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-        prop = torch.cuda.get_device_properties(0)
-        torch_info["cuda0"] = {
-            "name": prop.name,
-            "total_memory_mib": int(prop.total_memory // (1024 * 1024)),
-            "multi_processor_count": int(getattr(prop, "multi_processor_count", 0)),
-        }
-except Exception as exc:
-    torch_info = {"torch_import_error": str(exc)}
-
-vram_mib = 0
-if gpu_rows and "memory_total_mib" in gpu_rows[0]:
-    vram_mib = int(gpu_rows[0]["memory_total_mib"])
-elif isinstance(torch_info.get("cuda0"), dict):
-    vram_mib = int(torch_info["cuda0"].get("total_memory_mib") or 0)
-
-if vram_mib >= 70000:
-    batch_size, workers = 8192, 8
-elif vram_mib >= 44000:
-    batch_size, workers = 4096, 8
-elif vram_mib >= 22000:
-    batch_size, workers = 2048, 6
-elif vram_mib >= 15000:
-    batch_size, workers = 1024, 4
-else:
-    batch_size, workers = 512, 2
-
-context = {
-    "run_id": os.environ["CONTEXT_JSON"].split("/")[-1].replace("context_probe_", "").replace(".json", ""),
-    "hf_manifest": str(manifest_path),
-    "dataset": {
-        "dataset_count": int(data.get("aggregate", {}).get("dataset_count", 0)),
-        "train_file_count": int(data.get("aggregate", {}).get("train_count", 0)),
-        "val_file_count": int(data.get("aggregate", {}).get("val_count", 0)),
-        "total_bytes": int(total_bytes),
-        "total_gib": round(total_bytes / (1024 ** 3), 4),
-        "total_rows": total_rows,
-        "files": dataset_files,
-    },
-    "gpu": {"devices": gpu_rows},
-    "torch": torch_info,
-}
-
-suggestions = {
-    "purpose": "runpod_full_training_hf_sequential",
-    "gpu_name": (gpu_rows[0].get("name") if gpu_rows and isinstance(gpu_rows[0], dict) else None),
-    "vram_total_mib": vram_mib,
-    "dataset_summary": {
-        "dataset_count": context["dataset"]["dataset_count"],
-        "train_rows": context["dataset"]["total_rows"]["train"],
-        "val_rows": context["dataset"]["total_rows"]["val"],
-        "total_gib": context["dataset"]["total_gib"],
-    },
-    "suggested_training_params": {
-        "epochs": 100,
-        "batch_size": batch_size,
-        "num_workers": workers,
-        "amp": True,
-        "phase_weight_endgame": 2.0,
-        "disable_early_stopping_for_full_run": True,
-        "train_extra_args": "--epochs 100 --early-stopping-patience 0",
-    },
-    "notes": [
-        "Batch-size suggestion is a conservative VRAM-tier heuristic; verify with collected peak GPU memory samples.",
-        "Full run keeps HF aggregate dataset training and reuses the fetched manifest to avoid a second download.",
-    ],
-}
-
-Path(os.environ["CONTEXT_JSON"]).write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
-Path(os.environ["SUGGESTIONS_JSON"]).write_text(json.dumps(suggestions, indent=2) + "\n", encoding="utf-8")
-Path(os.environ["SUGGESTIONS_MD"]).write_text(
-    "\n".join(
-        [
-            "# GPU Training Spec Suggestions",
-            "",
-            f"- GPU: `{suggestions.get('gpu_name')}`",
-            f"- VRAM (MiB): `{suggestions.get('vram_total_mib')}`",
-            f"- Dataset count: `{suggestions['dataset_summary']['dataset_count']}`",
-            f"- Train rows: `{suggestions['dataset_summary']['train_rows']}`",
-            f"- Val rows: `{suggestions['dataset_summary']['val_rows']}`",
-            f"- Dataset total GiB: `{suggestions['dataset_summary']['total_gib']}`",
-            f"- Suggested batch size: `{batch_size}`",
-            f"- Suggested num_workers: `{workers}`",
-            "- Suggested run: `--epochs 100 --early-stopping-patience 0` with progress JSONL enabled",
-            "",
-            "These are pre-training suggestions. Compare against collected peak VRAM samples after the run.",
-            "",
-        ]
-    ),
-    encoding="utf-8",
-)
-print(json.dumps({"context_probe_written": os.environ["CONTEXT_JSON"], "suggestions_written": os.environ["SUGGESTIONS_JSON"]}))
-PY
-EOF
+  "set -Eeuo pipefail; mkdir -p '${REMOTE_RUN_DIR}'; printf '%s\n' '{\"status\":\"context_probe_disabled_minimal\"}' > '${REMOTE_CONTEXT_JSON}'; printf '%s\n' '{\"status\":\"context_probe_disabled_minimal\"}' > '${REMOTE_SUGGESTIONS_JSON}'; printf '%s\n' '# GPU Training Spec Suggestions' '' '- context probe disabled (minimal mode)' > '${REMOTE_SUGGESTIONS_MD}'; echo '{\"context_probe_written\":\"${REMOTE_CONTEXT_JSON}\",\"suggestions_written\":\"${REMOTE_SUGGESTIONS_JSON}\",\"mode\":\"minimal\"}'" \
+  2>&1 | tee "${REMOTE_CONTEXT_LOG}"
 telemetry_checkpoint "context_probe" "done" "context probe complete"
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
-  "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' REMOTE_BEST_CHECKPOINT='${REMOTE_BEST_CHECKPOINT}' REMOTE_EPOCH_CHECKPOINT_DIR='${REMOTE_EPOCH_CHECKPOINT_DIR}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' HF_DATASET_SCHEMA_FILTER='${HF_DATASET_SCHEMA_FILTER}' HF_DATASET_NAME='${HF_DATASET_NAME}' HF_DATASET_VERSION='${HF_DATASET_VERSION}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' FLOW_RUNTIME_MIN_CONTEXT='${FLOW_RUNTIME_MIN_CONTEXT}' FLOW_RUNTIME_MIN_TARGET='${FLOW_RUNTIME_MIN_TARGET}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_MAX_TRAIN_ROWS='${FLOW_MAX_TRAIN_ROWS}' FLOW_MAX_VAL_ROWS='${FLOW_MAX_VAL_ROWS}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_NCCL_SAFE_DEFAULTS='${FLOW_NCCL_SAFE_DEFAULTS}' FLOW_NCCL_IB_DISABLE='${FLOW_NCCL_IB_DISABLE}' FLOW_NCCL_P2P_DISABLE='${FLOW_NCCL_P2P_DISABLE}' FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING='${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}' FLOW_TORCH_NCCL_ENABLE_MONITORING='${FLOW_TORCH_NCCL_ENABLE_MONITORING}' FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC='${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}' FLOW_NCCL_DEBUG='${FLOW_NCCL_DEBUG}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
+  "RUN_ID='${RUN_ID}' REMOTE_REPO_DIR='${REMOTE_REPO_DIR}' REMOTE_RUN_DIR='${REMOTE_RUN_DIR}' REMOTE_CONTEXT_JSON='${REMOTE_CONTEXT_JSON}' REMOTE_PROGRESS_JSONL='${REMOTE_PROGRESS_JSONL}' REMOTE_TRAIN_LOG='${REMOTE_TRAIN_LOG}' REMOTE_TRAIN_PID_FILE='${REMOTE_TRAIN_PID_FILE}' REMOTE_TRAIN_EXIT_CODE_FILE='${REMOTE_TRAIN_EXIT_CODE_FILE}' REMOTE_GPU_SAMPLES_CSV='${REMOTE_GPU_SAMPLES_CSV}' REMOTE_HF_FETCH_MANIFEST='${REMOTE_HF_FETCH_MANIFEST}' REMOTE_BEST_CHECKPOINT='${REMOTE_BEST_CHECKPOINT}' REMOTE_EPOCH_CHECKPOINT_DIR='${REMOTE_EPOCH_CHECKPOINT_DIR}' HF_DATASET_REPO_ID='${HF_DATASET_REPO_ID}' HF_DATASET_PATH_PREFIX='${HF_DATASET_PATH_PREFIX}' HF_DATASET_SCHEMA_FILTER='${HF_DATASET_SCHEMA_FILTER}' HF_DATASET_NAME='${HF_DATASET_NAME}' HF_DATASET_VERSION='${HF_DATASET_VERSION}' FLOW_EPOCHS='${FLOW_EPOCHS}' FLOW_GPU_SAMPLE_SECONDS='${FLOW_GPU_SAMPLE_SECONDS}' FLOW_RUNTIME_MIN_CONTEXT='${FLOW_RUNTIME_MIN_CONTEXT}' FLOW_RUNTIME_MIN_TARGET='${FLOW_RUNTIME_MIN_TARGET}' FLOW_RUNTIME_MAX_SAMPLES_PER_GAME='${FLOW_RUNTIME_MAX_SAMPLES_PER_GAME}' FLOW_MAX_TOTAL_ROWS='${FLOW_MAX_TOTAL_ROWS}' FLOW_MAX_TRAIN_ROWS='${FLOW_MAX_TRAIN_ROWS}' FLOW_MAX_VAL_ROWS='${FLOW_MAX_VAL_ROWS}' FLOW_TRAIN_NPROC_PER_NODE='${FLOW_TRAIN_NPROC_PER_NODE}' FLOW_NCCL_SAFE_DEFAULTS='${FLOW_NCCL_SAFE_DEFAULTS}' FLOW_NCCL_IB_DISABLE='${FLOW_NCCL_IB_DISABLE}' FLOW_NCCL_P2P_DISABLE='${FLOW_NCCL_P2P_DISABLE}' FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING='${FLOW_TORCH_NCCL_ASYNC_ERROR_HANDLING}' FLOW_TORCH_NCCL_ENABLE_MONITORING='${FLOW_TORCH_NCCL_ENABLE_MONITORING}' FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC='${FLOW_TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}' FLOW_NCCL_DEBUG='${FLOW_NCCL_DEBUG}' FLOW_NCCL_P2P_LEVEL='${FLOW_NCCL_P2P_LEVEL}' FLOW_TORCH_NCCL_BLOCKING_WAIT='${FLOW_TORCH_NCCL_BLOCKING_WAIT}' FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT='${FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT}' FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE='${FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE}' RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE='${RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE:-}' RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE='${RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE:-}' bash -s" \
   <<'EOF' 2>&1 | tee "${REMOTE_TRAIN_LAUNCH_LOG}"
 set -Eeuo pipefail
 mkdir -p "${REMOTE_RUN_DIR}"
@@ -563,6 +400,18 @@ if [[ "${NCCL_SAFE_DEFAULTS}" == "1" && "${TRAIN_NPROC_PER_NODE}" -gt 1 ]]; then
   fi
   if [[ -z "${NCCL_DEBUG:-}" ]]; then
     export NCCL_DEBUG="${FLOW_NCCL_DEBUG:-WARN}"
+  fi
+  if [[ -z "${NCCL_P2P_LEVEL:-}" ]]; then
+    export NCCL_P2P_LEVEL="${FLOW_NCCL_P2P_LEVEL:-LOC}"
+  fi
+  if [[ -z "${TORCH_NCCL_BLOCKING_WAIT:-}" ]]; then
+    export TORCH_NCCL_BLOCKING_WAIT="${FLOW_TORCH_NCCL_BLOCKING_WAIT:-1}"
+  fi
+  if [[ -z "${TORCH_NCCL_DUMP_ON_TIMEOUT:-}" ]]; then
+    export TORCH_NCCL_DUMP_ON_TIMEOUT="${FLOW_TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
+  fi
+  if [[ -z "${TORCH_NCCL_TRACE_BUFFER_SIZE:-}" ]]; then
+    export TORCH_NCCL_TRACE_BUFFER_SIZE="${FLOW_TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}"
   fi
 fi
 cpu_threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
@@ -737,7 +586,7 @@ fi
   echo "[runpod-cycle-full-train-hf] best_checkpoint_out=${TRAIN_BEST_CHECKPOINT_OUT}"
   echo "[runpod-cycle-full-train-hf] epoch_checkpoint_dir=${TRAIN_EPOCH_CHECKPOINT_DIR}"
   echo "[runpod-cycle-full-train-hf] hf_manifest=${REMOTE_HF_FETCH_MANIFEST}"
-  echo "[runpod-cycle-full-train-hf] nccl_safe_defaults=${NCCL_SAFE_DEFAULTS} nccl_ib_disable=${NCCL_IB_DISABLE:-<unset>} nccl_p2p_disable=${NCCL_P2P_DISABLE:-<unset>} nccl_debug=${NCCL_DEBUG:-<unset>} torch_nccl_async_error_handling=${TORCH_NCCL_ASYNC_ERROR_HANDLING:-<unset>} torch_nccl_enable_monitoring=${TORCH_NCCL_ENABLE_MONITORING:-<unset>} torch_nccl_heartbeat_timeout_sec=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-<unset>}"
+  echo "[runpod-cycle-full-train-hf] nccl_safe_defaults=${NCCL_SAFE_DEFAULTS} nccl_ib_disable=${NCCL_IB_DISABLE:-<unset>} nccl_p2p_disable=${NCCL_P2P_DISABLE:-<unset>} nccl_p2p_level=${NCCL_P2P_LEVEL:-<unset>} nccl_debug=${NCCL_DEBUG:-<unset>} torch_nccl_async_error_handling=${TORCH_NCCL_ASYNC_ERROR_HANDLING:-<unset>} torch_nccl_enable_monitoring=${TORCH_NCCL_ENABLE_MONITORING:-<unset>} torch_nccl_heartbeat_timeout_sec=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-<unset>} torch_nccl_blocking_wait=${TORCH_NCCL_BLOCKING_WAIT:-<unset>} torch_nccl_dump_on_timeout=${TORCH_NCCL_DUMP_ON_TIMEOUT:-<unset>} torch_nccl_trace_buffer_size=${TORCH_NCCL_TRACE_BUFFER_SIZE:-<unset>}"
   echo "[runpod-cycle-full-train-hf] train_preset_script=${TRAIN_PRESET_SCRIPT}"
   echo "[runpod-cycle-full-train-hf] train_preset_has_hf=${preset_has_hf} train_preset_has_progress=${preset_has_progress}"
 } >> "${REMOTE_TRAIN_LOG}"
