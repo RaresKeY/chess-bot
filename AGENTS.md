@@ -22,3 +22,6 @@ That mapping must describe: parameter name, default, accepted values/types, what
 Apply this for new controls and for tweaked existing controls; keep `specs/_readme.md` in sync with any new mapping spec.
 
 on changes, push patches to github before running cloud training.
+
+If running inside a container context (`/run/.containerenv` or `/.containerenv` present), hand off all git staging/commit/push operations to the outside host context.
+Do not execute `git add`, `git commit`, or `git push` from inside the container.

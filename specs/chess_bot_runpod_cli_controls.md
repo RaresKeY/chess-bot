@@ -97,6 +97,7 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `provision`
   - `pod-status`
   - `pod-stop`
+  - `pod-resume` (auto-detects interruptible pods and uses spot-bid resume path)
   - `pod-terminate`
 - Output includes `"component": "runpod_sdk"` so operators can distinguish SDK-driven actions from raw API script outputs.
 - SDK smoke wrappers (separate from raw cycle wrappers):

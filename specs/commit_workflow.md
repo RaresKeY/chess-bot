@@ -31,7 +31,13 @@ When asked to commit, follow this sequence exactly.
 - Commit staged changes: `elevated-staged-commit`.
 - Commit + tag/release flow: `git-release-orchestrator`.
 
-## 6) Pre-commit report
+## 6) Container handoff boundary
+
+- Detect container context before git write operations (`/run/.containerenv` or `/.containerenv`).
+- If in container context, hand off staging/commit/push to outside host context.
+- Do not run `git add`, `git commit`, or `git push` inside container context.
+
+## 7) Pre-commit report
 
 Before finalizing, report:
 

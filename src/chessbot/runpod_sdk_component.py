@@ -44,7 +44,7 @@ def _raise_sdk_runtime_error(context: str, exc: Exception) -> "NoReturn":
     raise SystemExit(f"RunPod SDK {context} failed: {msg}") from exc
 
 
-def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
+def _bool_arg(parser: argparse.ArgumentParser, name: str, default: Optional[bool], help_text: str) -> None:
     parser.add_argument(
         f"--{name}",
         dest=name.replace("-", "_"),
@@ -144,6 +144,27 @@ def _invoke_with_id(fn: Callable[..., Any], pod_id: str) -> Any:
         ((), {"id": pod_id}),
         ((), {"podId": pod_id}),
         ((), {"pod": pod_id}),
+    ]
+    last_err: Optional[Exception] = None
+    for args, kwargs in attempts:
+        try:
+            return fn(*args, **kwargs)
+        except TypeError as exc:
+            last_err = exc
+            continue
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("unreachable")
+
+
+def _invoke_with_id_and_gpu_count(fn: Callable[..., Any], pod_id: str, gpu_count: int) -> Any:
+    attempts: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = [
+        ((pod_id, gpu_count), {}),
+        ((pod_id,), {"gpu_count": gpu_count}),
+        ((pod_id,), {"gpuCount": gpu_count}),
+        ((), {"pod_id": pod_id, "gpu_count": gpu_count}),
+        ((), {"podId": pod_id, "gpuCount": gpu_count}),
+        ((), {"id": pod_id, "gpu_count": gpu_count}),
     ]
     last_err: Optional[Exception] = None
     for args, kwargs in attempts:
@@ -430,6 +451,64 @@ def _sdk_terminate_pod(runpod_mod: Any, pod_id: str) -> Dict[str, Any]:
     return out if isinstance(out, dict) else {"response": out}
 
 
+def _sdk_resume_pod_on_demand(runpod_mod: Any, pod_id: str, gpu_count: int) -> Dict[str, Any]:
+    fn = _first_callable(
+        runpod_mod,
+        (
+            "resume_pod",
+            "pod_resume",
+            "pods.resume",
+            "api.resume_pod",
+        ),
+    )
+    if fn is None:
+        raise SystemExit("RunPod SDK component cannot find a pod resume method in the installed SDK.")
+    try:
+        out = _invoke_with_id_and_gpu_count(fn, pod_id, gpu_count)
+    except Exception as exc:
+        _raise_sdk_runtime_error("pod-resume", exc)
+    return out if isinstance(out, dict) else {"response": out}
+
+
+def _escape_graphql_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _sdk_resume_pod_spot_bid(runpod_mod: Any, pod_id: str, gpu_count: int, bid_per_gpu: float) -> Dict[str, Any]:
+    run_query = _first_callable(
+        runpod_mod,
+        (
+            "api.graphql.run_graphql_query",
+            "graphql.run_graphql_query",
+            "run_graphql_query",
+        ),
+    )
+    if run_query is None:
+        raise SystemExit(
+            "RunPod SDK component cannot find GraphQL query helper needed for spot pod resume."
+        )
+
+    safe_pod_id = _escape_graphql_string(pod_id)
+    safe_bid = float(bid_per_gpu)
+    query = f"""
+    mutation {{
+      podBidResume(input: {{ podId: "{safe_pod_id}", gpuCount: {int(gpu_count)}, bidPerGpu: {safe_bid} }}) {{
+        id
+        desiredStatus
+        imageName
+        machine {{
+          podHostId
+        }}
+      }}
+    }}
+    """
+    try:
+        out = _call_sdk_quietly(run_query, query)
+    except Exception as exc:
+        _raise_sdk_runtime_error("pod-resume", exc)
+    return out if isinstance(out, dict) else {"response": out}
+
+
 def _extract_pod_state(pod: Dict[str, Any]) -> str:
     for key in ("desiredStatus", "desired_status", "status", "machineStatus", "state"):
         value = pod.get(key)
@@ -439,6 +518,30 @@ def _extract_pod_state(pod: Dict[str, Any]) -> str:
     if isinstance(nested, dict):
         return _extract_pod_state(nested)
     return ""
+
+
+def _extract_pod_interruptible(pod: Dict[str, Any]) -> Optional[bool]:
+    for key in ("interruptible", "isInterruptible", "spot"):
+        value = pod.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes"}:
+                return True
+            if lowered in {"0", "false", "no"}:
+                return False
+    pod_type = pod.get("podType") or pod.get("pod_type") or pod.get("type")
+    if isinstance(pod_type, str):
+        lowered = pod_type.strip().lower()
+        if "interrupt" in lowered or lowered == "spot":
+            return True
+        if "on_demand" in lowered or "ondemand" in lowered:
+            return False
+    nested = pod.get("pod")
+    if isinstance(nested, dict):
+        return _extract_pod_interruptible(nested)
+    return None
 
 
 def cmd_gpu_search(args: argparse.Namespace) -> int:
@@ -591,6 +694,67 @@ def cmd_pod_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pod_resume(args: argparse.Namespace) -> int:
+    api_key = _resolve_api_key(args)
+    runpod_mod = _load_runpod_sdk()
+    _set_sdk_api_key(runpod_mod, api_key)
+
+    pod = _sdk_get_pod(runpod_mod, args.pod_id)
+    detected_interruptible = _extract_pod_interruptible(pod)
+    use_interruptible = detected_interruptible if args.interruptible is None else bool(args.interruptible)
+
+    gpu_count = int(args.gpu_count)
+    if gpu_count < 1:
+        raise SystemExit("--gpu-count must be >= 1")
+
+    if use_interruptible:
+        bid_per_gpu = float(args.bid_per_gpu)
+        if bid_per_gpu <= 0:
+            raise SystemExit("--bid-per-gpu must be > 0 for spot/interruptible pod resume")
+        out = _sdk_resume_pod_spot_bid(runpod_mod, args.pod_id, gpu_count, bid_per_gpu)
+        resume_mode = "spot_bid"
+    else:
+        out = _sdk_resume_pod_on_demand(runpod_mod, args.pod_id, gpu_count)
+        resume_mode = "on_demand"
+
+    final_status: Dict[str, Any] = {}
+    if bool(args.wait_ready):
+        deadline = time.time() + int(args.wait_timeout_seconds)
+        last_status = ""
+        while True:
+            final_status = _sdk_get_pod(runpod_mod, args.pod_id)
+            last_status = _extract_pod_state(final_status)
+            if last_status.upper() in {"RUNNING", "READY"}:
+                break
+            if time.time() >= deadline:
+                out = {
+                    "resume_response": out,
+                    "wait_timeout": {
+                        "seconds": int(args.wait_timeout_seconds),
+                        "last_status": last_status,
+                    },
+                }
+                break
+            time.sleep(max(1, int(args.wait_poll_seconds)))
+    else:
+        final_status = _sdk_get_pod(runpod_mod, args.pod_id)
+
+    _print_json(
+        {
+            "component": "runpod_sdk",
+            "pod_id": args.pod_id,
+            "resume_mode": resume_mode,
+            "detected_interruptible": detected_interruptible,
+            "requested_interruptible": args.interruptible,
+            "gpu_count": gpu_count,
+            "bid_per_gpu": float(args.bid_per_gpu),
+            "resume_response": out,
+            "pod_status": final_status,
+        }
+    )
+    return 0
+
+
 def cmd_pod_terminate(args: argparse.Namespace) -> int:
     api_key = _resolve_api_key(args)
     runpod_mod = _load_runpod_sdk()
@@ -659,6 +823,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop = sub.add_parser("pod-stop", help="Stop one pod via RunPod SDK")
     p_stop.add_argument("--pod-id", required=True)
     p_stop.set_defaults(func=cmd_pod_stop)
+
+    p_resume = sub.add_parser("pod-resume", help="Resume one pod via RunPod SDK")
+    p_resume.add_argument("--pod-id", required=True)
+    p_resume.add_argument("--gpu-count", type=int, default=1)
+    p_resume.add_argument("--bid-per-gpu", type=float, default=0.2)
+    _bool_arg(
+        p_resume,
+        "interruptible",
+        None,
+        "Override interruptible mode for resume (default: auto-detect from pod status)",
+    )
+    _bool_arg(p_resume, "wait-ready", True, "Poll until pod reaches running/ready")
+    p_resume.add_argument("--wait-timeout-seconds", type=int, default=900)
+    p_resume.add_argument("--wait-poll-seconds", type=int, default=10)
+    p_resume.set_defaults(func=cmd_pod_resume)
 
     p_term = sub.add_parser("pod-terminate", help="Terminate one pod via RunPod SDK")
     p_term.add_argument("--pod-id", required=True)

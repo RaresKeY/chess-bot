@@ -37,6 +37,11 @@ The SDK component is intentionally modular and independent. Changes here should 
   - fetches current pod status
 - `pod-stop`
   - requests pod stop
+- `pod-resume`
+  - resumes existing stopped pods
+  - auto-detects interruptible pods from `pod-status` and uses GraphQL `podBidResume` with `bidPerGpu` for spot resumes
+  - uses SDK `resume_pod` path for on-demand resumes
+  - supports wait-until-ready polling after resume
 - `pod-terminate`
   - requests pod termination/deletion
 - SDK smoke flow wrappers:

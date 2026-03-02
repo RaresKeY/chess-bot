@@ -8,9 +8,11 @@ from unittest import mock
 
 from src.chessbot.runpod_sdk_component import (
     _choose_template,
+    _extract_pod_interruptible,
     _extract_pod_state,
     _first_callable,
     _invoke_with_id,
+    _invoke_with_id_and_gpu_count,
     _invoke_with_payload,
     _load_runpod_sdk,
     _normalize_rows,
@@ -22,6 +24,7 @@ from src.chessbot.runpod_sdk_component import (
     _sdk_gpu_types,
     build_parser,
     cmd_gpu_search,
+    cmd_pod_resume,
     cmd_pod_status,
     cmd_pod_stop,
     cmd_pod_terminate,
@@ -64,6 +67,9 @@ class _FakeRunpod:
 
     def stop_pod(self, pod_id):
         return {"id": pod_id, "desiredStatus": "EXITED"}
+
+    def resume_pod(self, pod_id, gpu_count):
+        return {"id": pod_id, "desiredStatus": "RUNNING", "gpuCount": gpu_count}
 
     def terminate_pod(self, pod_id):
         return {"id": pod_id, "terminated": True}
@@ -132,6 +138,13 @@ class RunpodSdkComponentTests(unittest.TestCase):
         self.assertFalse(args.pods_only)
         self.assertTrue(args.include_serverless)
 
+    def test_parser_pod_resume_defaults_to_autodetect_interruptible(self):
+        parser = build_parser()
+        args = parser.parse_args(["pod-resume", "--pod-id", "pod-1"])
+        self.assertIsNone(args.interruptible)
+        self.assertEqual(args.gpu_count, 1)
+        self.assertTrue(args.wait_ready)
+
     def test_invoke_with_payload_falls_back_to_keyword_style(self):
         calls = []
 
@@ -160,6 +173,22 @@ class RunpodSdkComponentTests(unittest.TestCase):
         self.assertEqual(out["id"], "pod-1")
         self.assertGreaterEqual(len(calls), 2)
 
+    def test_invoke_with_id_and_gpu_count_falls_back_to_named_args(self):
+        calls = []
+
+        def fn(*args, **kwargs):
+            calls.append((args, kwargs))
+            if args:
+                raise TypeError("positional not supported")
+            if "pod_id" in kwargs and "gpu_count" in kwargs:
+                return {"id": kwargs["pod_id"], "gpu_count": kwargs["gpu_count"]}
+            raise TypeError("wrong signature")
+
+        out = _invoke_with_id_and_gpu_count(fn, "pod-1", 10)
+        self.assertEqual(out["id"], "pod-1")
+        self.assertEqual(out["gpu_count"], 10)
+        self.assertGreaterEqual(len(calls), 2)
+
     def test_normalize_rows_supports_common_keys(self):
         rows = _normalize_rows({"items": [{"a": 1}, "bad"]}, ("gpus", "items"))
         self.assertEqual(rows, [{"a": 1}])
@@ -175,6 +204,10 @@ class RunpodSdkComponentTests(unittest.TestCase):
     def test_extract_pod_state_prefers_top_level_then_nested(self):
         self.assertEqual(_extract_pod_state({"desiredStatus": "RUNNING"}), "RUNNING")
         self.assertEqual(_extract_pod_state({"pod": {"state": "EXITED"}}), "EXITED")
+
+    def test_extract_pod_interruptible_handles_pod_type_strings(self):
+        self.assertTrue(_extract_pod_interruptible({"podType": "INTERRUPTABLE"}))
+        self.assertFalse(_extract_pod_interruptible({"podType": "ON_DEMAND"}))
 
     def test_provision_uses_sdk_component_without_raw_http(self):
         fake = _FakeRunpod()
@@ -316,6 +349,53 @@ class RunpodSdkComponentTests(unittest.TestCase):
             with mock.patch.object(fake, "terminate_pod", return_value={"ok": True}, create=True):
                 self.assertEqual(cmd_pod_terminate(args), 0)
                 self.assertEqual(print_mock.call_args.args[0]["component"], "runpod_sdk")
+
+    def test_cmd_pod_resume_uses_spot_bid_when_interruptible_detected(self):
+        class _FakeGraphql:
+            @staticmethod
+            def run_graphql_query(query):
+                if "podBidResume" not in query:
+                    raise AssertionError("expected podBidResume mutation")
+                return {"data": {"podBidResume": {"id": "pod-1", "desiredStatus": "RUNNING"}}}
+
+        class _FakeApi:
+            graphql = _FakeGraphql()
+
+        class _FakeSpot(_FakeRunpod):
+            api = _FakeApi()
+
+            def __init__(self):
+                super().__init__()
+                self._calls = 0
+
+            def get_pod(self, pod_id):
+                self._calls += 1
+                if self._calls == 1:
+                    return {"id": pod_id, "desiredStatus": "EXITED", "interruptible": True}
+                return {"id": pod_id, "desiredStatus": "RUNNING", "interruptible": True}
+
+        fake = _FakeSpot()
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            pod_id="pod-1",
+            gpu_count=10,
+            bid_per_gpu=0.2,
+            interruptible=None,
+            wait_ready=True,
+            wait_timeout_seconds=2,
+            wait_poll_seconds=1,
+        )
+        with mock.patch("src.chessbot.runpod_sdk_component._resolve_api_key", return_value="SECRET"), mock.patch(
+            "src.chessbot.runpod_sdk_component._load_runpod_sdk", return_value=fake
+        ), mock.patch("src.chessbot.runpod_sdk_component._print_json") as print_mock:
+            rc = cmd_pod_resume(args)
+        self.assertEqual(rc, 0)
+        out = print_mock.call_args.args[0]
+        self.assertEqual(out["resume_mode"], "spot_bid")
+        self.assertEqual(out["gpu_count"], 10)
+        self.assertTrue(out["detected_interruptible"])
 
     def test_resolve_template_fallback_when_sdk_has_no_template_list(self):
         fake = _FakeRunpod()

@@ -56,6 +56,8 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_BENCH_BATCH_SIZE` | `auto` | `auto` or integer | Base batch strategy; auto resolves by remote VRAM | same |
 | `RUNPOD_BENCH_NUM_WORKERS` | `8` | integer `>=0` | DataLoader workers per rank | same |
 | `RUNPOD_BENCH_DISTRIBUTED_BACKEND` | `nccl` | `nccl`, `gloo` | DDP backend for trial launch | same |
+| `RUNPOD_BENCH_ROLLOUT_HORIZON` | `8` | integer `>=1` | Baseline rollout horizon used by benchmark trials | same |
+| `RUNPOD_BENCH_CLOSENESS_HORIZON` | `${RUNPOD_BENCH_ROLLOUT_HORIZON}` | integer `>=1` | Baseline closeness horizon used by benchmark trials | same |
 | `RUNPOD_BENCH_RUNTIME_MAX_SAMPLES_PER_GAME` | `auto` | `auto` or integer `>=0` | Runtime splice cap. `auto` now resolves from fetched cache manifests; fallback `0` if unresolved | same |
 | `RUNPOD_BENCH_MAX_TOTAL_ROWS` | `0` | integer `>=0` | Global row cap passed to training | same |
 | `RUNPOD_BENCH_NCCL_SAFE_FALLBACK_ENABLED` | `1` | `0`, `1` | Retry stalled pre-epoch NCCL trials with safer env | same |
@@ -94,11 +96,14 @@ Explicit-GPU provisioning behavior note (current):
 | `--template-id` / `--template-name` (`provision`) | `""` / `chess-bot-training` | template id/name | Template selection for pod create via SDK path | same |
 | `--image-name` (`provision`) | `""` | docker image reference | Explicit image for SDK create call; required by some SDK variants when no `template_id` is set | same |
 | `--gpu-type-id` (`provision`) | unset | GPU type id/name | Explicit GPU type override; skips auto-pick from ranked SDK GPU list | same |
+| `--gpu-count` (`provision`, `pod-resume`) | `1` | integer `>=1` | Requested GPU count for create or resume operation | same |
 | `--interruptible` (`provision`) | `False` | boolean flag | Requests spot/interruptible pod in SDK provision payload | same |
-| `--wait-ready` (`provision`) | `True` | boolean flag | Poll pod status after create until running/ready or timeout | same |
-| `--wait-timeout-seconds` (`provision`) | `900` | integer `>=1` | Wait deadline for `--wait-ready` polling | same |
-| `--wait-poll-seconds` (`provision`) | `10` | integer `>=1` | Poll interval for `--wait-ready` | same |
-| `--pod-id` (`pod-status`, `pod-stop`, `pod-terminate`) | required | string | Target pod id for status/stop/terminate operations | same |
+| `--interruptible` (`pod-resume`) | auto-detect (`None`) | boolean flag | Resume-mode override. Default auto-detects from pod status and uses spot-bid resume for interruptible pods | same |
+| `--bid-per-gpu` (`pod-resume`) | `0.2` | float `>0` | Spot bid used by GraphQL `podBidResume` for interruptible resume path | same |
+| `--wait-ready` (`provision`, `pod-resume`) | `True` | boolean flag | Poll pod status until running/ready or timeout after create/resume | same |
+| `--wait-timeout-seconds` (`provision`, `pod-resume`) | `900` | integer `>=1` | Wait deadline for `--wait-ready` polling | same |
+| `--wait-poll-seconds` (`provision`, `pod-resume`) | `10` | integer `>=1` | Poll interval for `--wait-ready` | same |
+| `--pod-id` (`pod-status`, `pod-stop`, `pod-resume`, `pod-terminate`) | required | string | Target pod id for status/stop/resume/terminate operations | same |
 
 ## RunPod SDK Smoke Flow Wrappers (`scripts/runpod_sdk_cycle_*.sh`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -129,6 +134,8 @@ Explicit-GPU provisioning behavior note (current):
 | `RUNPOD_HF_DATASET_PATH_PREFIX` | `validated_datasets` | repo prefix | Dataset path root in HF repo | same |
 | `RUNPOD_HF_DATASET_SCHEMA_FILTER` | `game_jsonl_runtime_splice_v1` | schema id string | Chooses dataset format from HF manifests | same |
 | `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS` | `5000` (smoke wrapper) / unset-`0` (easy/full-HF wrappers) | integer `>=0` | Training subset cap; smoke wrapper now defaults to a 5K-row quick run (`~4445` train + `~555` val by split ratio), while easy/full-HF keep uncapped behavior unless overridden | same |
+| `RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON` | `8` | integer `>=1` | Full-HF rollout horizon (mapped to `TRAIN_ROLLOUT_HORIZON` and baseline `--rollout-horizon`) | same |
+| `RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON` | `${RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON}` | integer `>=1` | Full-HF closeness horizon (mapped to `TRAIN_CLOSENESS_HORIZON` and baseline `--closeness-horizon`) | same |
 | `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` | `auto` (smoke wrapper) / `0` (full-HF flow default) | `auto` or integer `>=0` | Runtime splice per-game cap for game-format datasets. When set to `auto` with cache-required mode, full-HF flow resolves cache-matching runtime config from fetched `runtime_splice_cache/manifest.json` before training | same |
 | `RUNPOD_FULL_TRAIN_NPROC_PER_NODE` | `${RUNPOD_GPU_COUNT}` | integer `>=1` | Torchrun process count; smoke wrapper defaults to one process per requested GPU (`2`) | same |
 | `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` | unset (smoke wrapper auto mode) | integer `>=0` | Optional manual DataLoader workers-per-rank override; when unset in smoke wrapper, auto worker policy is used | same |
@@ -154,6 +161,9 @@ Explicit-GPU provisioning behavior note (current):
 Full-train runtime splice interactions:
 - `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` remains enforced in the full-HF flow.
 - when `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=auto`, the flow resolves runtime splice config from the fetched dataset cache manifest (`runtime_splice_cache/manifest.json`) and uses those resolved values for `TRAIN_RUNTIME_MIN_CONTEXT`, `TRAIN_RUNTIME_MIN_TARGET`, and `TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` before launching training.
+- rollout controls:
+  - `RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON` maps to `TRAIN_ROLLOUT_HORIZON` (default `8`).
+  - `RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON` maps to `TRAIN_CLOSENESS_HORIZON` (default rollout value).
 - when `RUNPOD_FULL_TRAIN_NCCL_SAFE_DEFAULTS=1` and `TRAIN_NPROC_PER_NODE>1`, the full-HF flow applies safe NCCL defaults only when the target raw env var is currently unset (`NCCL_*` / `TORCH_NCCL_*`), so explicit pod/container env values remain highest precedence.
 - smoke-wrapper auto-batch precedence:
   - if `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` / `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` are unset in caller env, smoke wrapper intentionally unsets them so full-HF auto selection remains active.
@@ -166,12 +176,18 @@ Full-train runtime splice interactions:
 | `--amp-dtype` | `auto` | `auto`, `fp16`, `bf16` | Autocast dtype selection | same |
 | `--tf32` | `auto` | `auto`, `on`, `off` | TensorFloat32 matmul/cuDNN controls | same |
 | `--distributed-backend` | `nccl` in multi-GPU runs | backend id | DDP backend | same |
+| `--rollout-horizon` | `1` | integer `>=1` | Multistep rollout horizon (`1` keeps single-step baseline) | same |
+| `--closeness-horizon` | `4` (clamped to rollout) | integer `>=1` | Continuation-closeness horizon used in rollout evaluation | same |
 | `--runtime-max-samples-per-game` | runtime-dependent | integer `>=0` | Runtime splice cap; must match cache config when cache-required | same |
 | `--require-runtime-splice-cache` | often enabled in cloud HF flows | boolean | Fail on cache miss/mismatch instead of runtime indexing | same |
 | `--max-total-rows` | `0` | integer `>=0` | Row cap for fast subset tests | same |
 | `--sparsity-mode` | `off` | `off`, `l1`, `structured_2to4` | Sparsity behavior: `l1` adds L1 penalty, `structured_2to4` enforces persistent 2:4 masks on linear weights | same |
 | `--sparsity-l1-lambda` | `0.0` | float `>=0` | L1 penalty multiplier when `--sparsity-mode=l1` | same |
 | `--sparsity-include-bias` | `False` | boolean flag | Include bias tensors in L1/stat tracking (applies to `l1` mode) | same |
+
+Training CLI interactions:
+- `sparsity_mode` is currently supported only for `rollout_horizon=1` in training code.
+- RunPod benchmark matrix skips sparse/2:4 trials automatically when `RUNPOD_BENCH_ROLLOUT_HORIZON > 1`.
 
 ## Dual Sequence Training CLI (`scripts/train_dual_sequence.py`)
 | Control | Default | Accepted | Effect | Related Command |

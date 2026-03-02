@@ -13,7 +13,7 @@ Define the current preferred end-to-end RunPod training flow, including exact op
     - `artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.md`
     - `artifacts/runpod_cycles/<run_id>/reports/easy_progress_report.json`
 
-## Current Preferred Defaults (2026-02-27)
+## Current Preferred Defaults (2026-03-02)
 - Include all published monthly datasets:
   - `RUNPOD_HF_DATASET_NAME` unset
   - `RUNPOD_HF_DATASET_VERSION` unset
@@ -22,6 +22,9 @@ Define the current preferred end-to-end RunPod training flow, including exact op
   - `RUNPOD_HF_DATASET_SCHEMA_FILTER=game_jsonl_runtime_splice_v1`
 - Runtime splice cache policy:
   - `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` enforced by flow (fail on cache miss/mismatch; no runtime index build fallback)
+- Baseline multistep rollout defaults:
+  - `RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON=8`
+  - `RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON=8` (or inherited from rollout horizon)
 - Workers/batch sizing:
   - no override envs set (`RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` unset, `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` unset)
   - remote auto logic computes per-rank workers, then passes that per-rank value to training:
@@ -71,6 +74,8 @@ The flow runs `train_baseline.py` via preset (or direct fallback when needed) wi
 - `runtime_min_context=8`
 - `runtime_min_target=1`
 - `runtime_max_samples_per_game=0`
+- `rollout_horizon=8`
+- `closeness_horizon=8`
 - LR scheduler: `plateau` on `val_loss` with `factor=0.5`, `patience=3`, `threshold=1e-4`
 - `early_stopping_patience=0`
 - progress output enabled (machine-readable JSONL progress stream enabled for watcher)
@@ -98,6 +103,8 @@ export RUNPOD_HF_DATASET_REPO_ID="LogicLark-QuantumQuill/chess-bot-datasets"
 export RUNPOD_HF_DATASET_PATH_PREFIX="validated_datasets"
 export RUNPOD_HF_DATASET_SCHEMA_FILTER="game_jsonl_runtime_splice_v1"
 export RUNPOD_FULL_TRAIN_EPOCHS="20"
+export RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON="8"
+export RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON="8"
 # Optional: preconfigured local sync root for epoch checkpoints + ETA reports
 # export RUNPOD_LOCAL_SYNC_DIR="/absolute/path/for/runpod_sync"
 

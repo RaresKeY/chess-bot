@@ -37,6 +37,8 @@ HF_DATASET_PATH_PREFIX="${RUNPOD_HF_DATASET_PATH_PREFIX:-${HF_DATASET_PATH_PREFI
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-0}"
+TRAIN_ROLLOUT_HORIZON="${TRAIN_ROLLOUT_HORIZON:-8}"
+TRAIN_CLOSENESS_HORIZON="${TRAIN_CLOSENESS_HORIZON:-${TRAIN_ROLLOUT_HORIZON}}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:---epochs 1 --no-progress --no-verbose}"
 INFER_CONTEXT="${RUNPOD_INFER_CONTEXT:-e2e4 e7e5 g1f3}"
 FLOW_SUCCESS=0
@@ -101,6 +103,8 @@ export OUTPUT_PATH='${REMOTE_MODEL_PATH}'
 export METRICS_OUT='${REMOTE_METRICS_PATH}'
 export TRAIN_BATCH_SIZE='${TRAIN_BATCH_SIZE}'
 export TRAIN_NUM_WORKERS='${TRAIN_NUM_WORKERS}'
+export TRAIN_ROLLOUT_HORIZON='${TRAIN_ROLLOUT_HORIZON}'
+export TRAIN_CLOSENESS_HORIZON='${TRAIN_CLOSENESS_HORIZON}'
 export TRAIN_EXTRA_ARGS='${TRAIN_EXTRA_ARGS}'
 EOF
 )
@@ -139,6 +143,7 @@ EOF
   printf '[runpod-cycle-train] use_hf_latest_all=%s\n' "${USE_HF_LATEST_ALL}"
   printf '[runpod-cycle-train] hf_dataset_repo_id=%s\n' "${HF_DATASET_REPO_ID}"
   printf '[runpod-cycle-train] hf_dataset_path_prefix=%s\n' "${HF_DATASET_PATH_PREFIX}"
+  printf '[runpod-cycle-train] rollout_horizon=%s closeness_horizon=%s\n' "${TRAIN_ROLLOUT_HORIZON}" "${TRAIN_CLOSENESS_HORIZON}"
   printf '[runpod-cycle-train] train_extra_args=%s\n' "${TRAIN_EXTRA_ARGS}"
 } > "${REMOTE_TRAIN_LOG}"
 
@@ -157,6 +162,8 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Remote HF fetch manifest (when enabled): \`${REMOTE_HF_FETCH_MANIFEST}\`" \
   "- Ready-check log: \`${READY_CHECK_LOG}\`" \
   "- Remote SSH/train log: \`${REMOTE_TRAIN_LOG}\`" \
+  "- Rollout horizon: \`${TRAIN_ROLLOUT_HORIZON}\`" \
+  "- Closeness horizon: \`${TRAIN_CLOSENESS_HORIZON}\`" \
   ""
 
 FLOW_SUCCESS=1

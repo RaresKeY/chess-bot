@@ -20,14 +20,18 @@ TRAIN_PATH="${TRAIN_PATH:-${TRAIN_DATASET_DIR}/train.jsonl}"
 VAL_PATH="${VAL_PATH:-${TRAIN_DATASET_DIR}/val.jsonl}"
 METRICS_OUT="${TRAIN_METRICS_OUT:-${OUT_DIR}/metrics_${RUN_ID}.json}"
 MODEL_OUT="${TRAIN_MODEL_OUT:-${OUT_DIR}/model_${RUN_ID}.pt}"
+TRAIN_ROLLOUT_HORIZON="${TRAIN_ROLLOUT_HORIZON:-8}"
+TRAIN_CLOSENESS_HORIZON="${TRAIN_CLOSENESS_HORIZON:-${TRAIN_ROLLOUT_HORIZON}}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:---epochs 1 --batch-size 64 --num-workers 2}"
 
 cmd=(
   "${VENV_DIR}/bin/python" "${REPO_DIR}/scripts/train_baseline.py"
   --train "${TRAIN_PATH}"
   --val "${VAL_PATH}"
-  --out "${MODEL_OUT}"
+  --output "${MODEL_OUT}"
   --metrics-out "${METRICS_OUT}"
+  --rollout-horizon "${TRAIN_ROLLOUT_HORIZON}"
+  --closeness-horizon "${TRAIN_CLOSENESS_HORIZON}"
 )
 
 if [[ -n "${TRAIN_EXTRA_ARGS}" ]]; then

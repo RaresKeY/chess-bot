@@ -10,6 +10,8 @@ SMOKE_VAL_ROWS="${SMOKE_VAL_ROWS:-64}"
 SMOKE_EPOCHS="${SMOKE_EPOCHS:-1}"
 SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE:-64}"
 SMOKE_NUM_WORKERS="${SMOKE_NUM_WORKERS:-0}"
+SMOKE_ROLLOUT_HORIZON="${SMOKE_ROLLOUT_HORIZON:-8}"
+SMOKE_CLOSENESS_HORIZON="${SMOKE_CLOSENESS_HORIZON:-${SMOKE_ROLLOUT_HORIZON}}"
 SMOKE_PROGRESS_JSONL_OUT="${SMOKE_PROGRESS_JSONL_OUT:-}"
 SYNC_REQUIREMENTS_ON_START="${SYNC_REQUIREMENTS_ON_START:-1}"
 RUNPOD_PHASE_TIMING_LOG="${RUNPOD_PHASE_TIMING_LOG:-${REPO_ROOT}/artifacts/timings/runpod_phase_times.jsonl}"
@@ -82,6 +84,8 @@ run_container_smoke() {
     -e METRICS_OUT=/workspace/chess-bot/artifacts/smoke_runpod_metrics.json \
     -e TRAIN_BATCH_SIZE="${SMOKE_BATCH_SIZE}" \
     -e TRAIN_NUM_WORKERS="${SMOKE_NUM_WORKERS}" \
+    -e TRAIN_ROLLOUT_HORIZON="${SMOKE_ROLLOUT_HORIZON}" \
+    -e TRAIN_CLOSENESS_HORIZON="${SMOKE_CLOSENESS_HORIZON}" \
     -e TRAIN_PROGRESS_JSONL_OUT="${SMOKE_PROGRESS_JSONL_OUT}" \
     -e TRAIN_EXTRA_ARGS="--epochs ${SMOKE_EPOCHS} --no-progress" \
     "${IMAGE_NAME}" /bin/bash -lc 'if [[ -f /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh ]]; then bash /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh; else bash /opt/runpod_cloud_training/train_baseline_preset.sh; fi'
@@ -90,6 +94,7 @@ run_container_smoke() {
 echo "[local-smoke] image=${IMAGE_NAME}"
 echo "[local-smoke] source_dataset=${DATASET_SOURCE_DIR}"
 echo "[local-smoke] smoke_dir=${SMOKE_DIR} train_rows=${SMOKE_TRAIN_ROWS} val_rows=${SMOKE_VAL_ROWS}"
+echo "[local-smoke] rollout_horizon=${SMOKE_ROLLOUT_HORIZON} closeness_horizon=${SMOKE_CLOSENESS_HORIZON}"
 if [[ -n "${SMOKE_PROGRESS_JSONL_OUT}" ]]; then
   echo "[local-smoke] progress_jsonl=${SMOKE_PROGRESS_JSONL_OUT}"
 fi
