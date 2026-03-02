@@ -51,6 +51,7 @@ Define the current preferred end-to-end RunPod training flow, including exact op
 - Fast-stage subset option:
   - `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS` can cap effective train+val rows after indexing/cache load (auto split by original train/val ratio)
   - optional explicit split caps: `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`, `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`
+  - fixed on 2026-03-02: multistep/rollout path now enforces the same subset caps as single-step (`max_total_rows`, `max_train_rows`, `max_val_rows`) including DDP cache-backed runs.
 - GPU default:
   - `RUNPOD_GPU_TYPE_ID` default in easy flow is `NVIDIA GeForce RTX 5090`
   - `RUNPOD_GPU_COUNT` default in easy flow is `2`

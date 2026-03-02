@@ -20,6 +20,8 @@ class VastCycleScriptTests(unittest.TestCase):
             "scripts/vast_cycle_terminate.sh",
             "scripts/vast_cycle_status.sh",
             "scripts/vast_cli_doctor.sh",
+            "scripts/vast_local_smoke_test.sh",
+            "scripts/vast_noauth_deploy_checks.sh",
             "scripts/vast_regression_checks.sh",
             "deploy/vast_cloud_training/README.md",
             "deploy/vast_cloud_training/PLAN.md",
@@ -80,6 +82,37 @@ class VastCycleScriptTests(unittest.TestCase):
 
         terminate = Path("scripts/vast_cycle_terminate.sh").read_text(encoding="utf-8")
         self.assertIn("destroy-instance", terminate)
+
+    def test_vast_train_preset_uses_output_flag_and_multistep_defaults(self):
+        text = Path("deploy/vast_cloud_training/train_baseline_preset.sh").read_text(encoding="utf-8")
+        self.assertIn("--output", text)
+        self.assertNotIn("--out ", text)
+        self.assertIn('TRAIN_ROLLOUT_HORIZON="${TRAIN_ROLLOUT_HORIZON:-8}"', text)
+        self.assertIn('TRAIN_CLOSENESS_HORIZON="${TRAIN_CLOSENESS_HORIZON:-${TRAIN_ROLLOUT_HORIZON}}"', text)
+        self.assertIn('--rollout-horizon "${TRAIN_ROLLOUT_HORIZON}"', text)
+        self.assertIn('--closeness-horizon "${TRAIN_CLOSENESS_HORIZON}"', text)
+
+    def test_vast_local_smoke_script_targets_noauth_smoke_dataset(self):
+        text = Path("scripts/vast_local_smoke_test.sh").read_text(encoding="utf-8")
+        self.assertIn("data/dataset/_smoke_fast_game", text)
+        self.assertIn("deploy/vast_cloud_training/train_baseline_preset.sh", text)
+        self.assertIn('VENV_DIR="${VAST_SMOKE_VENV_DIR:-${REPO_ROOT}/.venv}"', text)
+        self.assertIn('REPO_DIR="${REPO_ROOT}"', text)
+        self.assertIn("TRAIN_EXTRA_ARGS", text)
+        self.assertIn("--max-total-rows", text)
+        self.assertNotIn("VAST_API_KEY", text)
+
+    def test_vast_noauth_checks_script_runs_local_suite_without_api_calls(self):
+        text = Path("scripts/vast_noauth_deploy_checks.sh").read_text(encoding="utf-8")
+        self.assertIn('unittest discover -s tests -p "test_vast*.py" -v', text)
+        self.assertIn("scripts/cloud_connectivity_health_checks.sh --provider vast --no-live", text)
+        self.assertIn("scripts/vast_local_smoke_test.sh", text)
+        self.assertNotIn("offer-search --limit 3", text)
+        self.assertNotIn("instance-list", text)
+
+    def test_vast_regression_checks_uses_unittest_discovery(self):
+        text = Path("scripts/vast_regression_checks.sh").read_text(encoding="utf-8")
+        self.assertIn('unittest discover -s tests -p "test_vast*.py" -v', text)
 
     def test_registry_record_writer_appends_jsonl(self):
         with tempfile.TemporaryDirectory() as td:

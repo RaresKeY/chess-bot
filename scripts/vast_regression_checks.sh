@@ -21,9 +21,7 @@ run_step() {
 cd "${REPO_ROOT}"
 
 run_step "unit-tests (vast helpers/scripts)" \
-  "${PY_BIN}" -m unittest -v \
-    tests.test_vast_api_helpers \
-    tests.test_vast_cycle_scripts
+  "${PY_BIN}" -m unittest discover -s tests -p "test_vast*.py" -v
 
 run_step "cli-doctor (auth diagnostics)" \
   bash scripts/vast_cli_doctor.sh

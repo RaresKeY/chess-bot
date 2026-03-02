@@ -943,6 +943,124 @@ class TrainingFeatureTests(unittest.TestCase):
         self.assertIn("rollout_step4_acc", epoch_end["metrics"])
         self.assertIn("rollout_weighted_continuation_score", epoch_end["metrics"])
 
+    def test_multistep_distributed_respects_max_total_rows_subset_cap(self):
+        class _DummyDDP(torch.nn.Module):
+            def __init__(self, module, **_kwargs):
+                super().__init__()
+                self.module = module
+
+            def forward(self, *args, **kwargs):
+                return self.module(*args, **kwargs)
+
+        class _DummyDistributedSampler(torch.utils.data.Sampler):
+            def __init__(self, data_source, **_kwargs):
+                self._n = len(data_source)
+
+            def __iter__(self):
+                return iter(range(self._n))
+
+            def __len__(self):
+                return self._n
+
+            def set_epoch(self, _epoch):
+                return None
+
+        train_rows = []
+        val_rows = []
+        for i in range(12):
+            train_rows.append(
+                {
+                    "context": [f"train_ctx_{i}"],
+                    "target": [f"train_t{i}_1", f"train_t{i}_2", f"train_t{i}_3", f"train_t{i}_4"],
+                    "next_move": f"train_t{i}_1",
+                    "winner_side": "W" if i % 2 == 0 else "B",
+                    "phase": "opening" if i % 3 == 0 else "middlegame",
+                }
+            )
+            val_rows.append(
+                {
+                    "context": [f"val_ctx_{i}"],
+                    "target": [f"val_t{i}_1", f"val_t{i}_2", f"val_t{i}_3", f"val_t{i}_4"],
+                    "next_move": f"val_t{i}_1",
+                    "winner_side": "B" if i % 2 == 0 else "W",
+                    "phase": "opening" if i % 3 == 0 else "middlegame",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            train_path = Path(tmp) / "train.jsonl"
+            val_path = Path(tmp) / "val.jsonl"
+            with train_path.open("w", encoding="utf-8") as f:
+                for row in train_rows:
+                    f.write(json.dumps(row) + "\n")
+            with val_path.open("w", encoding="utf-8") as f:
+                for row in val_rows:
+                    f.write(json.dumps(row) + "\n")
+
+            events = []
+
+            def on_progress(evt):
+                events.append(evt)
+
+            with mock.patch("src.chessbot.training.DDP", _DummyDDP), mock.patch(
+                "src.chessbot.training.DistributedSampler", _DummyDistributedSampler
+            ):
+                artifact, history, dataset_info = train_next_move_model_from_jsonl_paths(
+                    train_paths=[str(train_path)],
+                    val_paths=[str(val_path)],
+                    epochs=1,
+                    batch_size=2,
+                    lr=1e-3,
+                    seed=7,
+                    embed_dim=8,
+                    hidden_dim=16,
+                    num_layers=1,
+                    dropout=0.0,
+                    winner_weight=1.0,
+                    use_winner=True,
+                    device_str="cpu",
+                    num_workers=0,
+                    pin_memory=False,
+                    amp=False,
+                    restore_best=True,
+                    use_phase_feature=True,
+                    use_side_to_move_feature=True,
+                    lr_scheduler="none",
+                    early_stopping_patience=0,
+                    verbose=False,
+                    show_progress=False,
+                    progress_callback=on_progress,
+                    rollout_horizon=4,
+                    closeness_horizon=4,
+                    rollout_loss_decay=0.7,
+                    max_total_rows=6,
+                    distributed_enabled=True,
+                    distributed_rank=0,
+                    distributed_world_size=2,
+                )
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(dataset_info["train_rows"], 3)
+        self.assertEqual(dataset_info["val_rows"], 3)
+        self.assertEqual(dataset_info["train_index_rows"], 3)
+        self.assertEqual(dataset_info["val_index_rows"], 3)
+        subset_info = dataset_info["subset_sampling"]
+        self.assertEqual(subset_info["max_total_rows"], 6)
+        self.assertEqual(subset_info["train_rows_source"], 12)
+        self.assertEqual(subset_info["val_rows_source"], 12)
+        self.assertTrue(subset_info["train_subset_applied"])
+        self.assertTrue(subset_info["val_subset_applied"])
+
+        setup = [e for e in events if e.get("event") == "train_setup"][0]
+        self.assertEqual(setup["train_rows"], 3)
+        self.assertEqual(setup["val_rows"], 3)
+        self.assertEqual(setup["subset_sampling"]["max_total_rows"], 6)
+        self.assertTrue(setup["subset_sampling"]["train_subset_applied"])
+        self.assertTrue(setup["subset_sampling"]["val_subset_applied"])
+        epoch_start = [e for e in events if e.get("event") == "epoch_start"][0]
+        self.assertEqual(epoch_start["train_batches_total"], 2)
+        self.assertTrue(artifact["runtime"]["distributed"]["enabled"])
+
     def test_train_next_move_model_from_jsonl_paths_structured_2to4_records_sparsity_runtime(self):
         train_rows = [
             {"context": ["e2e4"], "target": ["e7e5"], "next_move": "e7e5", "winner_side": "B", "phase": "opening"},

@@ -56,7 +56,7 @@ def _raise_graphql_access_error(exc: urllib.error.HTTPError, *, operation: str) 
     raise SystemExit(detail)
 
 
-def _bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
+def _bool_arg(parser: argparse.ArgumentParser, name: str, default: Optional[bool], help_text: str) -> None:
     parser.add_argument(
         f"--{name}",
         dest=name.replace("-", "_"),
@@ -157,6 +157,10 @@ def _graphql_json(
     if payload.get("errors"):
         raise RuntimeError(json.dumps(payload["errors"], ensure_ascii=True))
     return payload
+
+
+def _graphql_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _list_templates(
@@ -386,6 +390,93 @@ def _get_pod(api_key: str, *, rest_base: str, pod_id: str) -> Dict[str, Any]:
     return out if isinstance(out, dict) else {"response": out}
 
 
+def _extract_pod_state(pod: Dict[str, Any]) -> str:
+    for key in ("desiredStatus", "desired_status", "status", "machineStatus", "state"):
+        value = pod.get(key)
+        if isinstance(value, str) and value:
+            return value
+    nested = pod.get("pod")
+    if isinstance(nested, dict):
+        return _extract_pod_state(nested)
+    return ""
+
+
+def _extract_pod_interruptible(pod: Dict[str, Any]) -> Optional[bool]:
+    for key in ("interruptible", "isInterruptible", "spot"):
+        value = pod.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes"}:
+                return True
+            if lowered in {"0", "false", "no"}:
+                return False
+    pod_type = pod.get("podType") or pod.get("pod_type") or pod.get("type")
+    if isinstance(pod_type, str):
+        lowered = pod_type.strip().lower()
+        if "interrupt" in lowered or lowered == "spot":
+            return True
+        if "on_demand" in lowered or "ondemand" in lowered:
+            return False
+    nested = pod.get("pod")
+    if isinstance(nested, dict):
+        return _extract_pod_interruptible(nested)
+    return None
+
+
+def _graphql_resume_pod(
+    api_key: str,
+    *,
+    graphql_endpoint: str,
+    pod_id: str,
+    gpu_count: int,
+    interruptible: bool,
+    bid_per_gpu: float,
+) -> Dict[str, Any]:
+    safe_pod_id = _graphql_escape(pod_id)
+    safe_gpu_count = int(gpu_count)
+    if safe_gpu_count < 1:
+        raise SystemExit("--gpu-count must be >= 1")
+    if interruptible:
+        safe_bid = float(bid_per_gpu)
+        if safe_bid <= 0:
+            raise SystemExit("--bid-per-gpu must be > 0 for interruptible spot resume")
+        query = f"""
+        mutation {{
+          podBidResume(input: {{ podId: "{safe_pod_id}", gpuCount: {safe_gpu_count}, bidPerGpu: {safe_bid} }}) {{
+            id
+            desiredStatus
+            imageName
+            machine {{
+              podHostId
+            }}
+          }}
+        }}
+        """
+        data_key = "podBidResume"
+    else:
+        query = f"""
+        mutation {{
+          podResume(input: {{ podId: "{safe_pod_id}", gpuCount: {safe_gpu_count} }}) {{
+            id
+            desiredStatus
+            imageName
+            machine {{
+              podHostId
+            }}
+          }}
+        }}
+        """
+        data_key = "podResume"
+    payload = _graphql_json(graphql_endpoint, api_key=api_key, query=query)
+    return {
+        "operation": data_key,
+        "payload": payload,
+        "result": ((payload.get("data") or {}).get(data_key) or {}),
+    }
+
+
 def _parse_env_items(items: List[str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for item in items:
@@ -578,8 +669,92 @@ def cmd_provision(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pod_status(args: argparse.Namespace) -> int:
+    api_key = _resolve_api_key(args)
+    if not api_key:
+        raise SystemExit("Missing RunPod API key (checked --api-key, RUNPOD_API_KEY, keyring, and .env fallback)")
+    pod = _get_pod(api_key, rest_base=args.rest_base, pod_id=args.pod_id)
+    _print_json({"pod_id": args.pod_id, "pod_status": pod})
+    return 0
+
+
+def cmd_pod_resume(args: argparse.Namespace) -> int:
+    api_key = _resolve_api_key(args)
+    if not api_key:
+        raise SystemExit("Missing RunPod API key (checked --api-key, RUNPOD_API_KEY, keyring, and .env fallback)")
+
+    gpu_count = int(args.gpu_count)
+    if gpu_count < 1:
+        raise SystemExit("--gpu-count must be >= 1")
+
+    pre_resume_pod = _get_pod(api_key, rest_base=args.rest_base, pod_id=args.pod_id)
+    detected_interruptible = _extract_pod_interruptible(pre_resume_pod)
+    use_interruptible = detected_interruptible if args.interruptible is None else bool(args.interruptible)
+    if use_interruptible is None:
+        use_interruptible = False
+
+    resume_response = _graphql_resume_pod(
+        api_key,
+        graphql_endpoint=args.graphql_endpoint,
+        pod_id=args.pod_id,
+        gpu_count=gpu_count,
+        interruptible=bool(use_interruptible),
+        bid_per_gpu=float(args.bid_per_gpu),
+    )
+
+    final_status: Dict[str, Any] = {}
+    if args.wait_ready:
+        deadline = time.time() + max(5, int(args.wait_timeout_seconds))
+        last_status: Dict[str, Any] = {}
+        while time.time() < deadline:
+            try:
+                last_status = _get_pod(api_key, rest_base=args.rest_base, pod_id=args.pod_id)
+            except urllib.error.URLError:
+                last_status = {}
+            state = _extract_pod_state(last_status).upper()
+            if state in {"RUNNING", "READY"}:
+                final_status = last_status
+                break
+            if args.verbose:
+                print(
+                    json.dumps(
+                        {
+                            "wait_status": {
+                                "pod_id": args.pod_id,
+                                "state": state,
+                                "publicIp": str(last_status.get("publicIp") or ""),
+                            }
+                        },
+                        ensure_ascii=True,
+                    ),
+                    file=sys.stderr,
+                )
+            time.sleep(max(2, int(args.wait_poll_seconds)))
+        else:
+            final_status = last_status
+            resume_response["wait_ready_timeout"] = True
+    else:
+        final_status = _get_pod(api_key, rest_base=args.rest_base, pod_id=args.pod_id)
+
+    _print_json(
+        {
+            "pod_id": args.pod_id,
+            "resume_mode": "spot_bid" if use_interruptible else "on_demand",
+            "detected_interruptible": detected_interruptible,
+            "requested_interruptible": args.interruptible,
+            "gpu_count": gpu_count,
+            "bid_per_gpu": float(args.bid_per_gpu),
+            "resume_response": resume_response,
+            "pod_status": final_status,
+        }
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="RunPod API helper (GPU search, template selection, pod provisioning)")
+    p = argparse.ArgumentParser(
+        description="RunPod API helper (GPU search, template selection, pod provisioning/status/resume)"
+    )
     p.add_argument(
         "--api-key",
         default="",
@@ -647,6 +822,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_prov.add_argument("--wait-timeout-seconds", type=int, default=600)
     p_prov.add_argument("--wait-poll-seconds", type=int, default=10)
     p_prov.set_defaults(func=cmd_provision)
+
+    p_status = sub.add_parser("pod-status", help="Get one pod status by pod id")
+    p_status.add_argument("--pod-id", required=True)
+    p_status.set_defaults(func=cmd_pod_status)
+
+    p_resume = sub.add_parser("pod-resume", help="Resume one pod by pod id")
+    p_resume.add_argument("--pod-id", required=True)
+    p_resume.add_argument("--gpu-count", type=int, default=1)
+    p_resume.add_argument("--bid-per-gpu", type=float, default=0.2)
+    _bool_arg(
+        p_resume,
+        "interruptible",
+        None,
+        "Override interruptible mode for resume (default: auto-detect from pod status)",
+    )
+    _bool_arg(p_resume, "wait-ready", True, "Poll pod until it reaches running/ready")
+    p_resume.add_argument("--wait-timeout-seconds", type=int, default=600)
+    p_resume.add_argument("--wait-poll-seconds", type=int, default=10)
+    p_resume.set_defaults(func=cmd_pod_resume)
     return p
 
 

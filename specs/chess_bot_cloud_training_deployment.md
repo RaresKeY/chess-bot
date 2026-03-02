@@ -128,6 +128,11 @@ Provide a modular containerized deployment package for running this repo on GPU 
   - phase + side-to-move features enabled
   - `ReduceLROnPlateau` + early stopping enabled (preset patience/min-delta values)
 - Supports env overrides for dataset paths, output paths, batch size/worker count, rollout/closeness horizons, endgame phase weight, optional progress event stream path (`TRAIN_PROGRESS_JSONL_OUT`), and arbitrary extra train flags (`TRAIN_EXTRA_ARGS`)
+- Includes a multi-GPU NCCL hang watchdog in the preset path (`TRAIN_NPROC_PER_NODE>1`):
+  - enabled by default (`TRAIN_NCCL_HANG_CHECK_ENABLED=1`)
+  - monitors `TRAIN_PROGRESS_JSONL_OUT` mtime for liveness (`TRAIN_NCCL_HANG_TIMEOUT_SECONDS`, `TRAIN_NCCL_HANG_POLL_SECONDS`)
+  - when triggered, writes cloud diagnostics (`nvidia-smi`, NCCL/Torch NCCL env snapshot, process tree snapshot, progress tail) to `TRAIN_NCCL_HANG_LOG_PATH`, terminates the stalled training process tree, and exits with `TRAIN_NCCL_HANG_EXIT_CODE`
+  - if watchdog is enabled and `TRAIN_PROGRESS_JSONL_OUT` is unset, preset auto-assigns a per-run progress JSONL path under the run artifact directory so liveness checks have a deterministic signal source
 - Supports strict runtime-cache enforcement via `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` (passes `--require-runtime-splice-cache` to training and fails instead of runtime-index fallback on cache miss/mismatch)
 - Emits timing records to the shared phase timing JSONL (`resolve_dataset_paths`, `train_baseline`) with `source=runpod_train_preset`
 

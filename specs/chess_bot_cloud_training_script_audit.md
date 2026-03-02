@@ -36,6 +36,8 @@ Provide a code-truth audit of cloud training scripts (RunPod + Vast), including 
 | `scripts/runpod_cycle_benchmark_matrix.sh` | benchmark matrix/trials lane | 2026-03-01 05:35:32 | 2026-03-01T07:52:54Z `f0eecf1` | Runs multi-trial baseline training with precision variants, rollout/closeness defaults (`8/8`), NCCL fallback logic, and sparse-trial skip guard when rollout horizon >1. | current |
 | `scripts/runpod_cycle_benchmark_10k_sixpack.sh` | benchmark preset wrapper | 2026-02-28 11:16:20 | 2026-02-28T13:17:29+02:00 `562546f` | Preconfigures benchmark matrix env and invokes `runpod_cycle_benchmark_matrix.sh`. | current |
 | `deploy/vast_cloud_training/train_baseline_preset.sh` | Vast training preset | 2026-02-27 12:29:11 | 2026-02-27T14:39:00+02:00 `a711fec` | Calls `scripts/train_baseline.py` using `--output` and forwards rollout/closeness defaults (`8/8`). | current |
+| `scripts/vast_local_smoke_test.sh` | Vast no-auth local smoke lane | 2026-03-02 10:21:59 | uncommitted (working tree) | Executes `deploy/vast_cloud_training/train_baseline_preset.sh` on local smoke dataset (`_smoke_fast_game`) with bounded smoke args; no Vast API calls required. | current |
+| `scripts/vast_noauth_deploy_checks.sh` | Vast no-auth deployment checks wrapper | 2026-03-02 10:22:09 | uncommitted (working tree) | Runs Vast unit test discovery + provider local connectivity checks (`--no-live`) + local smoke preset lane; skips API-key-gated probes. | current |
 | `scripts/vast_cycle_start.sh` | Vast provision/start lifecycle | 2026-02-27 12:28:49 | 2026-02-27T14:39:00+02:00 `a711fec` | Provisioning only, no training launch. | out of training scope |
 | `scripts/vast_cycle_status.sh` | Vast status lifecycle | 2026-02-27 12:28:49 | 2026-02-27T14:39:00+02:00 `a711fec` | Status only, no training launch. | out of training scope |
 | `scripts/vast_cycle_stop.sh` | Vast stop lifecycle | 2026-02-27 12:28:49 | 2026-02-27T14:39:00+02:00 `a711fec` | Stop only, no training launch. | out of training scope |
@@ -60,4 +62,6 @@ Provide a code-truth audit of cloud training scripts (RunPod + Vast), including 
    - either update wrapper defaults to match preferred flow
    - or keep wrapper defaults and update preferred-flow spec language as "recommended exports".
 
-3. Add/refresh a Vast training smoke test lane that exercises the preset script directly.
+3. Keep the Vast no-auth smoke lane maintained:
+   - `scripts/vast_local_smoke_test.sh`
+   - `scripts/vast_noauth_deploy_checks.sh`

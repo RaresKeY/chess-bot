@@ -1861,6 +1861,9 @@ def _train_next_move_model_from_jsonl_paths_multistep(
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
     require_runtime_splice_cache: bool = False,
+    max_train_rows: int = 0,
+    max_val_rows: int = 0,
+    max_total_rows: int = 0,
     distributed_enabled: bool = False,
     distributed_rank: int = 0,
     distributed_world_size: int = 1,
@@ -1988,6 +1991,42 @@ def _train_next_move_model_from_jsonl_paths_multistep(
         train_runtime_index_bytes = None
         val_runtime_index_bytes = None
         cache_load_reason_by_split = None
+    if int(max_total_rows) > 0 and int(max_train_rows) <= 0 and int(max_val_rows) <= 0:
+        total_rows_source = int(max(0, train_rows_total)) + int(max(0, val_rows_total))
+        if total_rows_source > 0:
+            if int(train_rows_total) > 0 and int(val_rows_total) > 0:
+                train_share = float(train_rows_total) / float(total_rows_source)
+                computed_train = int(round(float(max_total_rows) * train_share))
+                computed_train = max(1, min(int(train_rows_total), computed_train))
+                computed_val = int(max_total_rows) - computed_train
+                computed_val = max(1, min(int(val_rows_total), computed_val))
+                max_train_rows = int(computed_train)
+                max_val_rows = int(computed_val)
+            elif int(train_rows_total) > 0:
+                max_train_rows = min(int(max_total_rows), int(train_rows_total))
+            elif int(val_rows_total) > 0:
+                max_val_rows = min(int(max_total_rows), int(val_rows_total))
+
+    train_rows_source_total = int(train_rows_total)
+    val_rows_source_total = int(val_rows_total)
+    train_subset_applied = False
+    val_subset_applied = False
+    if int(max_train_rows) > 0 and int(max_train_rows) < int(len(train_ds)):
+        keep_train = int(max_train_rows)
+        train_ds = torch.utils.data.Subset(
+            train_ds,
+            _sample_subset_indices(total=len(train_ds), keep=keep_train, seed=int(seed) + 101),
+        )
+        train_rows_total = int(len(train_ds))
+        train_subset_applied = True
+    if int(max_val_rows) > 0 and int(max_val_rows) < int(len(val_ds)):
+        keep_val = int(max_val_rows)
+        val_ds = torch.utils.data.Subset(
+            val_ds,
+            _sample_subset_indices(total=len(val_ds), keep=keep_val, seed=int(seed) + 202),
+        )
+        val_rows_total = int(len(val_ds))
+        val_subset_applied = True
     if train_rows_total <= 0:
         raise RuntimeError("No training rows found")
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
@@ -2147,6 +2186,15 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                     "data_loading": data_loading_mode,
                     "dataset_schema": schema_kind,
                     "cache_load_reason_by_split": cache_load_reason_by_split,
+                    "subset_sampling": {
+                        "max_total_rows": int(max_total_rows),
+                        "max_train_rows": int(max_train_rows),
+                        "max_val_rows": int(max_val_rows),
+                        "train_rows_source": int(train_rows_source_total),
+                        "val_rows_source": int(val_rows_source_total),
+                        "train_subset_applied": bool(train_subset_applied),
+                        "val_subset_applied": bool(val_subset_applied),
+                    },
                     "training_objective": "multistep_teacher_forced_recursive",
                     "rollout_horizon": int(rollout_horizon),
                     "closeness_horizon": int(closeness_horizon),
@@ -2181,6 +2229,15 @@ def _train_next_move_model_from_jsonl_paths_multistep(
                 "data_loading": data_loading_mode,
                 "dataset_schema": schema_kind,
                 "cache_load_reason_by_split": cache_load_reason_by_split,
+                "subset_sampling": {
+                    "max_total_rows": int(max_total_rows),
+                    "max_train_rows": int(max_train_rows),
+                    "max_val_rows": int(max_val_rows),
+                    "train_rows_source": int(train_rows_source_total),
+                    "val_rows_source": int(val_rows_source_total),
+                    "train_subset_applied": bool(train_subset_applied),
+                    "val_subset_applied": bool(val_subset_applied),
+                },
                 "training_objective": "multistep_teacher_forced_recursive",
                 "rollout_horizon": int(rollout_horizon),
                 "closeness_horizon": int(closeness_horizon),
@@ -2532,6 +2589,15 @@ def _train_next_move_model_from_jsonl_paths_multistep(
             "world_size": int(distributed_world_size),
             "rank": int(distributed_rank),
         },
+        "subset_sampling": {
+            "max_total_rows": int(max_total_rows),
+            "max_train_rows": int(max_train_rows),
+            "max_val_rows": int(max_val_rows),
+            "train_rows_source": int(train_rows_source_total),
+            "val_rows_source": int(val_rows_source_total),
+            "train_subset_applied": bool(train_subset_applied),
+            "val_subset_applied": bool(val_subset_applied),
+        },
     }
     if schema_kind == "game":
         dataset_info.update(
@@ -2675,6 +2741,9 @@ def train_next_move_model_from_jsonl_paths(
             runtime_min_target=int(runtime_min_target),
             runtime_max_samples_per_game=int(runtime_max_samples_per_game),
             require_runtime_splice_cache=bool(require_runtime_splice_cache),
+            max_train_rows=int(max_train_rows),
+            max_val_rows=int(max_val_rows),
+            max_total_rows=int(max_total_rows),
             distributed_enabled=bool(distributed_enabled),
             distributed_rank=int(distributed_rank),
             distributed_world_size=int(distributed_world_size),

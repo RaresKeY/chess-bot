@@ -264,9 +264,23 @@ EOF
 }
 
 if [[ "${WATCH_MODE}" == "1" ]]; then
+  WATCH_INTERRUPTED=0
+  handle_watch_interrupt() {
+    WATCH_INTERRUPTED=1
+  }
+  trap handle_watch_interrupt INT TERM
   while true; do
     collect_once
-    sleep "${POLL_SECONDS}"
+    if ! sleep "${POLL_SECONDS}"; then
+      if [[ "${WATCH_INTERRUPTED}" == "1" ]]; then
+        echo "[runpod-cycle-status] interrupted; exiting watch loop" >&2
+        exit 130
+      fi
+    fi
+    if [[ "${WATCH_INTERRUPTED}" == "1" ]]; then
+      echo "[runpod-cycle-status] interrupted; exiting watch loop" >&2
+      exit 130
+    fi
   done
 fi
 

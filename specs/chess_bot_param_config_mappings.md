@@ -16,6 +16,9 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 - `scripts/runpod_full_train_easy.sh`
 - `scripts/runpod_full_train_easy_smoke_test.sh`
 - `scripts/runpod_active_pods_full_status.sh`
+- `deploy/runpod_cloud_training/train_baseline_preset.sh`
+- `scripts/vast_local_smoke_test.sh`
+- `scripts/vast_noauth_deploy_checks.sh`
 - `scripts/train_baseline.py`
 - `scripts/train_dual_sequence.py`
 - `scripts/infer_move.py`
@@ -72,6 +75,9 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 | `RUNPOD_GPU_TYPE_ID` | `NVIDIA GeForce RTX 3090` (start script) | GPU type id/display name | Explicit GPU selection; bypasses GraphQL discovery | same |
 | `RUNPOD_GPU_COUNT` | `1` (start script) | integer `>=1` | Requested GPU count | same |
 | `RUNPOD_INTERRUPTIBLE` | `0` | `0`, `1` | Mapped to `runpod_provision.py --interruptible/--no-interruptible` and REST `interruptible` field | same |
+| `RUNPOD_RESUME_STOPPED_POD` | `1` | `0`, `1` | Enable resume-first behavior in `runpod_cycle_start.sh` (attempt `pod-status`/`pod-resume` before new provisioning) | same |
+| `RUNPOD_RESUME_POD_ID` | unset | pod id string | Explicit resume candidate pod id override (checked before `RUNPOD_POD_ID` and existing `provision.json`) | same |
+| `RUNPOD_RESUME_BID_PER_GPU` | `0.2` | float `>0` | Spot bid-per-GPU used when resume path runs interruptible `podBidResume` | same |
 | `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV` | `1` | `0`, `1` | Inject managed temp public key into pod env | same |
 | `RUNPOD_SET_UNIQUE_REPO_DIR` | `1` | `0`, `1` | Per-run `REPO_DIR` injection to avoid stale volume collisions | same |
 | `RUNPOD_REQUIRE_SSH_READY` | `1` | `0`, `1` | Wait for direct SSH readiness before start success | same |
@@ -81,6 +87,24 @@ Central mapping for non-constant runtime controls (env vars, CLI flags, and scri
 Explicit-GPU provisioning behavior note (current):
 - when `--gpu-type-id` / `RUNPOD_GPU_TYPE_ID` is set, provision now performs a GraphQL stock preflight (`gpuTypes(input:{id})` + `lowestPrice`) and fails fast if the requested `gpu_count` is not listed in `availableGpuCounts` or stock status is out-of-stock/no-capacity.
 - this is an existing-control behavior refinement (no new runtime flag), intended to improve resource-availability determination before REST pod create attempts.
+
+Provision start/resume interactions:
+- when `RUNPOD_RESUME_STOPPED_POD=1`, `runpod_cycle_start.sh` attempts resume-first behavior:
+  - `pod-status` for resume candidate pod id.
+  - if state is `EXITED`/`STOPPED`, it calls `pod-resume` with `RUNPOD_GPU_COUNT` and `RUNPOD_RESUME_BID_PER_GPU`.
+  - resume interruptible mode defaults to pod-status auto-detect; explicit `RUNPOD_INTERRUPTIBLE` in caller env is forwarded as override (`--interruptible`/`--no-interruptible`).
+  - if state is `RUNNING`/`READY`, it reuses the existing pod without creating a new one.
+  - otherwise it provisions a new pod as before.
+- resume candidate pod id precedence:
+  - `RUNPOD_RESUME_POD_ID` -> `RUNPOD_POD_ID` -> existing run `provision.json` pod id.
+
+Direct `runpod_provision.py pod-resume` controls:
+- `--pod-id` (required): target pod id to resume.
+- `--gpu-count` (default `1`): GPU count passed to resume mutation.
+- `--interruptible` / `--no-interruptible` (default auto-detect): force resume mode; default inspects current pod status interruptible fields.
+- `--bid-per-gpu` (default `0.2`, float `>0`): required for interruptible spot-bid resume path.
+- `--wait-ready` / `--no-wait-ready` (default `--wait-ready`): poll pod status until running/ready after resume.
+- `--wait-timeout-seconds` (default `600`) / `--wait-poll-seconds` (default `10`): resume wait timing controls.
 
 ## RunPod SDK Component (`scripts/runpod_sdk_component.py`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -161,6 +185,7 @@ Explicit-GPU provisioning behavior note (current):
 Full-train runtime splice interactions:
 - `TRAIN_REQUIRE_RUNTIME_SPLICE_CACHE=1` remains enforced in the full-HF flow.
 - when `RUNPOD_FULL_TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME=auto`, the flow resolves runtime splice config from the fetched dataset cache manifest (`runtime_splice_cache/manifest.json`) and uses those resolved values for `TRAIN_RUNTIME_MIN_CONTEXT`, `TRAIN_RUNTIME_MIN_TARGET`, and `TRAIN_RUNTIME_MAX_SAMPLES_PER_GAME` before launching training.
+- subset caps (`RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS`, `RUNPOD_FULL_TRAIN_MAX_TRAIN_ROWS`, `RUNPOD_FULL_TRAIN_MAX_VAL_ROWS`) now apply to both single-step (`rollout_horizon=1`) and multistep (`rollout_horizon>1`) training paths, including distributed (DDP) runs.
 - rollout controls:
   - `RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON` maps to `TRAIN_ROLLOUT_HORIZON` (default `8`).
   - `RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON` maps to `TRAIN_CLOSENESS_HORIZON` (default rollout value).
@@ -168,6 +193,22 @@ Full-train runtime splice interactions:
 - smoke-wrapper auto-batch precedence:
   - if `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` / `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE` are unset in caller env, smoke wrapper intentionally unsets them so full-HF auto selection remains active.
   - if caller provides either override env var, smoke wrapper preserves it and forwards it unchanged to `runpod_full_train_easy.sh`.
+
+## Cloud Train Preset (`deploy/runpod_cloud_training/train_baseline_preset.sh`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `TRAIN_NPROC_PER_NODE` | `1` | integer `>=1` | Torchrun process count in container preset; values `>1` enable multi-GPU launch path | `bash "$REPO_DIR/deploy/runpod_cloud_training/train_baseline_preset.sh"` |
+| `TRAIN_PROGRESS_JSONL_OUT` | unset (auto-set by watchdog in multi-GPU mode) | filepath | Progress-event JSONL path used for watchdog liveness checks | same |
+| `TRAIN_NCCL_HANG_CHECK_ENABLED` | `1` | `0`, `1` | Enable/disable multi-GPU NCCL hang watchdog around training command | same |
+| `TRAIN_NCCL_HANG_TIMEOUT_SECONDS` | `900` | integer `>=1` | Max idle time without progress updates before hang detection | same |
+| `TRAIN_NCCL_HANG_POLL_SECONDS` | `30` | integer `>=1` | Poll cadence for progress-file mtime checks (`<= timeout`) | same |
+| `TRAIN_NCCL_HANG_EXIT_CODE` | `124` | integer `1..255` | Exit code returned when watchdog terminates a stalled run | same |
+| `TRAIN_NCCL_HANG_LOG_PATH` | `<dirname(METRICS_OUT)>/nccl_hang_watchdog_<ts>.log` | filepath | Cloud diagnostic log path written on hang detect (NCCL env, process snapshot, GPU status, progress tail) | same |
+
+Cloud train preset NCCL-watchdog interactions:
+- watchdog path is active only when `TRAIN_NPROC_PER_NODE>1` and `TRAIN_NCCL_HANG_CHECK_ENABLED=1`.
+- when watchdog is active and `TRAIN_PROGRESS_JSONL_OUT` is unset, the preset auto-assigns a per-run progress JSONL path under the run artifacts directory.
+- on hang detection, watchdog writes diagnostics to `TRAIN_NCCL_HANG_LOG_PATH`, sends `TERM` then `KILL` to training processes, and returns `TRAIN_NCCL_HANG_EXIT_CODE`.
 
 ## Training CLI (`scripts/train_baseline.py`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -299,6 +340,30 @@ Pod-stop interactions:
 | `RUNPOD_STATUS_SSH_TIMEOUT_SECONDS` | `12` | integer `>=1` | Timeout for per-pod SSH probe wrapper | same |
 | `RUNPOD_SSH_CONNECT_TIMEOUT_SECONDS` | `10` | integer `>=1` | SSH connect timeout | same |
 
+## Vast No-Auth Deployment Smoke (`scripts/vast_local_smoke_test.sh`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `VAST_SMOKE_RUN_ID` | `vast-local-smoke-<utc-ts>` | string | Run id used in artifact paths under `artifacts/vast_cycles/<run_id>/local_smoke` | `bash scripts/vast_local_smoke_test.sh` |
+| `VAST_SMOKE_DATASET_DIR` | `data/dataset/_smoke_fast_game` | dataset dir path with `train.jsonl` + `val.jsonl` | Input dataset source for no-auth local smoke training | same |
+| `VAST_SMOKE_VENV_DIR` | `.venv` under repo root | venv dir path | Python environment used by `deploy/vast_cloud_training/train_baseline_preset.sh` during local smoke | same |
+| `VAST_SMOKE_EPOCHS` | `1` | integer `>=1` | Smoke epoch count forwarded via preset `TRAIN_EXTRA_ARGS` | same |
+| `VAST_SMOKE_MAX_TOTAL_ROWS` | `512` | integer `>=1` | Effective total train+val row cap forwarded to `train_baseline.py --max-total-rows` | same |
+
+Vast local smoke interactions:
+- script always routes through `deploy/vast_cloud_training/train_baseline_preset.sh`.
+- it injects fixed smoke args (`--batch-size 64 --num-workers 0 --no-progress`) plus configured epochs/max-row-cap.
+- no Vast API/auth calls are made; `VAST_API_KEY` is not required.
+
+## Vast No-Auth Deployment Checks (`scripts/vast_noauth_deploy_checks.sh`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `VAST_NOAUTH_SKIP_LOCAL_SMOKE` | `0` | `0`, `1` | Skip or run the local smoke training step after test/connectivity checks | `bash scripts/vast_noauth_deploy_checks.sh` |
+
+Vast no-auth checks interactions:
+- always runs `python -m unittest discover -s tests -p "test_vast*.py" -v`.
+- always runs `bash scripts/cloud_connectivity_health_checks.sh --provider vast --no-live`.
+- when `VAST_NOAUTH_SKIP_LOCAL_SMOKE=0`, runs `bash scripts/vast_local_smoke_test.sh`.
+
 ## Test Coverage
 - `tests/test_secrets_resolution.py`
   - dotenv parsing + explicit/env/keyring/dotenv precedence order + dotenv path ordering.
@@ -322,3 +387,5 @@ Pod-stop interactions:
   - `scripts/train_dual_sequence.py --help` exposes dual-sequence controls and side-mode run wiring.
 - `tests/test_play_model_vs_model_cli.py`
   - `scripts/play_model_vs_model.py --help` exposes dual-pair arena controls and runtime-mode wiring.
+- `tests/test_vast_cycle_scripts.py`
+  - Vast script contract checks include no-auth deployment smoke/check wrapper wiring assertions.

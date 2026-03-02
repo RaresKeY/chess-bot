@@ -85,8 +85,11 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - `template-list`: REST-based template discovery/filtering
   - `gpu-search`: GraphQL `gpuTypes` query + local ranking/filtering by cloud/memory/price
   - `provision`: GraphQL GPU selection + REST pod creation
+  - `pod-status`: REST pod status lookup by pod id
+  - `pod-resume`: GraphQL pod resume (`podResume` for on-demand, `podBidResume` for interruptible spot resumes)
 - Template list can succeed while GPU search fails if the API key lacks GraphQL access/scopes (REST and GraphQL permissions may differ)
 - `provision` now supports explicit spot capacity control via `--interruptible/--no-interruptible` (default `--no-interruptible`)
+- `pod-resume` defaults to interruptible auto-detect from current pod status; callers can force mode with `--interruptible`/`--no-interruptible`
 
 ## RunPod SDK Component (`runpod_sdk_component.py`) - Separate Modular Path
 - This is a distinct component from the raw REST/GraphQL path.
@@ -172,7 +175,17 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - defines tracked pod registry path helper (`config/runpod_tracked_pods.jsonl` by default)
 - `scripts/runpod_cycle_start.sh`
   - provisions a pod from template using shared resolver-backed RunPod auth (see `specs/chess_bot_secrets_contract.md`)
+  - resume-first behavior (default enabled): when a resume candidate pod id is available, start checks pod status and:
+    - resumes stopped pods (`EXITED`/`STOPPED`) before provisioning new capacity
+    - reuses already-running pods (`RUNNING`/`READY`) without provisioning a duplicate pod
+    - falls back to new provisioning for non-resumable states or status lookup failure
+  - resume candidate pod-id resolution order:
+    - `RUNPOD_RESUME_POD_ID`
+    - `RUNPOD_POD_ID`
+    - existing run's `provision.json` pod id (when present)
   - forwards `RUNPOD_INTERRUPTIBLE=1` to `runpod_provision.py --interruptible` for spot launches (default `0` / on-demand)
+  - resume path uses `runpod_provision.py pod-resume` with interruptible auto-detect by default; if `RUNPOD_INTERRUPTIBLE` is explicitly set in caller env, that value is forwarded as an override
+  - resume path supports interruptible spot bid override via `RUNPOD_RESUME_BID_PER_GPU` (default `0.2`)
   - now injects a managed no-passphrase temp SSH key by default (`AUTHORIZED_KEYS`, `PUBLIC_KEY`), generated at `${RUNPOD_TEMP_SSH_KEY_BASE:-/tmp/chessbot_runpod_temp_id_ed25519}`
   - managed key injection can be controlled with `RUNPOD_INJECT_MANAGED_SSH_KEY_ENV`
   - now injects a unique per-run `REPO_DIR` by default (`/workspace/chess-bot-<run_id>`) to avoid stale/root-owned repo directories on reused persistent volumes
@@ -260,6 +273,9 @@ Document host-side CLI workflows for building/pushing the RunPod image, diagnosi
   - scans snapshot tails for the latest valid JSON progress event (avoids getting stuck when the newest tailed line is partial/non-JSON)
   - supports manual PTY allocation via `RUNPOD_SSH_FORCE_TTY=1` when a host environment requires it
   - handles `Ctrl-C`/`SIGTERM` by restoring TTY state and stopping local child watcher processes to reduce terminal corruption/noisy leftover streams
+- `scripts/runpod_cycle_status.sh`
+  - supports one-shot status snapshots and continuous watch mode (`--watch`)
+  - watch mode now traps `INT`/`TERM`, exits cleanly with code `130`, and avoids leaving a stuck watch loop on operator interrupts
 - `scripts/runpod_cycle_watchdog.sh`
   - host-side stall watchdog for active runs (`RUNPOD_CYCLE_RUN_ID`)
   - this script is now a backward-compatible alias to `scripts/telemetry_watchdog.sh`

@@ -23,11 +23,24 @@ VOLUME_GB="${RUNPOD_VOLUME_GB:-40}"
 CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-15}"
 DEFAULT_REMOTE_REPO_DIR="${RUNPOD_DEFAULT_REMOTE_REPO_DIR:-/workspace/chess-bot-${RUN_ID}}"
 INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-0}"
+RESUME_STOPPED_POD="${RUNPOD_RESUME_STOPPED_POD:-1}"
+RESUME_POD_ID="${RUNPOD_RESUME_POD_ID:-${RUNPOD_POD_ID:-}}"
+RESUME_BID_PER_GPU="${RUNPOD_RESUME_BID_PER_GPU:-0.2}"
+START_MODE="provision_new"
+START_NOTE="Provisioned via runpod_cycle_start.sh (wait-ready enabled)"
 
-cmd=(
+if [[ -z "${RESUME_POD_ID}" && -f "${PROVISION_JSON}" ]]; then
+  RESUME_POD_ID="$(runpod_cycle_pod_id "${PROVISION_JSON}" || true)"
+fi
+
+RUNPOD_PROVISION_BASE_CMD=(
   "${PY_BIN}" "${REPO_ROOT}/scripts/runpod_provision.py"
   --keyring-service runpod
   --keyring-username RUNPOD_API_KEY
+)
+
+cmd=(
+  "${RUNPOD_PROVISION_BASE_CMD[@]}"
   provision
   --name "${POD_NAME}"
   --cloud-type "${CLOUD_TYPE}"
@@ -81,11 +94,60 @@ for extra_env in ${RUNPOD_START_ENVS:-}; do
   cmd+=( --env "${extra_env}" )
 done
 
-printf '[runpod-cycle-start] exec:'
-printf ' %q' "${cmd[@]}"
-printf '\n'
+if [[ "${RESUME_STOPPED_POD}" == "1" && -n "${RESUME_POD_ID}" ]]; then
+  status_cmd=(
+    "${RUNPOD_PROVISION_BASE_CMD[@]}"
+    pod-status
+    --pod-id "${RESUME_POD_ID}"
+  )
+  status_before_json="${CYCLE_DIR}/status_before_resume.json"
+  if "${status_cmd[@]}" > "${status_before_json}" 2>/dev/null; then
+    pod_state="$(jq -r '(.pod_status.desiredStatus // .pod_status.status // .pod_status.machineStatus // .pod_status.state // "") | ascii_upcase' "${status_before_json}")"
+    case "${pod_state}" in
+      EXITED|STOPPED)
+        resume_cmd=(
+          "${RUNPOD_PROVISION_BASE_CMD[@]}"
+          pod-resume
+          --pod-id "${RESUME_POD_ID}"
+          --gpu-count "${GPU_COUNT}"
+          --bid-per-gpu "${RESUME_BID_PER_GPU}"
+          --wait-ready
+        )
+        if [[ -n "${RUNPOD_INTERRUPTIBLE+x}" ]]; then
+          if [[ "${INTERRUPTIBLE}" == "1" ]]; then
+            resume_cmd+=( --interruptible )
+          else
+            resume_cmd+=( --no-interruptible )
+          fi
+        fi
+        printf '[runpod-cycle-start] exec:'
+        printf ' %q' "${resume_cmd[@]}"
+        printf '\n'
+        "${resume_cmd[@]}" | tee "${PROVISION_JSON}"
+        START_MODE="resume_stopped"
+        START_NOTE="Resumed existing stopped pod via runpod_cycle_start.sh (wait-ready enabled)"
+        ;;
+      RUNNING|READY)
+        cp "${status_before_json}" "${PROVISION_JSON}"
+        START_MODE="reuse_running"
+        START_NOTE="Reused already-running pod via runpod_cycle_start.sh"
+        ;;
+      *)
+        echo "[runpod-cycle-start] resume candidate pod ${RESUME_POD_ID} has state=${pod_state}; provisioning new pod" >&2
+        ;;
+    esac
+  else
+    echo "[runpod-cycle-start] warning: failed to query pod status for resume candidate ${RESUME_POD_ID}; provisioning new pod" >&2
+  fi
+  rm -f "${status_before_json}" >/dev/null 2>&1 || true
+fi
 
-"${cmd[@]}" | tee "${PROVISION_JSON}"
+if [[ "${START_MODE}" == "provision_new" ]]; then
+  printf '[runpod-cycle-start] exec:'
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
+  "${cmd[@]}" | tee "${PROVISION_JSON}"
+fi
 
 IP="$(runpod_cycle_public_ip "${PROVISION_JSON}")"
 SSH_PORT="$(runpod_cycle_ssh_port "${PROVISION_JSON}")"
@@ -140,7 +202,7 @@ runpod_cycle_registry_record \
   "${IP}" \
   "${SSH_HOST}" \
   "${SSH_PORT}" \
-  "Provisioned via runpod_cycle_start.sh (wait-ready enabled)"
+  "${START_NOTE}"
 
 runpod_cycle_append_report "${REPORT_MD}" \
   "# RunPod Cycle Report (${RUN_ID})" \
@@ -151,6 +213,9 @@ runpod_cycle_append_report "${REPORT_MD}" \
   "- Cloud type: \`${CLOUD_TYPE}\`" \
   "- Interruptible (spot): \`${INTERRUPTIBLE}\`" \
   "- Requested GPU type: \`${GPU_TYPE_ID}\`" \
+  "- Start mode: \`${START_MODE}\`" \
+  "- Resume pod ID candidate: \`${RESUME_POD_ID:-<none>}\`" \
+  "- Start note: \`${START_NOTE}\`" \
   "- Public IP: \`${IP}\`" \
   "- SSH host (effective): \`${SSH_HOST}\`" \
   "- SSH user (effective): \`${SSH_USER}\`" \

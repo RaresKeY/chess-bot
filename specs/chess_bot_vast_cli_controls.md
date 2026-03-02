@@ -12,6 +12,8 @@ Define the Vast.ai host-side provisioning and lifecycle workflow added as a para
 - `scripts/vast_cycle_stop.sh`
 - `scripts/vast_cycle_terminate.sh`
 - `scripts/vast_cycle_status.sh`
+- `scripts/vast_local_smoke_test.sh`
+- `scripts/vast_noauth_deploy_checks.sh`
 - `scripts/cloud_connectivity_health_checks.sh` (provider framework)
 - `scripts/cloud_checks/providers/vast.sh` (Vast provider checks)
 - `deploy/vast_cloud_training/README.md`
@@ -48,6 +50,16 @@ Define the Vast.ai host-side provisioning and lifecycle workflow added as a para
 : destroys instance via `destroy-instance`.
 - `vast_cycle_status.sh`
 : dumps current instance list to `artifacts/vast_cycles/<run_id>/status_response.json`.
+
+## No-Auth Deployment Smoke Scripts
+- `vast_local_smoke_test.sh`
+: runs local smoke training through `deploy/vast_cloud_training/train_baseline_preset.sh` using default dataset `data/dataset/_smoke_fast_game` (no Vast API calls).
+  - local smoke wrapper sets `REPO_DIR` to repo root and `VENV_DIR` to `${VAST_SMOKE_VENV_DIR:-<repo>/.venv}` to avoid `/workspace` path assumptions on non-cloud hosts.
+- `vast_noauth_deploy_checks.sh`
+: runs no-auth Vast validation lane:
+  - `python -m unittest discover -s tests -p "test_vast*.py" -v`
+  - `bash scripts/cloud_connectivity_health_checks.sh --provider vast --no-live`
+  - `bash scripts/vast_local_smoke_test.sh` (unless `VAST_NOAUTH_SKIP_LOCAL_SMOKE=1`)
 
 ## Cloud-Run Preflight
 - Before running Vast cloud provisioning/training lifecycle scripts, push the intended local code changes to the GitHub repo/branch so remote clone/pull uses the latest committed code.

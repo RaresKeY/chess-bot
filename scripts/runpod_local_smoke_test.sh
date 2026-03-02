@@ -87,7 +87,7 @@ run_container_smoke() {
     -e TRAIN_ROLLOUT_HORIZON="${SMOKE_ROLLOUT_HORIZON}" \
     -e TRAIN_CLOSENESS_HORIZON="${SMOKE_CLOSENESS_HORIZON}" \
     -e TRAIN_PROGRESS_JSONL_OUT="${SMOKE_PROGRESS_JSONL_OUT}" \
-    -e TRAIN_EXTRA_ARGS="--epochs ${SMOKE_EPOCHS} --no-progress" \
+    -e TRAIN_EXTRA_ARGS="--epochs ${SMOKE_EPOCHS} --rollout-horizon ${SMOKE_ROLLOUT_HORIZON} --closeness-horizon ${SMOKE_CLOSENESS_HORIZON} --no-progress" \
     "${IMAGE_NAME}" /bin/bash -lc 'if [[ -f /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh ]]; then bash /workspace/chess-bot/deploy/runpod_cloud_training/train_baseline_preset.sh; else bash /opt/runpod_cloud_training/train_baseline_preset.sh; fi'
 }
 

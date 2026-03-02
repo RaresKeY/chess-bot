@@ -17,6 +17,7 @@ from scripts.runpod_provision import (
     _rank_gpu_rows,
     _resolve_api_key,
     build_parser,
+    cmd_pod_resume,
     cmd_provision,
 )
 
@@ -331,6 +332,50 @@ class RunpodApiHelperTests(unittest.TestCase):
         self.assertTrue(args_enabled.interruptible)
         args_disabled = parser.parse_args(["provision", "--interruptible", "--no-interruptible"])
         self.assertFalse(args_disabled.interruptible)
+
+    def test_parser_pod_resume_interruptible_default_is_auto(self):
+        parser = build_parser()
+        args_default = parser.parse_args(["pod-resume", "--pod-id", "pod_123"])
+        self.assertIsNone(args_default.interruptible)
+        self.assertTrue(args_default.wait_ready)
+        args_enabled = parser.parse_args(["pod-resume", "--pod-id", "pod_123", "--interruptible"])
+        self.assertTrue(args_enabled.interruptible)
+        args_disabled = parser.parse_args(["pod-resume", "--pod-id", "pod_123", "--interruptible", "--no-interruptible"])
+        self.assertFalse(args_disabled.interruptible)
+
+    def test_pod_resume_auto_detects_interruptible_and_uses_bid_mode(self):
+        args = argparse.Namespace(
+            api_key="SECRET",
+            keyring_service="runpod",
+            keyring_username="RUNPOD_API_KEY",
+            rest_base="https://rest.runpod.io/v1",
+            graphql_endpoint="https://api.runpod.io/graphql",
+            verbose=False,
+            pod_id="pod_123",
+            gpu_count=2,
+            bid_per_gpu=0.25,
+            interruptible=None,
+            wait_ready=False,
+            wait_timeout_seconds=30,
+            wait_poll_seconds=5,
+        )
+        with mock.patch("scripts.runpod_provision._resolve_api_key", return_value="SECRET"), mock.patch(
+            "scripts.runpod_provision._get_pod",
+            side_effect=[
+                {"id": "pod_123", "desiredStatus": "EXITED", "interruptible": True},
+                {"id": "pod_123", "desiredStatus": "RUNNING", "interruptible": True},
+            ],
+        ), mock.patch(
+            "scripts.runpod_provision._graphql_resume_pod",
+            return_value={"operation": "podBidResume", "payload": {"data": {}}, "result": {"id": "pod_123"}},
+        ) as resume_mock, mock.patch(
+            "scripts.runpod_provision._print_json"
+        ):
+            rc = cmd_pod_resume(args)
+        self.assertEqual(rc, 0)
+        self.assertTrue(resume_mock.call_args.kwargs["interruptible"])
+        self.assertEqual(resume_mock.call_args.kwargs["gpu_count"], 2)
+        self.assertEqual(resume_mock.call_args.kwargs["bid_per_gpu"], 0.25)
 
     def test_provision_passes_interruptible_to_create_pod(self):
         args = argparse.Namespace(
