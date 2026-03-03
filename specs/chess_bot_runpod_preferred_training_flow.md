@@ -69,6 +69,19 @@ Interactive/manual iteration is intentionally documented separately in `specs/ch
   - collect stage writes `artifacts/runpod_cycles/<run_id>/collected/logs_auto/collection_confirmation.json`
   - full-HF flow only auto-stops after `artifacts_sent_back_confirmed=true`; on confirmation failure it exits and leaves pod running for manual inspection.
 
+### Requested Operator Profile (2026-03-02)
+Target run profile requested for next high-effort training attempt:
+- `RUNPOD_GPU_TYPE_ID=NVIDIA A40`
+- `RUNPOD_GPU_COUNT=6`
+- `RUNPOD_FULL_TRAIN_NPROC_PER_NODE=6`
+- `RUNPOD_INTERRUPTIBLE=1` (spot/interruptible)
+- `RUNPOD_FULL_TRAIN_MAX_TOTAL_ROWS=1000000`
+- `RUNPOD_FULL_TRAIN_EPOCHS=30`
+- keep rollout defaults (`RUNPOD_FULL_TRAIN_ROLLOUT_HORIZON=8`, `RUNPOD_FULL_TRAIN_CLOSENESS_HORIZON=8`)
+- preferred throughput override for this profile:
+  - `RUNPOD_FULL_TRAIN_NUM_WORKERS_OVERRIDE=8`
+  - leave `RUNPOD_FULL_TRAIN_BATCH_SIZE_OVERRIDE` unset for first attempt
+
 ## Exact Training Parameter Profile (Current)
 The flow runs `train_baseline.py` via preset (or direct fallback when needed) with this profile:
 - `epochs=20`

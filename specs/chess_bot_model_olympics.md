@@ -51,7 +51,7 @@ Each participant entry should include:
 - model family / objective (if known)
 - notes/status (active, archived, experimental, baseline, etc.)
 
-### Active / Recent Participants (as of February 26, 2026)
+### Active / Recent Participants (as of March 2, 2026)
 
 1. `base_model`
 - Artifact: `artifacts/model.pt`
@@ -92,6 +92,18 @@ Each participant entry should include:
 - Artifact: `artifacts/experiments/model_dualseq10k_20260301T072356Z_black.pt`
 - Type: dual side-specific one-shot sequence (`horizon=8`)
 - Role: black-side artifact from explicit 10k/2k spliced training subset
+
+9. `full1m20e_multistep_h8_single` (March 2, 2026)
+- Artifact: `artifacts/runpod_cycles/full1m-20e-r8-b2060-20260302T122840Z/collected/run_artifacts/model_full1m-20e-r8-b2060-20260302T122840Z.pt`
+- Type: multistep teacher-forced recursive (`rollout_horizon=8`) single-artifact model
+- Role: current 1M-row full-run candidate trained on aggregate monthly game datasets
+
+10. `dualseq10k_pair` (March 2, 2026; arena participant alias)
+- Artifacts:
+  - `artifacts/experiments/model_dualseq10k_20260301T072356Z_white.pt`
+  - `artifacts/experiments/model_dualseq10k_20260301T072356Z_black.pt`
+- Type: dual side-routed one-shot sequence pair (`horizon=8`)
+- Role: canonical dual-pair arena participant for side-routed comparisons vs single artifacts
 
 ## Add / Remove Procedure (manual spec maintenance)
 
@@ -152,6 +164,23 @@ Dual-pair vs single template:
 - `artifacts/reports/dualseq10k_20260301T072356Z_arena_dual_swapped_vs_old10k_g6.json`
 - `artifacts/reports/dualseq10k_20260301T072356Z_arena_white_as_white_vs_old_black_g4.json`
 - `artifacts/reports/dualseq10k_20260301T072356Z_arena_old_white_vs_black_as_black_g4.json`
+- `artifacts/reports/20260302T143459Z_arena_full1m20e_vs_base_g6.json`
+- `artifacts/reports/20260302T143459Z_arena_full1m20e_vs_combined_g6.json`
+- `artifacts/reports/20260302T143459Z_arena_full1m20e_vs_cloudfull_g6.json`
+- `artifacts/reports/20260302T144020Z_arena_full1m20e_EXPLICIT_multistep_h8_vs_base_g6.json`
+- `artifacts/reports/20260302T144020Z_arena_full1m20e_EXPLICIT_multistep_h8_vs_combined_g6.json`
+- `artifacts/reports/20260302T144020Z_arena_full1m20e_EXPLICIT_multistep_h8_vs_cloudfull_g6.json`
+- `artifacts/reports/20260302T145854Z_arena_full1m20e_single_vs_dualseq10k_pair_g6.json`
+
+## Latest Quick Findings (March 2, 2026)
+- Explicit rerun confirms `full1m20e_multistep_h8_single` was evaluated as rollout-mode single artifact (`policy_mode_a=rollout`).
+- Against legacy references:
+  - vs `base_model` (g6): `0/3/3` (score `0.25`)
+  - vs `combined_e20_b2048` (g6): `0/6/0` (score `0.50`)
+  - vs `cloud_fulltrain` (g6): `0/6/0` (score `0.50`)
+- Against dual pair:
+  - `full1m20e_multistep_h8_single` vs `dualseq10k_pair` (g6): `0/6/0` (score `0.50`)
+  - fallback avg/game in that matchup: single `1.0` vs dual pair `11.0`
 
 ## Next Method Improvements (not yet canonical)
 1. Use `winner_side='?'` to reduce conditioning bias in rankings

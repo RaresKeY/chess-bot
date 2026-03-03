@@ -61,6 +61,9 @@ RUN useradd -m -s /bin/bash runner \
 RUN python3 -m venv "${VENV_DIR}" \
     && "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
 
+COPY requirements.txt /tmp/requirements.txt
+RUN "${VENV_DIR}/bin/pip" install -r /tmp/requirements.txt
+
 COPY deploy/runpod_cloud_training/requirements-extra.txt /tmp/requirements-extra.txt
 RUN "${VENV_DIR}/bin/pip" install -r /tmp/requirements-extra.txt
 

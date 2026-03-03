@@ -67,6 +67,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 
 ## Environment / Deployment Decisions (current)
 - Prebuilt Python venv in image (`/opt/venvs/chessbot`)
+- Image now preinstalls repo core training/runtime deps from root `requirements.txt` (notably `torch`, `numpy`, `python-chess`, `PyYAML`, `keyring`) at build time.
 - `rclone` installed for generic high-throughput transfers
 - image also includes transfer/debug packages for large artifact handling (`aria2`, `pigz`, `zstd`, `lz4`, `pv`, `wget`, `git-lfs`, `unzip`)
 - image includes telemetry/debug packages (`dnsutils`, `iputils-ping`, `net-tools`, `sysstat`)
@@ -250,7 +251,7 @@ Provide a modular containerized deployment package for running this repo on GPU 
 - Watchdog stop mutation currently requests object subfields (`id`, `desiredStatus`) on `podStop` to match the observed GraphQL schema
 - This module/docs distinguish RunPod `stop` from pod `terminate`; operator cleanup may still require a separate pod delete step after stop/autostop
 - For host-side smoke/lifecycle validation, disabling optional services (Jupyter/inference/HF-watchdog/idle-watchdog) can improve SSH stability because a single child-process exit otherwise tears down `sshd`
-- First local Docker smoke run can be slow when `SYNC_REQUIREMENTS_ON_START=1` because the image venv intentionally installs repo `requirements.txt` (including `torch`) at startup when the repo requirements hash is not yet stamped
+- First local Docker smoke run is now typically faster than before because core training deps are pre-baked into the image venv; startup requirement sync still runs hash checks and only reinstalls when repo `requirements.txt` changed (or `FORCE_PIP_SYNC=1`)
 - If `START_INFERENCE_API=1` and `torch` is missing from the deployment venv, the inference API itself remains unavailable until repo requirement sync installs `torch`; entrypoint now degrades by skipping API start instead of crashing the container
 - Image-vs-repo script version skew is possible for `train_baseline_preset.sh` if the image was built before newer HF/progress features landed in the repo; operator flows should prefer the repo copy for the latest behavior
 

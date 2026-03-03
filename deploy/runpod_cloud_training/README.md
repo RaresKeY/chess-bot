@@ -11,7 +11,7 @@ This module is intentionally self-contained under `deploy/runpod_cloud_training/
 
 ## Files
 - `PLAN.md`: saved implementation plan and design choices
-- `Dockerfile`: GPU-ready base image with venv, Jupyter, FastAPI, `rclone`, SSH
+- `Dockerfile`: GPU-ready base image with venv, pre-baked core repo training deps (`requirements.txt`), Jupyter, FastAPI, `rclone`, SSH
 - `entrypoint.sh`: startup orchestration (clone/pull repo, requirement sync, start services)
 - `inference_api.py`: reusable HTTP inference service
 - `hf_sync.py`: one-shot Hugging Face sync
@@ -57,7 +57,7 @@ bash scripts/build_runpod_image.sh
 ## Startup Behavior (default)
 1. Configure SSH for user `runner` using `AUTHORIZED_KEYS` and ensure the `runner` account is unlocked for pubkey auth (password auth remains disabled)
 2. Clone/pull `https://github.com/RaresKeY/chess-bot.git` into `/workspace/chess-bot`
-3. Compare repo `requirements.txt` hash and `pip install -r` if changed
+3. Compare repo `requirements.txt` hash and `pip install -r` only when changed (or forced), so pre-baked deps stay fast-path
 4. Start `sshd`, JupyterLab, and inference API
 5. Optionally start HF auto-sync and idle watchdog
 
@@ -188,4 +188,4 @@ Records include a `source` field (for example `local_runpod_smoke`, `runpod_entr
 ## Notes / Limits
 - Public repo clone flow only (no private repo token bootstrap included)
 - RunPod GraphQL autostop mutation may evolve; `idle_watchdog.py` supports endpoint/mutation overrides via env vars
-- If repo dependencies drift significantly from image extras, startup `pip install -r requirements.txt` handles sync
+- Core training deps are pre-baked from repo `requirements.txt`; startup sync still handles requirement drift (`SYNC_REQUIREMENTS_ON_START=1`) when repo requirements change
