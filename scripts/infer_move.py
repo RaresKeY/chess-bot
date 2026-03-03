@@ -37,7 +37,11 @@ def _parse_topk_multipliers(text: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Infer best legal move from a context")
-    parser.add_argument("--model", default="", help="Single-model artifact path (legacy next-move or single dual-sequence artifact)")
+    parser.add_argument(
+        "--model",
+        default="",
+        help="Single-model artifact path (legacy next-move, single dual-sequence, or board-conditioned dual-sequence artifact)",
+    )
     parser.add_argument("--white-model", default="", help="White-side dual-sequence artifact path")
     parser.add_argument("--black-model", default="", help="Black-side dual-sequence artifact path")
     parser.add_argument("--context", required=True, help="Space-separated UCI moves")

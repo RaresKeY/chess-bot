@@ -3,14 +3,19 @@ from typing import Dict, List, Optional, Sequence
 import chess
 import torch
 
+from src.chessbot.board_features import board_state_planes_from_context
 from src.chessbot.model import (
     NextMoveLSTM,
+    NextMoveSeqBoardLSTM,
     NextMoveSeqLSTM,
     encode_tokens,
     side_to_move_id_from_context_len,
     winner_to_id,
 )
 from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_id
+
+MODEL_FAMILY_DUAL_SEQUENCE = "dual_side_sequence_lstm"
+MODEL_FAMILY_DUAL_SEQUENCE_BOARD = "dual_side_sequence_board_lstm"
 
 
 def parse_context(text: str) -> List[str]:
@@ -96,22 +101,75 @@ def best_legal_from_topk(topk_tokens: List[str], context: List[str]) -> str:
     return ""
 
 
+def _legal_token_ids_for_board(board: chess.Board, vocab: Dict[str, int]) -> List[int]:
+    out: List[int] = []
+    seen = set()
+    for mv in board.legal_moves:
+        tok = mv.uci()
+        tok_id = vocab.get(tok)
+        if tok_id is None:
+            continue
+        tok_id = int(tok_id)
+        if tok_id in seen:
+            continue
+        seen.add(tok_id)
+        out.append(tok_id)
+    return out
+
+
+def _topk_legal_tokens_for_board_from_logits(
+    *,
+    logits_1d: torch.Tensor,
+    board: chess.Board,
+    vocab: Dict[str, int],
+    inv_vocab: Dict[int, str],
+    k: int,
+) -> List[str]:
+    legal_ids = _legal_token_ids_for_board(board, vocab)
+    if not legal_ids:
+        return []
+    legal_idx = torch.tensor(legal_ids, dtype=torch.long, device=logits_1d.device)
+    legal_logits = logits_1d.index_select(0, legal_idx)
+    k_eff = min(max(1, int(k)), int(legal_logits.shape[0]))
+    best_local = legal_logits.topk(k_eff, dim=-1).indices
+    best_global = legal_idx.index_select(0, best_local).detach().cpu().tolist()
+    out: List[str] = []
+    for tok_id in best_global:
+        tok = inv_vocab.get(int(tok_id), "")
+        if tok:
+            out.append(tok)
+    return out
+
+
 def _decode_best_legal_from_next_logits(
     *,
     logits_1d: torch.Tensor,
+    vocab: Dict[str, int],
     inv_vocab: Dict[int, str],
     context: List[str],
     topk: int,
     fallback_topk_multipliers: Optional[Sequence[int]] = None,
 ) -> Dict:
+    board = chess.Board()
+    for uci in context:
+        mv = chess.Move.from_uci(uci)
+        if mv not in board.legal_moves:
+            raise ValueError(f"Illegal context move: {uci}")
+        board.push(mv)
+
     vocab_size = int(logits_1d.shape[-1])
     attempts = resolve_topk_attempts(topk, vocab_size, fallback_topk_multipliers)
     topk_tokens_last: List[str] = []
     used_k = attempts[-1] if attempts else max(1, min(int(topk), vocab_size))
     for k in attempts:
-        pred_ids = logits_1d.topk(int(k), dim=-1).indices.detach().cpu().tolist()
-        topk_tokens = [inv_vocab.get(i, "") for i in pred_ids]
-        legal = best_legal_from_topk(topk_tokens, context)
+        topk_tokens = _topk_legal_tokens_for_board_from_logits(
+            logits_1d=logits_1d,
+            board=board,
+            vocab=vocab,
+            inv_vocab=inv_vocab,
+            k=int(k),
+        )
+        legal = str(topk_tokens[0] if topk_tokens else "")
         topk_tokens_last = topk_tokens
         used_k = int(k)
         if legal:
@@ -159,6 +217,7 @@ def infer_from_artifact(
         logits = model(tokens, lengths, winners, phases, side_to_moves)
         decoded = _decode_best_legal_from_next_logits(
             logits_1d=logits[0],
+            vocab=vocab,
             inv_vocab=inv_vocab,
             context=context,
             topk=topk,
@@ -206,6 +265,7 @@ def infer_from_artifact_on_device(
         logits = model(tokens, lengths, winners, phases, side_to_moves)
         decoded = _decode_best_legal_from_next_logits(
             logits_1d=logits[0],
+            vocab=vocab,
             inv_vocab=inv_vocab,
             context=context,
             topk=topk,
@@ -220,34 +280,14 @@ def infer_from_artifact_on_device(
     }
 
 
-def _best_legal_from_topk_for_board(topk_tokens: List[str], board: chess.Board) -> str:
-    for tok in topk_tokens:
-        try:
-            mv = chess.Move.from_uci(tok)
-        except Exception:
-            continue
-        if mv in board.legal_moves:
-            return tok
-    return ""
-
-
-def _legal_candidates_for_board(topk_tokens: List[str], board: chess.Board) -> List[str]:
-    out: List[str] = []
-    for tok in topk_tokens:
-        try:
-            mv = chess.Move.from_uci(tok)
-        except Exception:
-            continue
-        if mv in board.legal_moves:
-            out.append(tok)
-    return out
-
-
 def _rollout_sequence_from_first_token(
     *,
     first_token: str,
     board_start: chess.Board,
-    topk_tokens_all: List[List[str]],
+    step_logits: torch.Tensor,
+    vocab: Dict[str, int],
+    inv_vocab: Dict[int, str],
+    k: int,
 ) -> List[str]:
     board = board_start.copy(stack=False)
     try:
@@ -258,8 +298,16 @@ def _rollout_sequence_from_first_token(
         return []
     board.push(first_mv)
     out = [first_token]
-    for step in range(1, len(topk_tokens_all)):
-        chosen = _best_legal_from_topk_for_board(topk_tokens_all[step], board)
+    horizon = int(step_logits.shape[0])
+    for step in range(1, horizon):
+        topk_tokens = _topk_legal_tokens_for_board_from_logits(
+            logits_1d=step_logits[step],
+            board=board,
+            vocab=vocab,
+            inv_vocab=inv_vocab,
+            k=int(k),
+        )
+        chosen = str(topk_tokens[0] if topk_tokens else "")
         if not chosen:
             break
         mv = chess.Move.from_uci(chosen)
@@ -269,6 +317,35 @@ def _rollout_sequence_from_first_token(
         out.append(chosen)
         if board.is_game_over(claim_draw=True):
             break
+    return out
+
+
+def _sequence_with_probs(
+    *,
+    sequence_tokens: List[str],
+    vocab: Dict[str, int],
+    step_probs: torch.Tensor,
+    step_log_probs: torch.Tensor,
+) -> List[Dict]:
+    out: List[Dict] = []
+    steps = min(len(sequence_tokens), int(step_probs.shape[0]))
+    for step_i in range(steps):
+        tok = str(sequence_tokens[step_i] or "")
+        tok_id = vocab.get(tok)
+        if tok_id is None:
+            prob = 0.0
+            log_prob = float("-inf")
+        else:
+            prob = float(step_probs[step_i, int(tok_id)].item())
+            log_prob = float(step_log_probs[step_i, int(tok_id)].item())
+        out.append(
+            {
+                "ply": int(step_i + 1),
+                "move_uci": tok,
+                "probability": prob,
+                "log_probability": log_prob,
+            }
+        )
     return out
 
 
@@ -300,11 +377,17 @@ def _decode_sequence_first_move(
     topk_step1_last: List[str] = []
     topk_ids_all_last: List[List[int]] = []
     used_k = attempts[-1] if attempts else max(1, min(int(topk), vocab_size))
+    step_logits = logits[0]
     for k in attempts:
         topk_ids_all = logits.topk(int(k), dim=-1).indices[0].detach().cpu().tolist()
-        topk_tokens_all = [[inv_vocab.get(i, "") for i in step_ids] for step_ids in topk_ids_all]
-        topk_step1 = list(topk_tokens_all[0] if topk_tokens_all else [])
-        legal_first = _legal_candidates_for_board(topk_step1, board_start)
+        topk_step1 = _topk_legal_tokens_for_board_from_logits(
+            logits_1d=step_logits[0],
+            board=board_start,
+            vocab=vocab,
+            inv_vocab=inv_vocab,
+            k=int(k),
+        )
+        legal_first = list(topk_step1)
         topk_step1_last = topk_step1
         topk_ids_all_last = topk_ids_all
         used_k = int(k)
@@ -316,7 +399,10 @@ def _decode_sequence_first_move(
             chosen_sequence = _rollout_sequence_from_first_token(
                 first_token=chosen_first,
                 board_start=board_start,
-                topk_tokens_all=topk_tokens_all,
+                step_logits=step_logits,
+                vocab=vocab,
+                inv_vocab=inv_vocab,
+                k=int(k),
             )
             return {
                 "best_legal": chosen_first,
@@ -334,7 +420,10 @@ def _decode_sequence_first_move(
             sequence = _rollout_sequence_from_first_token(
                 first_token=tok,
                 board_start=board_start,
-                topk_tokens_all=topk_tokens_all,
+                step_logits=step_logits,
+                vocab=vocab,
+                inv_vocab=inv_vocab,
+                k=int(k),
             )
             if not sequence:
                 continue
@@ -385,14 +474,17 @@ def infer_sequence_from_artifact_on_device(
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
     cfg = artifact["config"]
     fam = artifact_model_family(artifact)
-    if fam != "dual_side_sequence_lstm":
+    if fam not in {MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD}:
         raise RuntimeError(f"Unsupported model family for sequence inference: {fam}")
 
     device = torch.device(device_str)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
 
-    model = NextMoveSeqLSTM(vocab_size=len(vocab), **cfg).to(device)
+    if fam == MODEL_FAMILY_DUAL_SEQUENCE_BOARD:
+        model = NextMoveSeqBoardLSTM(vocab_size=len(vocab), **cfg).to(device)
+    else:
+        model = NextMoveSeqLSTM(vocab_size=len(vocab), **cfg).to(device)
     model.load_state_dict(artifact["state_dict"])
     model.eval()
 
@@ -403,9 +495,17 @@ def infer_sequence_from_artifact_on_device(
     tokens = torch.tensor([context_ids], dtype=torch.long, device=device)
     lengths = torch.tensor([len(context_ids)], dtype=torch.long, device=device)
     side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long, device=device)
+    board_state = None
+    if fam == MODEL_FAMILY_DUAL_SEQUENCE_BOARD:
+        board_state = board_state_planes_from_context(context).unsqueeze(0).to(device)
     with torch.no_grad():
-        logits = model(tokens, lengths, side_to_moves)
+        if fam == MODEL_FAMILY_DUAL_SEQUENCE_BOARD:
+            logits = model(tokens, lengths, side_to_moves, board_state=board_state)
+        else:
+            logits = model(tokens, lengths, side_to_moves)
         pred_ids = logits.argmax(dim=-1)[0].detach().cpu().tolist()
+        step_probs = torch.softmax(logits[0], dim=-1).detach().cpu()
+        step_log_probs = torch.log_softmax(logits[0], dim=-1).detach().cpu()
         decoded = _decode_sequence_first_move(
             logits=logits,
             vocab=vocab,
@@ -420,12 +520,26 @@ def infer_sequence_from_artifact_on_device(
     best_legal = str(decoded.get("best_legal") or "")
     predicted_sequence = [inv_vocab.get(i, "") for i in pred_ids]
     legal_sequence = list(decoded.get("legal_sequence") or [])
+    predicted_sequence_with_probs = _sequence_with_probs(
+        sequence_tokens=predicted_sequence,
+        vocab=vocab,
+        step_probs=step_probs,
+        step_log_probs=step_log_probs,
+    )
+    legal_sequence_with_probs = _sequence_with_probs(
+        sequence_tokens=legal_sequence,
+        vocab=vocab,
+        step_probs=step_probs,
+        step_log_probs=step_log_probs,
+    )
 
     return {
         "topk_step1": topk_step1,
         "best_legal": best_legal,
         "predicted_sequence": predicted_sequence,
+        "predicted_sequence_with_probs": predicted_sequence_with_probs,
         "legal_sequence": legal_sequence,
+        "legal_sequence_with_probs": legal_sequence_with_probs,
         "first_move": best_legal,
         "horizon": int(artifact_sequence_horizon(artifact)),
         "model_side": artifact_model_side(artifact),
@@ -512,6 +626,7 @@ def infer_rollout_from_artifact_on_device(
             logits = model(tokens, lengths, winners, phases, side_to_moves)
             decoded = _decode_best_legal_from_next_logits(
                 logits_1d=logits[0],
+                vocab=vocab,
                 inv_vocab=inv_vocab,
                 context=local_context,
                 topk=topk,
@@ -575,7 +690,7 @@ def infer_first_move_auto_from_artifact_on_device(
 
     objective = artifact_training_objective(artifact)
     fam = artifact_model_family(artifact)
-    if fam == "dual_side_sequence_lstm":
+    if fam in {MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD}:
         out = infer_sequence_from_artifact_on_device(
             artifact=artifact,
             context=context,

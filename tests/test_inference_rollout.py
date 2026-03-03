@@ -114,9 +114,9 @@ class InferenceRolloutTests(unittest.TestCase):
         # tiny artifact has vocab size 4; topk must be clamped
         self.assertLessEqual(len(out["topk"]), 4)
 
-    def test_next_inference_progressive_topk_retry_finds_legal_move(self):
+    def test_next_inference_legal_masking_finds_legal_move_without_retry(self):
         artifact = self._build_tiny_artifact()
-        # On black-to-move, top-1 token e2e4 is illegal; top-2 includes legal e7e5.
+        # On black-to-move, top-1 raw token e2e4 is illegal; legal masking should still pick e7e5 at k=1.
         out = infer_from_artifact_on_device(
             artifact=artifact,
             context=["e2e4"],
@@ -126,7 +126,7 @@ class InferenceRolloutTests(unittest.TestCase):
             fallback_topk_multipliers=[1, 2],
         )
         self.assertEqual(out["best_legal"], "e7e5")
-        self.assertEqual(out["decode_topk_used"], 2)
+        self.assertEqual(out["decode_topk_used"], 1)
         self.assertEqual(out["decode_topk_attempts"], [1, 2])
 
 

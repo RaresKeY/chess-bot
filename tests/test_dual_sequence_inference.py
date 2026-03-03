@@ -7,46 +7,62 @@ except Exception:  # pragma: no cover - environment-dependent skip path
     torch = None
 
 if torch is not None:
+    from src.chessbot.board_features import BOARD_FEATURE_PLANES
     from src.chessbot.inference import (
         infer_sequence_from_artifact_on_device,
         infer_first_move_auto_from_artifact_on_device,
         infer_first_move_dual_artifacts_on_device,
     )
-    from src.chessbot.model import NextMoveSeqLSTM
+    from src.chessbot.model import NextMoveSeqBoardLSTM, NextMoveSeqLSTM
 
 
-def _build_dual_sequence_artifact(model_side: str) -> dict:
+def _build_dual_sequence_artifact(model_side: str, model_family: str = "dual_side_sequence_lstm") -> dict:
     vocab = {"<PAD>": 0, "<UNK>": 1, "e2e4": 2, "e7e5": 3}
-    model = NextMoveSeqLSTM(
-        vocab_size=len(vocab),
-        horizon=4,
-        embed_dim=4,
-        hidden_dim=8,
-        num_layers=1,
-        dropout=0.0,
-        use_side_to_move=False,
-    )
+    if model_family == "dual_side_sequence_board_lstm":
+        model = NextMoveSeqBoardLSTM(
+            vocab_size=len(vocab),
+            horizon=4,
+            embed_dim=4,
+            hidden_dim=8,
+            num_layers=1,
+            dropout=0.0,
+            use_side_to_move=False,
+            board_feature_planes=BOARD_FEATURE_PLANES,
+        )
+    else:
+        model = NextMoveSeqLSTM(
+            vocab_size=len(vocab),
+            horizon=4,
+            embed_dim=4,
+            hidden_dim=8,
+            num_layers=1,
+            dropout=0.0,
+            use_side_to_move=False,
+        )
     with torch.no_grad():
         for p in model.parameters():
             p.zero_()
         model.classifier.bias[2] = 2.0
         model.classifier.bias[3] = 1.0
+    config = {
+        "horizon": 4,
+        "embed_dim": 4,
+        "hidden_dim": 8,
+        "num_layers": 1,
+        "dropout": 0.0,
+        "use_side_to_move": False,
+        "side_to_move_embed_dim": 4,
+    }
+    if model_family == "dual_side_sequence_board_lstm":
+        config["board_feature_planes"] = BOARD_FEATURE_PLANES
     return {
         "artifact_format_version": 1,
-        "model_family": "dual_side_sequence_lstm",
+        "model_family": model_family,
         "training_objective": "one_shot_sequence_match",
         "model_side": model_side,
         "state_dict": model.state_dict(),
         "vocab": vocab,
-        "config": {
-            "horizon": 4,
-            "embed_dim": 4,
-            "hidden_dim": 8,
-            "num_layers": 1,
-            "dropout": 0.0,
-            "use_side_to_move": False,
-            "side_to_move_embed_dim": 4,
-        },
+        "config": config,
     }
 
 
@@ -60,7 +76,7 @@ class DualSequenceInferenceTests(unittest.TestCase):
             white_artifact=white_artifact,
             black_artifact=black_artifact,
             context=[],
-            topk=2,
+            topk=1,
             device_str="cpu",
         )
         self.assertEqual(out_white_turn["selected_model_side"], "white")
@@ -70,7 +86,7 @@ class DualSequenceInferenceTests(unittest.TestCase):
             white_artifact=white_artifact,
             black_artifact=black_artifact,
             context=["e2e4"],
-            topk=2,
+            topk=1,
             device_str="cpu",
         )
         self.assertEqual(out_black_turn["selected_model_side"], "black")
@@ -88,6 +104,21 @@ class DualSequenceInferenceTests(unittest.TestCase):
             policy_mode="auto",
         )
         self.assertEqual(out["policy_mode_used"], "sequence")
+        self.assertEqual(out["move_uci"], "e2e4")
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_infer_auto_supports_board_conditioned_dual_sequence_family(self) -> None:
+        artifact = _build_dual_sequence_artifact("white", model_family="dual_side_sequence_board_lstm")
+        out = infer_first_move_auto_from_artifact_on_device(
+            artifact=artifact,
+            context=[],
+            winner_side="W",
+            topk=2,
+            device_str="cpu",
+            policy_mode="auto",
+        )
+        self.assertEqual(out["policy_mode_used"], "sequence")
+        self.assertEqual(out["artifact_model_family"], "dual_side_sequence_board_lstm")
         self.assertEqual(out["move_uci"], "e2e4")
 
     @unittest.skipIf(torch is None, "torch not installed")
@@ -167,6 +198,18 @@ class DualSequenceInferenceTests(unittest.TestCase):
         # sequence_path should prefer d2d4 because step3 can then keep high-score e2e3 legal
         self.assertEqual(out_sequence["best_legal"], "d2d4")
         self.assertEqual(out_sequence["legal_sequence"][:2], ["d2d4", "a7a6"])
+        self.assertEqual(len(out_sequence["predicted_sequence_with_probs"]), 3)
+        self.assertEqual(len(out_sequence["legal_sequence_with_probs"]), 3)
+
+        predicted_step1 = out_sequence["predicted_sequence_with_probs"][0]
+        legal_step1 = out_sequence["legal_sequence_with_probs"][0]
+        self.assertEqual(predicted_step1["move_uci"], "e2e4")
+        self.assertEqual(legal_step1["move_uci"], "d2d4")
+        self.assertGreater(predicted_step1["probability"], legal_step1["probability"])
+        self.assertGreaterEqual(predicted_step1["probability"], 0.0)
+        self.assertLessEqual(predicted_step1["probability"], 1.0)
+        self.assertGreaterEqual(legal_step1["probability"], 0.0)
+        self.assertLessEqual(legal_step1["probability"], 1.0)
 
 
 if __name__ == "__main__":
