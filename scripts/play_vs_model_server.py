@@ -3,14 +3,22 @@ import argparse
 import signal
 import json
 import os
+import sys
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingTCPServer
 
+import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from src.chessbot.play_vs_model import (
     LoadedMoveModel,
     PlayConfig,
+    model_move_response,
     move_response,
     render_play_page_html,
     state_response,
@@ -56,7 +64,7 @@ def handler_factory(model_runtime: LoadedMoveModel, play_cfg: PlayConfig, page_p
             return super().do_GET()
 
         def do_POST(self):
-            if self.path not in {"/api/state", "/api/move"}:
+            if self.path not in {"/api/state", "/api/move", "/api/model-move"}:
                 return self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
             try:
                 payload = self._read_json()
@@ -67,15 +75,19 @@ def handler_factory(model_runtime: LoadedMoveModel, play_cfg: PlayConfig, page_p
                 if self.path == "/api/state":
                     return self._send_json(HTTPStatus.OK, state_response(context))
 
-                user_move = payload.get("user_move", "")
-                if not isinstance(user_move, str) or not user_move:
-                    raise ValueError("user_move is required")
-
                 cfg = PlayConfig(
                     winner_side=str(payload.get("winner_side", play_cfg.winner_side)),
                     topk=int(payload.get("topk", play_cfg.topk)),
                     user_color=str(payload.get("user_color", play_cfg.user_color)),
                 )
+                if self.path == "/api/model-move":
+                    result = model_move_response(model_runtime=model_runtime, context=context, cfg=cfg)
+                    return self._send_json(HTTPStatus.OK, result)
+
+                user_move = payload.get("user_move", "")
+                if not isinstance(user_move, str) or not user_move:
+                    raise ValueError("user_move is required")
+
                 result = move_response(model_runtime=model_runtime, context=context, user_move=user_move, cfg=cfg)
                 return self._send_json(HTTPStatus.OK, result)
             except Exception as exc:
@@ -86,34 +98,63 @@ def handler_factory(model_runtime: LoadedMoveModel, play_cfg: PlayConfig, page_p
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve a local Play-vs-Model chess web app")
-    parser.add_argument("--model", default="artifacts/model.pt", help="Model artifact path")
+    parser.add_argument("--model", default="", help="Single model artifact path")
+    parser.add_argument("--white-model", default="", help="White-side model artifact path (requires --black-model)")
+    parser.add_argument("--black-model", default="", help="Black-side model artifact path (requires --white-model)")
+    parser.add_argument("--device", default="auto", help="Inference device (auto/cpu/cuda/cuda:N)")
     parser.add_argument("--dir", default=".", help="Directory to serve as HTTP document root")
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8020)
     parser.add_argument("--page-path", default="play-vs-model", help="URL path for app page")
     parser.add_argument("--piece-base", default="assets/pieces/cburnett", help="URL path prefix for piece assets")
     parser.add_argument("--winner-side", default="B", choices=["W", "B", "D", "?"])
+    parser.add_argument("--user-color", default="white", choices=["white", "black"])
     parser.add_argument("--topk", type=int, default=10)
     args = parser.parse_args()
 
     serve_dir = str(Path(args.dir).resolve())
-    model_path = str(Path(args.model).resolve())
     os.chdir(serve_dir)
+    if str(args.device).strip().lower() == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = str(args.device).strip()
 
-    model_runtime = LoadedMoveModel.from_path(model_path)
-    play_cfg = PlayConfig(winner_side=args.winner_side, topk=args.topk, user_color="white")
+    white_model = str(args.white_model).strip()
+    black_model = str(args.black_model).strip()
+    model_mode = "single"
+    model_desc = ""
+    if white_model or black_model:
+        if not white_model or not black_model:
+            raise SystemExit("Both --white-model and --black-model are required for side-routed play mode")
+        if str(args.model).strip():
+            # Keep behavior explicit: dual pair mode should not silently ignore --model.
+            raise SystemExit("Do not combine --model with --white-model/--black-model")
+        white_model_path = str(Path(white_model).resolve())
+        black_model_path = str(Path(black_model).resolve())
+        model_runtime = LoadedMoveModel.from_dual_paths(white_model_path, black_model_path, device_str=device)
+        model_mode = "dual_pair"
+        model_desc = f"white={white_model_path} black={black_model_path}"
+    else:
+        model_path = str(Path(args.model or "artifacts/model.pt").resolve())
+        model_runtime = LoadedMoveModel.from_path(model_path, device_str=device)
+        model_desc = model_path
+
+    play_cfg = PlayConfig(winner_side=args.winner_side, topk=args.topk, user_color=args.user_color)
     page_html = render_play_page_html(
         title="Play vs Chess Model",
         piece_base=args.piece_base,
         default_winner_side=args.winner_side,
         default_topk=args.topk,
+        default_user_color=args.user_color,
     )
     handler = handler_factory(model_runtime=model_runtime, play_cfg=play_cfg, page_path=args.page_path, page_html=page_html)
 
     with GracefulThreadingTCPServer((args.bind, args.port), handler) as httpd:
         print(f"Serving {serve_dir} at http://{args.bind}:{args.port}/")
         print(f"Play URL: http://{args.bind}:{args.port}/{'/'.join([args.page_path.strip('/')])}")
-        print(f"Model: {model_path}")
+        print(f"Model mode: {model_mode}")
+        print(f"Model(s): {model_desc}")
+        print(f"Device: {device}")
 
         stopping = {"done": False}
 

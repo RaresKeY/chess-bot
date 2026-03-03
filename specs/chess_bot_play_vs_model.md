@@ -26,33 +26,39 @@ Provide an interactive browser UI to play chess against the trained move model, 
 - `GET /play-vs-model` -> interactive HTML page
 - `POST /api/state` -> returns serialized state from provided `context`
 - `POST /api/move` -> applies user move and model response
+- `POST /api/model-move` -> applies one model move when it is model turn (used for user-as-black start and manual stepping)
 
 ## Inputs
 Server CLI:
 - `main.py` convenience wrapper launches play-vs-model and, when `--model` is omitted, resolves the newest `*.pt` artifact under `artifacts/` and injects repo root as `--dir` (unless explicitly provided)
-- `--model` model artifact path
+- model selection modes:
+  - single artifact: `--model`
+  - side-routed dual pair: `--white-model` + `--black-model` (auto-selected by side-to-move)
 - `--dir` HTTP document root for static assets
 - `--piece-base` URL path to piece images
 - `--winner-side` model conditioning token
 - `--topk` model top-k candidate count
+- `--user-color` default player side in UI (`white`/`black`)
+- `--device` inference device (`auto`/`cpu`/`cuda[:N]`)
 
 API payload (move):
 - `context` (UCI list)
 - `user_move` (UCI)
 - `winner_side`
 - `topk`
-- `user_color` (currently UI uses `white`)
+- `user_color` (`white` or `black`)
 
 ## UI Behavior (current)
-- User plays White by clicking source then destination square
+- User can play White or Black (`you_play` selector); server enforces side-to-move
 - Viewer-style board with responsive 1:1 squares
 - Move history + snapshot navigation (`|<`, `←`, `→`, `>|`)
+- `Model Move` button triggers one server-side model ply (useful when user plays Black at game start)
 - `Undo Pair` removes last user+model plies
 - `New Game` resets to starting position
 - Toggleable `Log` panel (Show/Hide) records move events, the exact raw model prediction UCI, and model fallback/error messages in a consistent per-turn order
+- Log entries now include routed model side tags when dual-pair mode is active
 - Illegal model predictions are surfaced in the UI log as `ERROR` entries and include the attempted model UCI (fallback may still be applied so play continues)
 
 ## Known Limitations (current)
 - Model quality may be weak; fallback legal move is used when no legal prediction exists
 - Promotion UI defaults to server-side auto-queen fallback for 4-char pawn promotion UCIs
-- Only user-as-White flow is wired in current UI

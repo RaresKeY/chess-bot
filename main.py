@@ -31,7 +31,12 @@ def main() -> None:
         launch_argv = ["scripts/play_vs_model_server.py"]
         if not _has_option(argv, "--dir"):
             launch_argv.extend(["--dir", str(ROOT)])
-        if not _has_option(argv, "--model"):
+        has_model_args = (
+            _has_option(argv, "--model")
+            or _has_option(argv, "--white-model")
+            or _has_option(argv, "--black-model")
+        )
+        if not has_model_args:
             latest_model = _find_latest_model(ROOT / "artifacts")
             print(f"Launching play-vs-model with latest model: {latest_model}")
             launch_argv.extend(["--model", str(latest_model)])

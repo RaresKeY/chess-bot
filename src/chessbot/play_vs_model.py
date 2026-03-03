@@ -1,14 +1,15 @@
 import html
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 
 import chess
 import torch
 
-from src.chessbot.inference import best_legal_from_topk
-from src.chessbot.model import NextMoveLSTM, encode_tokens, side_to_move_id_from_context_len, winner_to_id
-from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_id
+from src.chessbot.inference import (
+    infer_first_move_auto_from_artifact_on_device,
+    infer_first_move_dual_artifacts_on_device,
+)
 
 
 @dataclass
@@ -19,89 +20,87 @@ class PlayConfig:
 
 
 class LoadedMoveModel:
-    def __init__(self, artifact: Dict):
+    def __init__(
+        self,
+        *,
+        artifact: Optional[Dict] = None,
+        white_artifact: Optional[Dict] = None,
+        black_artifact: Optional[Dict] = None,
+        device_str: str = "cpu",
+        sequence_decode_policy: str = "sequence_path",
+    ):
+        self.device_str = str(device_str)
+        self.sequence_decode_policy = str(sequence_decode_policy)
+        self.fallback_topk_multipliers = [1, 2, 5]
         self.artifact = artifact
-        runtime_meta = artifact.get("runtime") or {}
-        self.training_objective = str(runtime_meta.get("training_objective") or artifact.get("training_objective") or "single_step_next_move")
-        try:
-            self.artifact_rollout_horizon = max(0, int(runtime_meta.get("rollout_horizon") or 0))
-        except Exception:
-            self.artifact_rollout_horizon = 0
-        self.policy_mode_default = "rollout" if self.training_objective.startswith("multistep_") else "next"
-        self.vocab = artifact["vocab"]
-        self.inv_vocab = {idx: tok for tok, idx in self.vocab.items()}
-        cfg = artifact["config"]
-        self.model = NextMoveLSTM(vocab_size=len(self.vocab), **cfg)
-        self.model.load_state_dict(artifact["state_dict"])
-        self.model.eval()
+        self.white_artifact = white_artifact
+        self.black_artifact = black_artifact
+        self.mode = "single"
+        if white_artifact is not None and black_artifact is not None:
+            self.mode = "dual_pair"
+        elif artifact is None:
+            raise ValueError("LoadedMoveModel requires --model or both --white-model and --black-model")
 
     @classmethod
-    def from_path(cls, model_path: str) -> "LoadedMoveModel":
+    def from_path(cls, model_path: str, device_str: str = "cpu") -> "LoadedMoveModel":
         artifact = torch.load(model_path, map_location="cpu")
-        return cls(artifact)
+        return cls(artifact=artifact, device_str=device_str)
+
+    @classmethod
+    def from_dual_paths(cls, white_model_path: str, black_model_path: str, device_str: str = "cpu") -> "LoadedMoveModel":
+        white_artifact = torch.load(white_model_path, map_location="cpu")
+        black_artifact = torch.load(black_model_path, map_location="cpu")
+        return cls(
+            white_artifact=white_artifact,
+            black_artifact=black_artifact,
+            device_str=device_str,
+        )
 
     def infer(self, context: List[str], winner_side: str, topk: int) -> Dict:
-        if self.policy_mode_default == "rollout" and self.artifact_rollout_horizon > 0:
-            return self.infer_rollout(context=context, winner_side=winner_side, topk=topk, rollout_plies=self.artifact_rollout_horizon)
-        return self.infer_next(context=context, winner_side=winner_side, topk=topk)
+        if self.mode == "dual_pair":
+            out = infer_first_move_dual_artifacts_on_device(
+                white_artifact=self.white_artifact,
+                black_artifact=self.black_artifact,
+                context=context,
+                topk=topk,
+                device_str=self.device_str,
+                sequence_decode_policy=self.sequence_decode_policy,
+                fallback_topk_multipliers=self.fallback_topk_multipliers,
+            )
+            topk_tokens = list(out.get("topk_step1") or [])
+            return {
+                "topk": topk_tokens,
+                "best_legal": str(out.get("move_uci") or out.get("best_legal") or ""),
+                "predicted_uci": str(topk_tokens[0] if topk_tokens else ""),
+                "policy_mode_used": str(out.get("policy_mode_used") or "sequence"),
+                "selected_model_side": str(out.get("selected_model_side") or ""),
+                "fallback": bool(out.get("fallback", False)),
+            }
 
-    def infer_next(self, context: List[str], winner_side: str, topk: int) -> Dict:
-        original_context_len = len(context)
-        context_ids = encode_tokens(context, self.vocab)
-        if not context_ids:
-            # If no context, produce a tensor with one unk token to avoid zero-length packed sequence.
-            context_ids = [self.vocab.get("<UNK>", 1)]
-        tokens = torch.tensor([context_ids], dtype=torch.long)
-        lengths = torch.tensor([len(context_ids)], dtype=torch.long)
-        winners = torch.tensor([winner_to_id(winner_side)], dtype=torch.long)
-        phase_name = str(classify_context_phase(context).get("phase", PHASE_UNKNOWN))
-        phases = torch.tensor([phase_to_id(phase_name)], dtype=torch.long)
-        side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long)
-
-        with torch.no_grad():
-            logits = self.model(tokens, lengths, winners, phases, side_to_moves)
-            k = max(1, min(int(topk), logits.shape[-1]))
-            pred_ids = logits.topk(k, dim=1).indices[0].tolist()
-        topk_tokens = [self.inv_vocab.get(i, "") for i in pred_ids]
-        legal = best_legal_from_topk(topk_tokens, context)
-        return {"topk": topk_tokens, "best_legal": legal}
-
-    def infer_rollout(self, context: List[str], winner_side: str, topk: int, rollout_plies: int) -> Dict:
-        board = board_from_context(context)
-        local_context = list(context)
-        rollout: List[str] = []
-        first_topk: List[str] = []
-        first_predicted_uci = ""
-        fallback_moves = 0
-        for step in range(max(1, int(rollout_plies))):
-            out = self.infer_next(local_context, winner_side=winner_side, topk=topk)
-            topk_tokens = out.get("topk", [])
-            if step == 0:
-                first_topk = list(topk_tokens)
-                first_predicted_uci = topk_tokens[0] if topk_tokens else ""
-            chosen = out.get("best_legal", "")
-            if not chosen and not board.is_game_over(claim_draw=True):
-                fallback_move = next(iter(board.legal_moves), None)
-                if fallback_move is not None:
-                    chosen = fallback_move.uci()
-                    fallback_moves += 1
-            if not chosen:
-                break
-            mv = chess.Move.from_uci(chosen)
-            if mv not in board.legal_moves:
-                break
-            board.push(mv)
-            local_context.append(chosen)
-            rollout.append(chosen)
-            if board.is_game_over(claim_draw=True):
-                break
+        out = infer_first_move_auto_from_artifact_on_device(
+            artifact=self.artifact,
+            context=context,
+            winner_side=winner_side,
+            topk=topk,
+            device_str=self.device_str,
+            policy_mode="auto",
+            rollout_plies=0,
+            rollout_fallback_legal=False,
+            sequence_decode_policy=self.sequence_decode_policy,
+            fallback_topk_multipliers=self.fallback_topk_multipliers,
+        )
+        topk_tokens = list(out.get("topk") or out.get("topk_step1") or [])
+        if not topk_tokens:
+            step_debug = list(out.get("step_debug") or [])
+            if step_debug:
+                topk_tokens = list(step_debug[0].get("topk") or [])
+        predicted_uci = str(out.get("predicted_uci") or (topk_tokens[0] if topk_tokens else ""))
         return {
-            "topk": first_topk,
-            "best_legal": (rollout[0] if rollout else ""),
-            "rollout": rollout,
-            "predicted_uci": first_predicted_uci,
-            "fallback_moves": fallback_moves,
-            "policy_mode_used": "rollout",
+            "topk": topk_tokens,
+            "best_legal": str(out.get("move_uci") or out.get("best_legal") or out.get("first_move") or ""),
+            "predicted_uci": predicted_uci,
+            "policy_mode_used": str(out.get("policy_mode_used") or "next"),
+            "fallback": bool(out.get("fallback", False)),
         }
 
 
@@ -158,6 +157,80 @@ def _normalize_user_move(board: chess.Board, uci: str) -> chess.Move:
     raise ValueError(f"Illegal move: {uci}")
 
 
+def _expected_user_turn(cfg: PlayConfig) -> chess.Color:
+    user_color = str(cfg.user_color).strip().lower()
+    if user_color not in {"white", "black"}:
+        raise ValueError(f"user_color must be 'white' or 'black', got: {cfg.user_color}")
+    return chess.WHITE if user_color == "white" else chess.BLACK
+
+
+def _apply_model_reply(
+    model_runtime: LoadedMoveModel,
+    board: chess.Board,
+    next_context: List[str],
+    cfg: PlayConfig,
+) -> Dict:
+    infer = model_runtime.infer(next_context, winner_side=cfg.winner_side, topk=cfg.topk)
+    reply_uci = str(infer.get("best_legal") or "")
+    topk_tokens = list(infer.get("topk") or [])
+    predicted_uci = str(infer.get("predicted_uci") or (topk_tokens[0] if topk_tokens else ""))
+    selected_model_side = str(infer.get("selected_model_side") or "")
+    policy_mode_used = str(infer.get("policy_mode_used") or "")
+    if reply_uci:
+        reply_move = chess.Move.from_uci(reply_uci)
+        if reply_move in board.legal_moves:
+            reply_san = board.san(reply_move)
+            board.push(reply_move)
+            next_context.append(reply_uci)
+            return {
+                "uci": reply_uci,
+                "san": reply_san,
+                "topk": topk_tokens,
+                "predicted_uci": predicted_uci,
+                "policy_mode_used": policy_mode_used,
+                "selected_model_side": selected_model_side,
+            }
+        model_reply = {
+            "uci": "",
+            "san": "",
+            "topk": topk_tokens,
+            "predicted_uci": predicted_uci,
+            "attempted_uci": reply_uci,
+            "error": "predicted move not legal",
+            "policy_mode_used": policy_mode_used,
+            "selected_model_side": selected_model_side,
+        }
+    else:
+        model_reply = {
+            "uci": "",
+            "san": "",
+            "topk": topk_tokens,
+            "predicted_uci": predicted_uci,
+            "attempted_uci": (topk_tokens[0] if topk_tokens else ""),
+            "error": "no legal model move",
+            "policy_mode_used": policy_mode_used,
+            "selected_model_side": selected_model_side,
+        }
+    if not board.is_game_over(claim_draw=True):
+        fallback_move = next(iter(board.legal_moves), None)
+        if fallback_move is not None:
+            fallback_san = board.san(fallback_move)
+            board.push(fallback_move)
+            next_context.append(fallback_move.uci())
+            return {
+                "uci": fallback_move.uci(),
+                "san": fallback_san,
+                "topk": model_reply.get("topk", []),
+                "predicted_uci": model_reply.get("predicted_uci", ""),
+                "fallback": True,
+                "error": model_reply.get("error", "") or "model fallback used",
+                "attempted_uci": model_reply.get("attempted_uci", ""),
+                "policy_mode_used": policy_mode_used,
+                "selected_model_side": selected_model_side,
+            }
+    return model_reply
+
+
 def apply_user_and_model_move(
     model_runtime: LoadedMoveModel,
     context: List[str],
@@ -165,7 +238,7 @@ def apply_user_and_model_move(
     cfg: PlayConfig,
 ) -> Dict:
     board = board_from_context(context)
-    expected_user_turn = chess.WHITE if cfg.user_color == "white" else chess.BLACK
+    expected_user_turn = _expected_user_turn(cfg)
     if board.turn != expected_user_turn:
         raise ValueError(f"It is not {cfg.user_color}'s turn")
 
@@ -177,55 +250,7 @@ def apply_user_and_model_move(
 
     model_reply = None
     if not board.is_game_over(claim_draw=True):
-        infer = model_runtime.infer(next_context, winner_side=cfg.winner_side, topk=cfg.topk)
-        reply_uci = infer.get("best_legal", "")
-        topk_tokens = infer.get("topk", [])
-        predicted_uci = topk_tokens[0] if topk_tokens else ""
-        if reply_uci:
-            reply_move = chess.Move.from_uci(reply_uci)
-            if reply_move in board.legal_moves:
-                reply_san = board.san(reply_move)
-                board.push(reply_move)
-                next_context.append(reply_uci)
-                model_reply = {
-                    "uci": reply_uci,
-                    "san": reply_san,
-                    "topk": topk_tokens,
-                    "predicted_uci": predicted_uci,
-                }
-            else:
-                model_reply = {
-                    "uci": "",
-                    "san": "",
-                    "topk": topk_tokens,
-                    "predicted_uci": predicted_uci,
-                    "attempted_uci": reply_uci,
-                    "error": "predicted move not legal",
-                }
-        else:
-            model_reply = {
-                "uci": "",
-                "san": "",
-                "topk": topk_tokens,
-                "predicted_uci": predicted_uci,
-                "attempted_uci": (topk_tokens[0] if topk_tokens else ""),
-                "error": "no legal model move",
-            }
-
-        if (not model_reply or not model_reply.get("uci")) and not board.is_game_over(claim_draw=True):
-            fallback_move = next(iter(board.legal_moves), None)
-            if fallback_move is not None:
-                fallback_san = board.san(fallback_move)
-                board.push(fallback_move)
-                next_context.append(fallback_move.uci())
-                model_reply = {
-                    "uci": fallback_move.uci(),
-                    "san": fallback_san,
-                    "topk": (model_reply or {}).get("topk", []),
-                    "predicted_uci": (model_reply or {}).get("predicted_uci", ""),
-                    "fallback": True,
-                    "error": (model_reply or {}).get("error", "") or "model fallback used",
-                }
+        model_reply = _apply_model_reply(model_runtime=model_runtime, board=board, next_context=next_context, cfg=cfg)
 
     state = serialize_state(next_context)
     state["last_user_move"] = {"uci": user_uci, "san": user_san}
@@ -233,7 +258,25 @@ def apply_user_and_model_move(
     return state
 
 
-def render_play_page_html(title: str, piece_base: str, default_winner_side: str, default_topk: int) -> str:
+def apply_model_move(model_runtime: LoadedMoveModel, context: List[str], cfg: PlayConfig) -> Dict:
+    board = board_from_context(context)
+    expected_user_turn = _expected_user_turn(cfg)
+    next_context = list(context)
+    model_reply = None
+    if (board.turn != expected_user_turn) and (not board.is_game_over(claim_draw=True)):
+        model_reply = _apply_model_reply(model_runtime=model_runtime, board=board, next_context=next_context, cfg=cfg)
+    state = serialize_state(next_context)
+    state["last_model_move"] = model_reply
+    return state
+
+
+def render_play_page_html(
+    title: str,
+    piece_base: str,
+    default_winner_side: str,
+    default_topk: int,
+    default_user_color: str = "white",
+) -> str:
     title = html.escape(title)
     piece_base_js = json.dumps(piece_base.rstrip("/"))
     return f"""<!doctype html>
@@ -269,7 +312,7 @@ body {{ margin: 0; color: var(--ink); font-family: Georgia, \"Times New Roman\",
 .square .piece {{ width:100%; height:100%; display:block; padding:4%; pointer-events:none; }}
 .square .coord {{ position:absolute; font-size:11px; opacity:.7; font-weight:700; }}
 .square .coord.file {{ right:4px; bottom:2px; }} .square .coord.rank {{ left:4px; top:2px; }}
-.controls {{ margin-top:12px; display:grid; grid-template-columns: repeat(4, auto) 1fr auto auto; gap:8px; align-items:center; }}
+.controls {{ margin-top:12px; display:grid; grid-template-columns: repeat(4, auto) 1fr auto auto auto; gap:8px; align-items:center; }}
 button, select {{ border:1px solid #8b6a44; background:linear-gradient(#fff8ee,#efe0c8); color:#2d2115; border-radius:10px; padding:8px 10px; font-size:14px; }}
 button {{ cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed; }}
 .status {{ font-size:14px; text-align:right; color:#4b3a29; }}
@@ -301,6 +344,7 @@ button {{ cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed;
       <button id=\"nextBtn\">&rarr;</button>
       <button id=\"lastBtn\">&gt;|</button>
       <div id=\"status\" class=\"status\"></div>
+      <button id=\"modelMoveBtn\">Model Move</button>
       <button id=\"undoBtn\">Undo Pair</button>
       <button id=\"newBtn\">New Game</button>
     </div>
@@ -317,13 +361,21 @@ button {{ cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed;
           <option value=\"?\">?</option>
         </select>
       </div>
-      <div class=\"small\">You play White. Click source square, then destination square.</div>
+      <div class=\"row\">
+        <label for=\"userColor\">you_play</label>
+        <select id=\"userColor\">
+          <option value=\"white\">white</option>
+          <option value=\"black\">black</option>
+        </select>
+      </div>
+      <div id=\"playerHint\" class=\"small\"></div>
       <div id=\"error\" class=\"error\"></div>
     </section>
     <section class=\"card\">
       <h2 class=\"hdr\">State</h2>
       <div class=\"meta-grid\">
         <b>Turn</b><span id=\"turnTxt\">white</span>
+        <b>You</b><span id=\"youTxt\">white</span>
         <b>Result</b><span id=\"resultTxt\">*</span>
         <b>Selected</b><span id=\"selectedTxt\">none</span>
         <b>Top-k</b><span>{default_topk}</span>
@@ -345,7 +397,7 @@ button {{ cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed;
 </div>
 <script>
 const PIECE_BASE = {piece_base_js};
-const DEFAULTS = {{ winnerSide: {json.dumps(default_winner_side)}, topk: {default_topk} }};
+const DEFAULTS = {{ winnerSide: {json.dumps(default_winner_side)}, topk: {default_topk}, userColor: {json.dumps(default_user_color)} }};
 const files = ['a','b','c','d','e','f','g','h'];
 const boardEl = document.getElementById('board');
 const statusEl = document.getElementById('status');
@@ -354,10 +406,14 @@ const errEl = document.getElementById('error');
 const logPanelEl = document.getElementById('logPanel');
 const toggleLogBtn = document.getElementById('toggleLogBtn');
 const turnTxt = document.getElementById('turnTxt');
+const youTxt = document.getElementById('youTxt');
 const resultTxt = document.getElementById('resultTxt');
 const selectedTxt = document.getElementById('selectedTxt');
+const playerHintEl = document.getElementById('playerHint');
 const winnerSideSel = document.getElementById('winnerSide');
+const userColorSel = document.getElementById('userColor');
 winnerSideSel.value = DEFAULTS.winnerSide;
+userColorSel.value = DEFAULTS.userColor;
 
 const state = {{
   context: [],
@@ -367,6 +423,7 @@ const state = {{
   snapshots: [],
   snapshotIndex: 0,
   turn: 'white',
+  userColor: DEFAULTS.userColor,
   result: '*',
   game_over: false,
   legalTargets: [],
@@ -401,6 +458,14 @@ async function api(path, body) {{
 }}
 
 function setError(msg) {{ errEl.textContent = msg || ''; }}
+
+function setPlayerHint() {{
+  playerHintEl.textContent = `You play ${{state.userColor}}. Click source square, then destination square.`;
+}}
+
+function isUsersTurn() {{
+  return state.turn === state.userColor;
+}}
 
 function pushLog(level, message) {{
   if (!message) return;
@@ -445,7 +510,8 @@ function applyServerState(data) {{
     }}
     if (modelMove.uci) {{
       const tag = modelMove.fallback ? ' [fallback]' : '';
-      addPendingLog('INFO', `Model move ${{modelMove.san || modelMove.uci}}${{tag}}`);
+      const sideTag = modelMove.selected_model_side ? ` [side=${{modelMove.selected_model_side}}]` : '';
+      addPendingLog('INFO', `Model move ${{modelMove.san || modelMove.uci}}${{tag}}${{sideTag}}`);
     }}
   }}
   // Log panel renders newest-first, so append this response block in reverse
@@ -458,7 +524,7 @@ function applyServerState(data) {{
 }}
 
 function buildSnapshots() {{
-  // Server returns snapshots in /api/state and /api/move responses.
+  // Server returns snapshots in /api/state, /api/move, and /api/model-move responses.
   return state.snapshots || [];
 }}
 
@@ -514,12 +580,14 @@ function renderStatus() {{
   const snap = buildSnapshots()[state.snapshotIndex] || {{ ply: 0 }};
   statusEl.textContent = `Ply ${{snap.ply || 0}} / ${{Math.max(0, (state.snapshots?.length||1)-1)}}`;
   turnTxt.textContent = state.turn;
+  youTxt.textContent = state.userColor;
   resultTxt.textContent = state.result;
   selectedTxt.textContent = state.selected || 'none';
   document.getElementById('prevBtn').disabled = state.snapshotIndex <= 0;
   document.getElementById('firstBtn').disabled = state.snapshotIndex <= 0;
   document.getElementById('nextBtn').disabled = state.snapshotIndex >= (state.snapshots.length - 1);
   document.getElementById('lastBtn').disabled = state.snapshotIndex >= (state.snapshots.length - 1);
+  document.getElementById('modelMoveBtn').disabled = state.game_over || isUsersTurn();
   document.getElementById('undoBtn').disabled = state.context.length < 2;
 }}
 
@@ -535,7 +603,7 @@ function renderLog() {{
   ).join('');
 }}
 
-function renderAll() {{ renderBoard(); renderMoves(); renderStatus(); renderLog(); }}
+function renderAll() {{ setPlayerHint(); renderBoard(); renderMoves(); renderStatus(); renderLog(); }}
 
 function currentBoardPieceMap() {{
   const snap = buildSnapshots()[state.snapshots.length - 1];
@@ -560,9 +628,30 @@ function guessLegalTargets(fromSq) {{
   return [];
 }}
 
+async function requestModelMoveOnce() {{
+  const data = await api('/api/model-move', {{
+    context: state.context,
+    winner_side: winnerSideSel.value,
+    topk: DEFAULTS.topk,
+    user_color: state.userColor
+  }});
+  applyServerState(data);
+}}
+
+async function maybeRequestModelMoveIfNeeded() {{
+  if (state.snapshotIndex !== state.snapshots.length - 1) return;
+  if (state.game_over) return;
+  if (isUsersTurn()) return;
+  await requestModelMoveOnce();
+}}
+
 async function onSquareClick(e) {{
   if (state.snapshotIndex !== state.snapshots.length - 1) return;
   if (state.game_over) return;
+  if (!isUsersTurn()) {{
+    setError(`It is ${{state.turn}} to move. Use Model Move to continue.`);
+    return;
+  }}
   const sq = e.currentTarget.getAttribute('data-square');
   if (!state.selected) {{
     state.selected = sq;
@@ -581,7 +670,7 @@ async function onSquareClick(e) {{
       user_move: uci,
       winner_side: winnerSideSel.value,
       topk: DEFAULTS.topk,
-      user_color: 'white'
+      user_color: state.userColor
     }});
     applyServerState(data);
   }} catch (err) {{
@@ -597,11 +686,34 @@ async function refreshState() {{
   applyServerState(data);
 }}
 
-document.getElementById('newBtn').addEventListener('click', async () => {{ state.context = []; setError(''); await refreshState(); }});
+document.getElementById('newBtn').addEventListener('click', async () => {{
+  state.context = [];
+  setError('');
+  await refreshState();
+  await maybeRequestModelMoveIfNeeded();
+}});
 document.getElementById('undoBtn').addEventListener('click', async () => {{
   state.context = state.context.slice(0, Math.max(0, state.context.length - 2));
   setError('');
   await refreshState();
+}});
+document.getElementById('modelMoveBtn').addEventListener('click', async () => {{
+  setError('');
+  try {{
+    await requestModelMoveOnce();
+  }} catch (err) {{
+    setError(err.message);
+  }}
+}});
+userColorSel.addEventListener('change', async () => {{
+  state.userColor = userColorSel.value;
+  setError('');
+  renderAll();
+  try {{
+    await maybeRequestModelMoveIfNeeded();
+  }} catch (err) {{
+    setError(err.message);
+  }}
 }});
 document.getElementById('firstBtn').addEventListener('click', () => {{ state.snapshotIndex = 0; renderAll(); }});
 document.getElementById('prevBtn').addEventListener('click', () => {{ state.snapshotIndex = Math.max(0, state.snapshotIndex - 1); renderAll(); }});
@@ -616,7 +728,12 @@ window.addEventListener('keydown', (e) => {{
 }});
 
 (async function init() {{
-  try {{ await refreshState(); }} catch (err) {{ setError(err.message); }}
+  try {{
+    await refreshState();
+    await maybeRequestModelMoveIfNeeded();
+  }} catch (err) {{
+    setError(err.message);
+  }}
 }})();
 </script>
 </body></html>
@@ -641,5 +758,11 @@ def state_response(context: List[str]) -> Dict:
 
 def move_response(model_runtime: LoadedMoveModel, context: List[str], user_move: str, cfg: PlayConfig) -> Dict:
     state = apply_user_and_model_move(model_runtime, context, user_move, cfg)
+    state["snapshots"] = snapshots_from_context(state["context"])
+    return state
+
+
+def model_move_response(model_runtime: LoadedMoveModel, context: List[str], cfg: PlayConfig) -> Dict:
+    state = apply_model_move(model_runtime, context, cfg)
     state["snapshots"] = snapshots_from_context(state["context"])
     return state
