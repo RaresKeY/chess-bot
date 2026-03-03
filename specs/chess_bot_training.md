@@ -12,6 +12,7 @@ Architecture-specific specs:
 - Baseline (`next_move_lstm`): `specs/chess_bot_baseline_next_move_architecture.md`
 - Dual side sequence (`dual_side_sequence_lstm`): `specs/chess_bot_dual_sequence_architecture.md`
 - Dual side sequence + board state (`dual_side_sequence_board_lstm`): `specs/chess_bot_dual_sequence_board_architecture.md`
+- All-play bootstrap dual sequence (`allplay_bootstrap_dualhead_curriculum_lstm`, `allplay_bootstrap_dualhead_board_curriculum_lstm`): `specs/chess_bot_allplay_bootstrap_dual_architecture.md`
 
 ## Dataset Inputs
 - CLI accepts one or more `--train` JSONL paths and one or more `--val` JSONL paths (repeatable flags)
@@ -223,10 +224,16 @@ Separate from baseline next-move training, dual sequence training provides side-
   - white model keeps only `winner_side == W`
   - black model keeps only `winner_side == B`
   - draw/unknown rows are dropped
+- Optional all-play bootstrap architecture (`allplay_bootstrap_side_finetune_curriculum`):
+  - stage 1 shared bootstrap uses `model_side=all` and keeps `winner_side in {W,B,D}` (drops `?`)
+  - stage 2 white/black fine-tune starts from shared vocab + shared weights
+  - final side artifacts use `allplay_bootstrap_dualhead_curriculum_lstm` or `allplay_bootstrap_dualhead_board_curriculum_lstm`
 - Objective:
   - one-shot sequence logits `[B,H,V]` with masked per-ply distance loss from target probability (`1 - P(actual_move)`)
   - sequence metrics reported each epoch: `ply_match_rate`, `full_seq_exact_hit_rate`
   - step-loss decay (`step_loss_decay`, default `0.9`) front-loads weight toward earlier plies
+  - optional first-ply emphasis via `step1_loss_multiplier`
+  - optional curriculum horizon ramp via `curriculum_start_horizon`, `curriculum_end_horizon`, `curriculum_ramp_epochs`
   - optional endgame mate-in-x positive weighting (`mate_bias`, `mate_in_x`, `mate_weight`)
 - Architecture family selection:
   - `dual_side_sequence_lstm`: move-context encoder only

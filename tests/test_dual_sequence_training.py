@@ -12,11 +12,13 @@ if torch is not None:
     from src.chessbot.board_features import BOARD_FEATURE_PLANES
     from src.chessbot.model import NextMoveSeqBoardLSTM, NextMoveSeqLSTM
     from src.chessbot.training_dual_sequence import (
+        MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM,
         MODEL_FAMILY_DUAL_SEQUENCE_BOARD,
         _build_step_weights,
         _compute_mate_bias_weights,
         _masked_sequence_loss,
         compute_sequence_match_metrics,
+        train_bootstrap_dual_head_curriculum_from_jsonl_paths,
         train_dual_sequence_model_from_jsonl_paths,
     )
 
@@ -246,6 +248,110 @@ class DualSequenceTrainingTests(unittest.TestCase):
             self.assertEqual(metrics["model_family"], MODEL_FAMILY_DUAL_SEQUENCE_BOARD)
             self.assertTrue(bool(metrics["use_board_state_feature"]))
             self.assertEqual(int(artifact["config"]["board_feature_planes"]), 18)
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_train_dual_sequence_all_side_keeps_w_b_d_and_drops_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            train_path = tmp_path / "train_all.jsonl"
+            val_path = tmp_path / "val_all.jsonl"
+            rows = [
+                {"context": ["e2e4"], "target": ["e7e5"], "winner_side": "W"},
+                {"context": ["d2d4"], "target": ["d7d5"], "winner_side": "B"},
+                {"context": ["c2c4"], "target": ["e7e6"], "winner_side": "D"},
+                {"context": ["g1f3"], "target": ["d7d5"], "winner_side": "?"},
+            ]
+            _write_jsonl(train_path, rows)
+            _write_jsonl(val_path, rows)
+
+            out_model = tmp_path / "model_all.pt"
+            result = train_dual_sequence_model_from_jsonl_paths(
+                train_paths=[str(train_path)],
+                val_paths=[str(val_path)],
+                model_side="all",
+                out_model_path=str(out_model),
+                out_metrics_path=None,
+                seed=1,
+                horizon=4,
+                epochs=1,
+                batch_size=1,
+                lr=1e-3,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                use_side_to_move_feature=True,
+                side_to_move_embed_dim=2,
+                step_loss_decay=0.9,
+                num_workers=0,
+                device_str="cpu",
+                mate_bias_enabled=False,
+                verbose=False,
+            )
+            metrics = result["metrics"]
+            self.assertEqual(metrics["model_side"], "all")
+            self.assertEqual(metrics["train_rows_total"], 3)
+            self.assertEqual(metrics["val_rows_total"], 3)
+            self.assertEqual(metrics["train_dropped_rows_total"], 1)
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_train_bootstrap_dual_head_curriculum_sets_new_model_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            train_path = tmp_path / "train_bootstrap.jsonl"
+            val_path = tmp_path / "val_bootstrap.jsonl"
+            rows = [
+                {"context": ["e2e4"], "target": ["e7e5", "g1f3"], "winner_side": "W", "phase": "opening"},
+                {"context": ["d2d4"], "target": ["d7d5", "c2c4"], "winner_side": "B", "phase": "opening"},
+                {"context": ["c2c4"], "target": ["e7e6", "d2d4"], "winner_side": "D", "phase": "middlegame"},
+            ]
+            _write_jsonl(train_path, rows)
+            _write_jsonl(val_path, rows)
+
+            out_shared = tmp_path / "model_shared.pt"
+            out_white = tmp_path / "model_white.pt"
+            out_black = tmp_path / "model_black.pt"
+            result = train_bootstrap_dual_head_curriculum_from_jsonl_paths(
+                train_paths=[str(train_path)],
+                val_paths=[str(val_path)],
+                out_model_shared_path=str(out_shared),
+                out_model_white_path=str(out_white),
+                out_model_black_path=str(out_black),
+                out_metrics_path=None,
+                seed=1,
+                horizon=4,
+                bootstrap_epochs=1,
+                finetune_epochs=1,
+                batch_size=1,
+                lr=1e-3,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                use_side_to_move_feature=True,
+                side_to_move_embed_dim=2,
+                step_loss_decay=0.9,
+                num_workers=0,
+                device_str="cpu",
+                mate_bias_enabled=False,
+                model_family="dual_side_sequence_lstm",
+                curriculum_start_horizon=1,
+                curriculum_end_horizon=4,
+                curriculum_ramp_epochs=1,
+                verbose=False,
+            )
+            self.assertTrue(out_shared.is_file())
+            self.assertTrue(out_white.is_file())
+            self.assertTrue(out_black.is_file())
+            white_artifact = torch.load(out_white, map_location="cpu")
+            black_artifact = torch.load(out_black, map_location="cpu")
+            self.assertEqual(white_artifact["model_family"], MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM)
+            self.assertEqual(black_artifact["model_family"], MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM)
+            merged = result["metrics"]
+            self.assertEqual(merged["training_mode"], "dual_bootstrap_curriculum")
+            self.assertEqual(merged["output_model_family"], MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM)
+            self.assertIn("white", merged["sides"])
+            self.assertIn("black", merged["sides"])
 
 
 if __name__ == "__main__":

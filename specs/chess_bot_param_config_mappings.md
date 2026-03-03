@@ -287,10 +287,13 @@ Training CLI interactions:
 |---|---|---|---|---|
 | `--train` | required | repeatable JSONL path | Training input paths (spliced rows or game rows) | `python scripts/train_dual_sequence.py ...` |
 | `--val` | required | repeatable JSONL path | Validation input paths | same |
+| `--architecture` | `winner_split_dual_tracks` | `winner_split_dual_tracks`, `allplay_bootstrap_side_finetune_curriculum` | Select legacy winner-split flow or two-stage all-play bootstrap flow | same |
 | `--side-mode` | `both` | `white`, `black`, `both` | Train selected side-specific model(s) | same |
-| `--model-family` | `dual_side_sequence_lstm` | `dual_side_sequence_lstm`, `dual_side_sequence_board_lstm` | Select move-only or board-conditioned dual sequence architecture | same |
+| `--model-family` | `dual_side_sequence_lstm` | `dual_side_sequence_lstm`, `dual_side_sequence_board_lstm` | Select move-only or board-conditioned backbone family | same |
 | `--horizon` | `8` | integer `>=1` | One-shot future sequence plies predicted per sample | same |
 | `--epochs` | `20` | integer `>=1` | Training epochs | same |
+| `--bootstrap-epochs` | `0` | integer `>=0` | Stage-1 all-play bootstrap epochs (`0` resolves to `max(1, epochs//3)`) | same |
+| `--finetune-epochs` | `0` | integer `>=0` | Stage-2 per-side fine-tune epochs (`0` resolves to `epochs`) | same |
 | `--batch-size` | `64` | integer `>=1` | Batch size | same |
 | `--lr` | `2e-4` | float `>0` | Adam learning rate | same |
 | `--seed` | `7` | integer | Random seed for model/init/shuffle/runtime splice sampling | same |
@@ -299,6 +302,10 @@ Training CLI interactions:
 | `--num-layers` | `2` | integer `>=1` | Encoder/decoder LSTM layer count | same |
 | `--dropout` | `0.15` | float `>=0` | Embedding/head + inter-layer LSTM dropout (`num_layers>1`) | same |
 | `--step-loss-decay` | `0.9` | float (`0,1`) recommended; values `<=0` or `>=1` are normalized to `0.9` | Geometric per-ply loss weighting across horizon with earliest ply highest weight | same |
+| `--step1-loss-multiplier` | `1.0` | float `>0` recommended | Extra multiplier applied to ply-1 loss weight before geometric decay | same |
+| `--curriculum-start-horizon` | `0` | integer `>=0` | Curriculum starting horizon (`0` disables explicit curriculum controls in single-stage mode) | same |
+| `--curriculum-end-horizon` | `0` | integer `>=0` | Curriculum ending horizon (`0` resolves to full `--horizon`) | same |
+| `--curriculum-ramp-epochs` | `0` | integer `>=0` | Number of epochs used to ramp horizon mask (`0` resolves to full-stage length when curriculum enabled) | same |
 | `--side-to-move-feature` / `--no-side-to-move-feature` | enabled | boolean | Enable side-to-move conditioning in sequence decoder | same |
 | `--side-to-move-embed-dim` | `4` | integer `>=1` | Side-to-move embedding dim when feature enabled | same |
 | `--runtime-min-context` | `8` | integer `>=1` | Runtime splice min context for game-row inputs | same |
@@ -310,15 +317,25 @@ Training CLI interactions:
 | `--num-workers` | `0` | integer `>=0` | Train DataLoader worker count | same |
 | `--device` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Device selection; `auto` resolves to `cuda` when available else `cpu` | same |
 | `--verbose` / `--no-verbose` | disabled | boolean | Emit per-epoch train/val summary logs | same |
+| `--out-model-shared` | `artifacts/model_shared_bootstrap.pt` | filepath | Shared bootstrap artifact output (all-play architecture only) | same |
 | `--out-model-white` | `artifacts/model_white.pt` | filepath | White model artifact output | same |
 | `--out-model-black` | `artifacts/model_black.pt` | filepath | Black model artifact output | same |
 | `--out-metrics` | `artifacts/train_metrics_dual_sequence.json` | filepath | Combined run metrics output | same |
 
 Dual-sequence interactions/precedence notes:
-- Winner filtering is fixed by `--side-mode`; rows with non-matching `winner_side` are dropped automatically.
-- Draw/unknown winner rows are dropped in current implementation.
+- `--architecture=winner_split_dual_tracks`:
+  - legacy flow: train selected sides directly from filtered rows.
+  - winner filtering is fixed by `--side-mode`; rows with non-matching `winner_side` are dropped.
+- `--architecture=allplay_bootstrap_side_finetune_curriculum`:
+  - requires `--side-mode both`.
+  - stage 1 uses `model_side=all`, keeping `winner_side in {W,B,D}` and dropping `?`.
+  - stage 2 fine-tunes white/black from shared vocab + shared state initialization.
+  - final side artifacts use output family ids:
+    - `allplay_bootstrap_dualhead_curriculum_lstm` (move-only)
+    - `allplay_bootstrap_dualhead_board_curriculum_lstm` (board-conditioned)
 - For game-row inputs, runtime splice controls determine sample counts before model-side winner filtering.
-- Loss contract uses per-ply target probability distance (`1 - P(actual_move)`), then applies `step_loss_decay` and optional mate-bias multiplicatively.
+- Loss contract uses per-ply target probability distance (`1 - P(actual_move)`), then applies `step_loss_decay`, optional `step1_loss_multiplier`, and optional mate-bias multiplicatively.
+- Curriculum controls apply a training-time horizon mask per epoch; validation remains full-horizon by default.
 - `--model-family=dual_side_sequence_board_lstm` enables board-state plane derivation from context (`C=18`) and board-conditioned decoder initialization.
 
 ## Inference CLI Dual Routing (`scripts/infer_move.py`)

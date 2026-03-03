@@ -4,7 +4,8 @@
 Implemented.
 
 ## Architecture Name
-- `dual_side_sequence_board_lstm`
+- Human name: `BoardSight WinnerSplit Dual Tracks`
+- Artifact family id: `dual_side_sequence_board_lstm`
 
 ## Responsibility
 Train and serve side-specific one-shot future-sequence models that condition on:
@@ -14,6 +15,7 @@ Train and serve side-specific one-shot future-sequence models that condition on:
 Like baseline dual sequence:
 - white model trains on `winner_side == "W"`
 - black model trains on `winner_side == "B"`
+- all-play bootstrap variant is separate in `specs/chess_bot_allplay_bootstrap_dual_architecture.md`
 
 ## Code Ownership
 - CLI: `scripts/train_dual_sequence.py`

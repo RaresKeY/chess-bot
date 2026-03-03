@@ -4,9 +4,11 @@
 Implemented (initial version).
 This spec describes the move-only dual-sequence family.
 Board-conditioned variant is tracked separately in `specs/chess_bot_dual_sequence_board_architecture.md`.
+All-play bootstrap architecture is tracked separately in `specs/chess_bot_allplay_bootstrap_dual_architecture.md`.
 
 ## Architecture Name
-- `dual_side_sequence_lstm`
+- Human name: `WinnerSplit Dual Tracks`
+- Artifact family id: `dual_side_sequence_lstm`
 
 ## Responsibility
 Train and serve side-specific one-shot future-sequence models:

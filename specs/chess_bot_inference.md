@@ -61,7 +61,11 @@ When dual-sequence inference is used (single dual artifact or dual pair routing)
   - runtime `rollout_horizon`
 - Old artifacts that lack these fields are treated as legacy single-step next-move models (`single_step_next_move`) and continue using legacy next-move inference behavior
 - `--policy-mode auto` prioritizes new multistep artifacts by using rollout-first-move inference when metadata indicates a multistep objective, while keeping older artifacts on next-move logic
-- `model_family=dual_side_sequence_lstm` and `model_family=dual_side_sequence_board_lstm` dispatch to one-shot sequence inference and return `policy_mode_used=sequence`
+- `model_family` values below dispatch to one-shot sequence inference and return `policy_mode_used=sequence`:
+  - `dual_side_sequence_lstm`
+  - `dual_side_sequence_board_lstm`
+  - `allplay_bootstrap_dualhead_curriculum_lstm`
+  - `allplay_bootstrap_dualhead_board_curriculum_lstm`
 - board-conditioned dual artifacts derive board-state planes from provided context before forward pass
 - when both `--white-model` and `--black-model` are provided, inference routes to artifact by side-to-move derived from context length parity (white on even plies, black on odd plies)
 - dual-sequence first-move selection supports:

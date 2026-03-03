@@ -122,6 +122,21 @@ class DualSequenceInferenceTests(unittest.TestCase):
         self.assertEqual(out["move_uci"], "e2e4")
 
     @unittest.skipIf(torch is None, "torch not installed")
+    def test_infer_auto_supports_bootstrap_dual_sequence_family(self) -> None:
+        artifact = _build_dual_sequence_artifact("white", model_family="allplay_bootstrap_dualhead_curriculum_lstm")
+        out = infer_first_move_auto_from_artifact_on_device(
+            artifact=artifact,
+            context=[],
+            winner_side="W",
+            topk=2,
+            device_str="cpu",
+            policy_mode="auto",
+        )
+        self.assertEqual(out["policy_mode_used"], "sequence")
+        self.assertEqual(out["artifact_model_family"], "allplay_bootstrap_dualhead_curriculum_lstm")
+        self.assertEqual(out["move_uci"], "e2e4")
+
+    @unittest.skipIf(torch is None, "torch not installed")
     def test_sequence_path_policy_uses_horizon_scores(self) -> None:
         vocab = {
             "<PAD>": 0,

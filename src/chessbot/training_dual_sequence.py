@@ -15,11 +15,38 @@ from src.chessbot.phase import PHASE_ENDGAME, classify_context_phase, board_from
 
 MODEL_SIDE_WHITE = "white"
 MODEL_SIDE_BLACK = "black"
+MODEL_SIDE_ALL = "all"
 MODEL_FAMILY_DUAL_SEQUENCE = "dual_side_sequence_lstm"
 MODEL_FAMILY_DUAL_SEQUENCE_BOARD = "dual_side_sequence_board_lstm"
+MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM = "allplay_bootstrap_dualhead_curriculum_lstm"
+MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD = "allplay_bootstrap_dualhead_board_curriculum_lstm"
+TRAINING_ARCHITECTURE_WINNER_SPLIT = "winner_split_dual_tracks"
+TRAINING_ARCHITECTURE_ALLPLAY_BOOTSTRAP = "allplay_bootstrap_side_finetune_curriculum"
+
+DUAL_SEQUENCE_FAMILIES = {
+    MODEL_FAMILY_DUAL_SEQUENCE,
+    MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM,
+}
+DUAL_SEQUENCE_BOARD_FAMILIES = {
+    MODEL_FAMILY_DUAL_SEQUENCE_BOARD,
+    MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD,
+}
 
 WINNER_SIDE_WHITE = "W"
 WINNER_SIDE_BLACK = "B"
+
+
+def normalize_model_family(model_family: str) -> str:
+    return str(model_family or MODEL_FAMILY_DUAL_SEQUENCE).strip().lower()
+
+
+def uses_board_state_for_model_family(model_family: str) -> bool:
+    fam = normalize_model_family(model_family)
+    if fam in DUAL_SEQUENCE_BOARD_FAMILIES:
+        return True
+    if fam in DUAL_SEQUENCE_FAMILIES:
+        return False
+    raise ValueError(f"Unsupported model_family: {model_family}")
 
 
 def model_side_to_winner_side(model_side: str) -> str:
@@ -29,6 +56,13 @@ def model_side_to_winner_side(model_side: str) -> str:
     if side == MODEL_SIDE_BLACK:
         return WINNER_SIDE_BLACK
     raise ValueError(f"Unsupported model_side: {model_side}")
+
+
+def winner_side_filter_for_model_side(model_side: str) -> Optional[str]:
+    side = str(model_side or "").strip().lower()
+    if side == MODEL_SIDE_ALL:
+        return None
+    return model_side_to_winner_side(side)
 
 
 def _moves_from_row(row: Dict[str, Any]) -> List[str]:
@@ -174,6 +208,7 @@ def _index_paths_for_model_side(
     model_side: str,
     schema: str,
     build_vocab: bool,
+    seed_vocab: Optional[Dict[str, int]],
     runtime_min_context: int,
     runtime_min_target: int,
     runtime_max_samples_per_game: int,
@@ -189,8 +224,10 @@ def _index_paths_for_model_side(
     Dict[str, int],
     int,
 ]:
-    winner_side_need = model_side_to_winner_side(model_side)
-    vocab: Dict[str, int] = {"<PAD>": 0, "<UNK>": 1}
+    winner_side_need = winner_side_filter_for_model_side(model_side)
+    vocab: Dict[str, int] = dict(seed_vocab or {"<PAD>": 0, "<UNK>": 1})
+    if "<PAD>" not in vocab or "<UNK>" not in vocab:
+        raise ValueError("Vocab must contain <PAD> and <UNK> entries")
     path_strs = [os.fspath(p) for p in paths]
     path_ids = array("I")
     offsets = array("Q")
@@ -214,7 +251,12 @@ def _index_paths_for_model_side(
                     continue
                 row = json.loads(line.decode("utf-8"))
                 winner_side = _winner_side_from_row(row)
-                if winner_side != winner_side_need:
+                if winner_side_need is None:
+                    if winner_side not in {WINNER_SIDE_WHITE, WINNER_SIDE_BLACK, "D"}:
+                        dropped += 1
+                        dropped_rows_total += 1
+                        continue
+                elif winner_side != winner_side_need:
                     dropped += 1
                     dropped_rows_total += 1
                     continue
@@ -313,7 +355,22 @@ class IndexedDualSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.offsets)
 
+    def close(self) -> None:
+        cache = getattr(self, "_handle_cache", None)
+        if not isinstance(cache, dict):
+            return
+        for handle in cache.values():
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._handle_cache = {}
+
+    def __del__(self):
+        self.close()
+
     def __getstate__(self):
+        self.close()
         state = self.__dict__.copy()
         state["_handle_cache"] = {}
         return state
@@ -398,15 +455,49 @@ def collate_dual_sequence_batch(
     return tokens, lengths, sides, targets, mask, mate_weights
 
 
-def _build_step_weights(horizon: int, step_loss_decay: float) -> torch.Tensor:
+def _build_step_weights(horizon: int, step_loss_decay: float, step1_loss_multiplier: float = 1.0) -> torch.Tensor:
     h = max(1, int(horizon))
     d = float(step_loss_decay)
     if d <= 0.0 or d >= 1.0:
         d = 0.9
-    out = [1.0]
+    step1 = float(step1_loss_multiplier)
+    if step1 <= 0.0:
+        step1 = 1.0
+    out = [step1]
     for _ in range(1, h):
         out.append(out[-1] * d)
     return torch.tensor(out, dtype=torch.float32)
+
+
+def _apply_curriculum_mask(mask: torch.Tensor, active_horizon: int) -> torch.Tensor:
+    horizon_limit = max(1, int(active_horizon))
+    if horizon_limit >= int(mask.shape[1]):
+        return mask
+    out = mask.clone()
+    out[:, horizon_limit:] = False
+    return out
+
+
+def _curriculum_horizon_for_epoch(
+    *,
+    epoch: int,
+    max_horizon: int,
+    start_horizon: int,
+    end_horizon: int,
+    ramp_epochs: int,
+) -> int:
+    h = max(1, int(max_horizon))
+    start_h = max(1, min(h, int(start_horizon)))
+    end_h = max(start_h, min(h, int(end_horizon)))
+    ramp = max(1, int(ramp_epochs))
+    if start_h == end_h:
+        return int(end_h)
+    if int(epoch) >= int(ramp):
+        return int(end_h)
+    # Integer linear ramp over [1..ramp].
+    numer = (int(epoch) - 1) * (end_h - start_h)
+    denom = max(1, ramp - 1)
+    return int(start_h + round(float(numer) / float(denom)))
 
 
 def _masked_sequence_loss(
@@ -458,6 +549,7 @@ def evaluate_dual_sequence_loader(
     device: torch.device,
     step_weights: torch.Tensor,
     use_board_state_feature: bool = False,
+    curriculum_horizon_limit: int = 0,
 ) -> Dict[str, float]:
     model.eval()
     total_weighted_loss = 0.0
@@ -484,10 +576,11 @@ def evaluate_dual_sequence_loader(
                 logits = model(tokens, lengths, sides, board_state=board_states)
             else:
                 logits = model(tokens, lengths, sides)
+            mask_for_loss = _apply_curriculum_mask(mask, int(curriculum_horizon_limit)) if int(curriculum_horizon_limit) > 0 else mask
             loss = _masked_sequence_loss(
                 logits=logits,
                 targets=targets,
-                mask=mask,
+                mask=mask_for_loss,
                 step_weights=step_weights.to(device),
                 mate_weights=mate_weights,
             )
@@ -495,7 +588,7 @@ def evaluate_dual_sequence_loader(
             total_rows += batch_rows
             total_weighted_loss += float(loss.item()) * float(batch_rows)
 
-            m = compute_sequence_match_metrics(logits=logits, targets=targets, mask=mask)
+            m = compute_sequence_match_metrics(logits=logits, targets=targets, mask=mask_for_loss)
             ply_match_count += float(m["ply_match_count"])
             valid_ply_count += float(m["valid_ply_count"])
             rows_with_valid_targets += float(m["rows_with_valid_targets"])
@@ -532,6 +625,7 @@ def train_dual_sequence_model_from_jsonl_paths(
     use_side_to_move_feature: bool = True,
     side_to_move_embed_dim: int = 4,
     step_loss_decay: float = 0.9,
+    step1_loss_multiplier: float = 1.0,
     runtime_min_context: int = 8,
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
@@ -541,21 +635,30 @@ def train_dual_sequence_model_from_jsonl_paths(
     mate_in_x: int = 3,
     mate_weight: float = 1.25,
     model_family: str = MODEL_FAMILY_DUAL_SEQUENCE,
+    curriculum_start_horizon: int = 0,
+    curriculum_end_horizon: int = 0,
+    curriculum_ramp_epochs: int = 0,
+    fixed_vocab: Optional[Dict[str, int]] = None,
+    init_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    stage_name: str = "",
+    training_architecture: str = TRAINING_ARCHITECTURE_WINNER_SPLIT,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     random.seed(int(seed))
     torch.manual_seed(int(seed))
     schema = _sniff_paths_schema(list(train_paths) + list(val_paths))
-    model_family_norm = str(model_family or MODEL_FAMILY_DUAL_SEQUENCE).strip().lower()
-    if model_family_norm not in {MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD}:
-        raise ValueError(f"Unsupported model_family: {model_family}")
-    use_board_state_feature = bool(model_family_norm == MODEL_FAMILY_DUAL_SEQUENCE_BOARD)
+    model_family_norm = normalize_model_family(model_family)
+    use_board_state_feature = uses_board_state_for_model_family(model_family_norm)
     device = torch.device(device_str)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
 
+    winner_side_filter = winner_side_filter_for_model_side(model_side)
+    seeded_vocab = dict(fixed_vocab) if fixed_vocab is not None else None
+    build_vocab_train = bool(fixed_vocab is None)
+
     (
-        vocab,
+        train_vocab,
         train_path_strs,
         train_path_ids,
         train_offsets,
@@ -568,12 +671,14 @@ def train_dual_sequence_model_from_jsonl_paths(
         paths=train_paths,
         model_side=model_side,
         schema=schema,
-        build_vocab=True,
+        build_vocab=build_vocab_train,
+        seed_vocab=seeded_vocab,
         runtime_min_context=runtime_min_context,
         runtime_min_target=runtime_min_target,
         runtime_max_samples_per_game=runtime_max_samples_per_game,
         seed=seed,
     )
+    vocab = dict(train_vocab)
     (
         _unused_vocab,
         val_path_strs,
@@ -589,15 +694,16 @@ def train_dual_sequence_model_from_jsonl_paths(
         model_side=model_side,
         schema=schema,
         build_vocab=False,
+        seed_vocab=vocab,
         runtime_min_context=runtime_min_context,
         runtime_min_target=runtime_min_target,
         runtime_max_samples_per_game=runtime_max_samples_per_game,
         seed=seed,
     )
     if int(train_rows_total) <= 0:
-        raise RuntimeError(f"No training rows after winner-side filtering for model_side={model_side}")
+        raise RuntimeError(f"No training rows after side filtering for model_side={model_side}")
     if int(val_rows_total) <= 0:
-        raise RuntimeError(f"No validation rows after winner-side filtering for model_side={model_side}")
+        raise RuntimeError(f"No validation rows after side filtering for model_side={model_side}")
 
     train_ds = IndexedDualSequenceDataset(
         paths=train_path_strs,
@@ -663,14 +769,37 @@ def train_dual_sequence_model_from_jsonl_paths(
             side_to_move_embed_dim=int(side_to_move_embed_dim),
             use_side_to_move=bool(use_side_to_move_feature),
         ).to(device)
+    if init_state_dict is not None:
+        model.load_state_dict(init_state_dict, strict=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
-    step_weights = _build_step_weights(int(horizon), float(step_loss_decay)).to(device)
+    step_weights = _build_step_weights(
+        int(horizon), float(step_loss_decay), step1_loss_multiplier=float(step1_loss_multiplier)
+    ).to(device)
+
+    curriculum_requested = any(
+        int(x) > 0 for x in (int(curriculum_start_horizon), int(curriculum_end_horizon), int(curriculum_ramp_epochs))
+    )
+    if curriculum_requested:
+        effective_curriculum_start = int(curriculum_start_horizon) if int(curriculum_start_horizon) > 0 else 1
+        effective_curriculum_end = int(curriculum_end_horizon) if int(curriculum_end_horizon) > 0 else int(horizon)
+        effective_curriculum_ramp = int(curriculum_ramp_epochs) if int(curriculum_ramp_epochs) > 0 else int(epochs)
+    else:
+        effective_curriculum_start = int(horizon)
+        effective_curriculum_end = int(horizon)
+        effective_curriculum_ramp = 1
 
     history: List[Dict[str, Any]] = []
     best_state: Optional[Dict[str, torch.Tensor]] = None
     best_val_loss = float("inf")
 
     for epoch in range(1, int(epochs) + 1):
+        active_curriculum_horizon = _curriculum_horizon_for_epoch(
+            epoch=int(epoch),
+            max_horizon=int(horizon),
+            start_horizon=int(effective_curriculum_start),
+            end_horizon=int(effective_curriculum_end),
+            ramp_epochs=int(effective_curriculum_ramp),
+        )
         model.train()
         running = 0.0
         seen_rows = 0
@@ -692,10 +821,11 @@ def train_dual_sequence_model_from_jsonl_paths(
                 logits = model(tokens, lengths, sides, board_state=board_states)
             else:
                 logits = model(tokens, lengths, sides)
+            mask_for_loss = _apply_curriculum_mask(mask, int(active_curriculum_horizon))
             loss = _masked_sequence_loss(
                 logits=logits,
                 targets=targets,
-                mask=mask,
+                mask=mask_for_loss,
                 step_weights=step_weights,
                 mate_weights=mate_weights,
             )
@@ -711,9 +841,11 @@ def train_dual_sequence_model_from_jsonl_paths(
             device=device,
             step_weights=step_weights,
             use_board_state_feature=use_board_state_feature,
+            curriculum_horizon_limit=0,
         )
         row = {
             "epoch": int(epoch),
+            "curriculum_horizon": int(active_curriculum_horizon),
             "train_loss": float(train_loss),
             **val_metrics,
         }
@@ -728,6 +860,7 @@ def train_dual_sequence_model_from_jsonl_paths(
                     "epoch": int(epoch),
                     "train_loss": round(train_loss, 6),
                     "val_loss": round(float(val_metrics["val_loss"]), 6),
+                    "curriculum_horizon": int(active_curriculum_horizon),
                     "ply_match_rate": round(float(val_metrics["ply_match_rate"]), 6),
                     "full_seq_exact_hit_rate": round(float(val_metrics["full_seq_exact_hit_rate"]), 6),
                 }
@@ -759,11 +892,19 @@ def train_dual_sequence_model_from_jsonl_paths(
             "device": str(device),
             "schema": str(schema),
             "step_loss_decay": float(step_loss_decay),
+            "step1_loss_multiplier": float(step1_loss_multiplier),
             "sequence_loss_mode": "target_probability_distance",
             "use_board_state_feature": bool(use_board_state_feature),
             "mate_bias_enabled": bool(mate_bias_enabled),
             "mate_in_x": int(mate_in_x),
             "mate_weight": float(mate_weight),
+            "winner_side_filter": winner_side_filter if winner_side_filter is not None else "all",
+            "curriculum_start_horizon": int(effective_curriculum_start),
+            "curriculum_end_horizon": int(effective_curriculum_end),
+            "curriculum_ramp_epochs": int(effective_curriculum_ramp),
+            "curriculum_requested": bool(curriculum_requested),
+            "training_architecture": str(training_architecture),
+            "stage_name": str(stage_name),
             "train_paths": [str(p) for p in train_paths],
             "val_paths": [str(p) for p in val_paths],
         },
@@ -794,11 +935,20 @@ def train_dual_sequence_model_from_jsonl_paths(
             "max_samples_per_game": int(runtime_max_samples_per_game),
         },
         "step_loss_decay": float(step_loss_decay),
+        "step1_loss_multiplier": float(step1_loss_multiplier),
         "sequence_loss_mode": "target_probability_distance",
         "use_board_state_feature": bool(use_board_state_feature),
         "mate_bias_enabled": bool(mate_bias_enabled),
         "mate_in_x": int(mate_in_x),
         "mate_weight": float(mate_weight),
+        "winner_side_filter": winner_side_filter if winner_side_filter is not None else "all",
+        "curriculum_start_horizon": int(effective_curriculum_start),
+        "curriculum_end_horizon": int(effective_curriculum_end),
+        "curriculum_ramp_epochs": int(effective_curriculum_ramp),
+        "curriculum_requested": bool(curriculum_requested),
+        "training_architecture": str(training_architecture),
+        "stage_name": str(stage_name),
+        "vocab_source": "train_indexed" if build_vocab_train else "fixed_vocab",
     }
     if out_metrics_path:
         with open(out_metrics_path, "w", encoding="utf-8") as f:
@@ -806,4 +956,199 @@ def train_dual_sequence_model_from_jsonl_paths(
     return {
         "artifact": artifact,
         "metrics": final_metrics,
+    }
+
+
+def train_bootstrap_dual_head_curriculum_from_jsonl_paths(
+    *,
+    train_paths: List[str],
+    val_paths: List[str],
+    out_model_shared_path: str,
+    out_model_white_path: str,
+    out_model_black_path: str,
+    out_metrics_path: Optional[str] = None,
+    seed: int = 7,
+    horizon: int = 8,
+    bootstrap_epochs: int = 6,
+    finetune_epochs: int = 10,
+    batch_size: int = 64,
+    lr: float = 2e-4,
+    embed_dim: int = 256,
+    hidden_dim: int = 512,
+    num_layers: int = 2,
+    dropout: float = 0.15,
+    use_side_to_move_feature: bool = True,
+    side_to_move_embed_dim: int = 4,
+    step_loss_decay: float = 0.9,
+    step1_loss_multiplier: float = 1.0,
+    runtime_min_context: int = 8,
+    runtime_min_target: int = 1,
+    runtime_max_samples_per_game: int = 0,
+    num_workers: int = 0,
+    device_str: str = "cpu",
+    mate_bias_enabled: bool = True,
+    mate_in_x: int = 3,
+    mate_weight: float = 1.25,
+    model_family: str = MODEL_FAMILY_DUAL_SEQUENCE,
+    curriculum_start_horizon: int = 2,
+    curriculum_end_horizon: int = 0,
+    curriculum_ramp_epochs: int = 4,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    model_family_norm = normalize_model_family(model_family)
+    board_enabled = uses_board_state_for_model_family(model_family_norm)
+    bootstrap_family = MODEL_FAMILY_DUAL_SEQUENCE_BOARD if board_enabled else MODEL_FAMILY_DUAL_SEQUENCE
+    output_family = (
+        MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD if board_enabled else MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM
+    )
+    bootstrap_epochs_eff = max(1, int(bootstrap_epochs))
+    finetune_epochs_eff = max(1, int(finetune_epochs))
+
+    bootstrap_result = train_dual_sequence_model_from_jsonl_paths(
+        train_paths=train_paths,
+        val_paths=val_paths,
+        model_side=MODEL_SIDE_ALL,
+        out_model_path=str(out_model_shared_path),
+        out_metrics_path=None,
+        seed=int(seed),
+        horizon=int(horizon),
+        epochs=int(bootstrap_epochs_eff),
+        batch_size=int(batch_size),
+        lr=float(lr),
+        embed_dim=int(embed_dim),
+        hidden_dim=int(hidden_dim),
+        num_layers=int(num_layers),
+        dropout=float(dropout),
+        use_side_to_move_feature=bool(use_side_to_move_feature),
+        side_to_move_embed_dim=int(side_to_move_embed_dim),
+        step_loss_decay=float(step_loss_decay),
+        step1_loss_multiplier=float(step1_loss_multiplier),
+        runtime_min_context=int(runtime_min_context),
+        runtime_min_target=int(runtime_min_target),
+        runtime_max_samples_per_game=int(runtime_max_samples_per_game),
+        num_workers=int(num_workers),
+        device_str=str(device_str),
+        mate_bias_enabled=bool(mate_bias_enabled),
+        mate_in_x=int(mate_in_x),
+        mate_weight=float(mate_weight),
+        model_family=bootstrap_family,
+        curriculum_start_horizon=int(curriculum_start_horizon),
+        curriculum_end_horizon=int(curriculum_end_horizon),
+        curriculum_ramp_epochs=int(curriculum_ramp_epochs),
+        fixed_vocab=None,
+        init_state_dict=None,
+        stage_name="bootstrap_allplay",
+        training_architecture=TRAINING_ARCHITECTURE_ALLPLAY_BOOTSTRAP,
+        verbose=bool(verbose),
+    )
+
+    shared_artifact = bootstrap_result["artifact"]
+    shared_vocab = dict(shared_artifact.get("vocab", {}))
+    shared_state = shared_artifact.get("state_dict")
+    if not shared_vocab:
+        raise RuntimeError("Bootstrap stage produced empty vocab")
+    if not isinstance(shared_state, dict):
+        raise RuntimeError("Bootstrap stage did not return a valid state_dict")
+
+    white_result = train_dual_sequence_model_from_jsonl_paths(
+        train_paths=train_paths,
+        val_paths=val_paths,
+        model_side=MODEL_SIDE_WHITE,
+        out_model_path=str(out_model_white_path),
+        out_metrics_path=None,
+        seed=int(seed),
+        horizon=int(horizon),
+        epochs=int(finetune_epochs_eff),
+        batch_size=int(batch_size),
+        lr=float(lr),
+        embed_dim=int(embed_dim),
+        hidden_dim=int(hidden_dim),
+        num_layers=int(num_layers),
+        dropout=float(dropout),
+        use_side_to_move_feature=bool(use_side_to_move_feature),
+        side_to_move_embed_dim=int(side_to_move_embed_dim),
+        step_loss_decay=float(step_loss_decay),
+        step1_loss_multiplier=float(step1_loss_multiplier),
+        runtime_min_context=int(runtime_min_context),
+        runtime_min_target=int(runtime_min_target),
+        runtime_max_samples_per_game=int(runtime_max_samples_per_game),
+        num_workers=int(num_workers),
+        device_str=str(device_str),
+        mate_bias_enabled=bool(mate_bias_enabled),
+        mate_in_x=int(mate_in_x),
+        mate_weight=float(mate_weight),
+        model_family=output_family,
+        curriculum_start_horizon=int(curriculum_start_horizon),
+        curriculum_end_horizon=int(curriculum_end_horizon),
+        curriculum_ramp_epochs=int(curriculum_ramp_epochs),
+        fixed_vocab=shared_vocab,
+        init_state_dict=shared_state,
+        stage_name="finetune_white",
+        training_architecture=TRAINING_ARCHITECTURE_ALLPLAY_BOOTSTRAP,
+        verbose=bool(verbose),
+    )
+
+    black_result = train_dual_sequence_model_from_jsonl_paths(
+        train_paths=train_paths,
+        val_paths=val_paths,
+        model_side=MODEL_SIDE_BLACK,
+        out_model_path=str(out_model_black_path),
+        out_metrics_path=None,
+        seed=int(seed),
+        horizon=int(horizon),
+        epochs=int(finetune_epochs_eff),
+        batch_size=int(batch_size),
+        lr=float(lr),
+        embed_dim=int(embed_dim),
+        hidden_dim=int(hidden_dim),
+        num_layers=int(num_layers),
+        dropout=float(dropout),
+        use_side_to_move_feature=bool(use_side_to_move_feature),
+        side_to_move_embed_dim=int(side_to_move_embed_dim),
+        step_loss_decay=float(step_loss_decay),
+        step1_loss_multiplier=float(step1_loss_multiplier),
+        runtime_min_context=int(runtime_min_context),
+        runtime_min_target=int(runtime_min_target),
+        runtime_max_samples_per_game=int(runtime_max_samples_per_game),
+        num_workers=int(num_workers),
+        device_str=str(device_str),
+        mate_bias_enabled=bool(mate_bias_enabled),
+        mate_in_x=int(mate_in_x),
+        mate_weight=float(mate_weight),
+        model_family=output_family,
+        curriculum_start_horizon=int(curriculum_start_horizon),
+        curriculum_end_horizon=int(curriculum_end_horizon),
+        curriculum_ramp_epochs=int(curriculum_ramp_epochs),
+        fixed_vocab=shared_vocab,
+        init_state_dict=shared_state,
+        stage_name="finetune_black",
+        training_architecture=TRAINING_ARCHITECTURE_ALLPLAY_BOOTSTRAP,
+        verbose=bool(verbose),
+    )
+
+    merged_metrics: Dict[str, Any] = {
+        "training_mode": "dual_bootstrap_curriculum",
+        "training_architecture": TRAINING_ARCHITECTURE_ALLPLAY_BOOTSTRAP,
+        "seed": int(seed),
+        "horizon": int(horizon),
+        "bootstrap_epochs": int(bootstrap_epochs_eff),
+        "finetune_epochs": int(finetune_epochs_eff),
+        "backbone_model_family": str(bootstrap_family),
+        "output_model_family": str(output_family),
+        "bootstrap": bootstrap_result.get("metrics", {}),
+        "sides": {
+            MODEL_SIDE_WHITE: white_result.get("metrics", {}),
+            MODEL_SIDE_BLACK: black_result.get("metrics", {}),
+        },
+    }
+    if out_metrics_path:
+        with open(out_metrics_path, "w", encoding="utf-8") as f:
+            json.dump(merged_metrics, f, indent=2)
+    return {
+        "bootstrap": bootstrap_result,
+        "sides": {
+            MODEL_SIDE_WHITE: white_result,
+            MODEL_SIDE_BLACK: black_result,
+        },
+        "metrics": merged_metrics,
     }

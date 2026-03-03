@@ -16,6 +16,14 @@ from src.chessbot.phase import PHASE_UNKNOWN, classify_context_phase, phase_to_i
 
 MODEL_FAMILY_DUAL_SEQUENCE = "dual_side_sequence_lstm"
 MODEL_FAMILY_DUAL_SEQUENCE_BOARD = "dual_side_sequence_board_lstm"
+MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM = "allplay_bootstrap_dualhead_curriculum_lstm"
+MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD = "allplay_bootstrap_dualhead_board_curriculum_lstm"
+DUAL_SEQUENCE_MODEL_FAMILIES = {
+    MODEL_FAMILY_DUAL_SEQUENCE,
+    MODEL_FAMILY_DUAL_SEQUENCE_BOARD,
+    MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM,
+    MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD,
+}
 
 
 def parse_context(text: str) -> List[str]:
@@ -474,14 +482,14 @@ def infer_sequence_from_artifact_on_device(
     inv_vocab = {idx: tok for tok, idx in vocab.items()}
     cfg = artifact["config"]
     fam = artifact_model_family(artifact)
-    if fam not in {MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD}:
+    if fam not in DUAL_SEQUENCE_MODEL_FAMILIES:
         raise RuntimeError(f"Unsupported model family for sequence inference: {fam}")
 
     device = torch.device(device_str)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
 
-    if fam == MODEL_FAMILY_DUAL_SEQUENCE_BOARD:
+    if fam in {MODEL_FAMILY_DUAL_SEQUENCE_BOARD, MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD}:
         model = NextMoveSeqBoardLSTM(vocab_size=len(vocab), **cfg).to(device)
     else:
         model = NextMoveSeqLSTM(vocab_size=len(vocab), **cfg).to(device)
@@ -496,10 +504,10 @@ def infer_sequence_from_artifact_on_device(
     lengths = torch.tensor([len(context_ids)], dtype=torch.long, device=device)
     side_to_moves = torch.tensor([side_to_move_id_from_context_len(original_context_len)], dtype=torch.long, device=device)
     board_state = None
-    if fam == MODEL_FAMILY_DUAL_SEQUENCE_BOARD:
+    if fam in {MODEL_FAMILY_DUAL_SEQUENCE_BOARD, MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD}:
         board_state = board_state_planes_from_context(context).unsqueeze(0).to(device)
     with torch.no_grad():
-        if fam == MODEL_FAMILY_DUAL_SEQUENCE_BOARD:
+        if fam in {MODEL_FAMILY_DUAL_SEQUENCE_BOARD, MODEL_FAMILY_DUAL_BOOTSTRAP_CURRICULUM_BOARD}:
             logits = model(tokens, lengths, side_to_moves, board_state=board_state)
         else:
             logits = model(tokens, lengths, side_to_moves)
@@ -690,7 +698,7 @@ def infer_first_move_auto_from_artifact_on_device(
 
     objective = artifact_training_objective(artifact)
     fam = artifact_model_family(artifact)
-    if fam in {MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD}:
+    if fam in DUAL_SEQUENCE_MODEL_FAMILIES:
         out = infer_sequence_from_artifact_on_device(
             artifact=artifact,
             context=context,
