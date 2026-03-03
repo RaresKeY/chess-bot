@@ -288,6 +288,7 @@ Training CLI interactions:
 | `--train` | required | repeatable JSONL path | Training input paths (spliced rows or game rows) | `python scripts/train_dual_sequence.py ...` |
 | `--val` | required | repeatable JSONL path | Validation input paths | same |
 | `--side-mode` | `both` | `white`, `black`, `both` | Train selected side-specific model(s) | same |
+| `--model-family` | `dual_side_sequence_lstm` | `dual_side_sequence_lstm`, `dual_side_sequence_board_lstm` | Select move-only or board-conditioned dual sequence architecture | same |
 | `--horizon` | `8` | integer `>=1` | One-shot future sequence plies predicted per sample | same |
 | `--epochs` | `20` | integer `>=1` | Training epochs | same |
 | `--batch-size` | `64` | integer `>=1` | Batch size | same |
@@ -297,7 +298,7 @@ Training CLI interactions:
 | `--hidden-dim` | `512` | integer `>=1` | LSTM hidden size | same |
 | `--num-layers` | `2` | integer `>=1` | Encoder/decoder LSTM layer count | same |
 | `--dropout` | `0.15` | float `>=0` | Embedding/head + inter-layer LSTM dropout (`num_layers>1`) | same |
-| `--step-loss-decay` | `1.0` | float `>0` | Geometric per-ply loss weighting across horizon | same |
+| `--step-loss-decay` | `0.9` | float (`0,1`) recommended; values `<=0` or `>=1` are normalized to `0.9` | Geometric per-ply loss weighting across horizon with earliest ply highest weight | same |
 | `--side-to-move-feature` / `--no-side-to-move-feature` | enabled | boolean | Enable side-to-move conditioning in sequence decoder | same |
 | `--side-to-move-embed-dim` | `4` | integer `>=1` | Side-to-move embedding dim when feature enabled | same |
 | `--runtime-min-context` | `8` | integer `>=1` | Runtime splice min context for game-row inputs | same |
@@ -317,6 +318,8 @@ Dual-sequence interactions/precedence notes:
 - Winner filtering is fixed by `--side-mode`; rows with non-matching `winner_side` are dropped automatically.
 - Draw/unknown winner rows are dropped in current implementation.
 - For game-row inputs, runtime splice controls determine sample counts before model-side winner filtering.
+- Loss contract uses per-ply target probability distance (`1 - P(actual_move)`), then applies `step_loss_decay` and optional mate-bias multiplicatively.
+- `--model-family=dual_side_sequence_board_lstm` enables board-state plane derivation from context (`C=18`) and board-conditioned decoder initialization.
 
 ## Inference CLI Dual Routing (`scripts/infer_move.py`)
 | Control | Default | Accepted | Effect | Related Command |
@@ -333,6 +336,28 @@ Inference dual-routing interactions:
   - both `--white-model` and `--black-model`
 - When both side artifacts are provided, side-to-move is inferred from context parity and selects the artifact.
 - Progressive top-k attempts are `topk * multiplier` (clamped to vocab size), evaluated in order with deduplication.
+
+## Play-vs-Model Server (`main.py`, `scripts/play_vs_model_server.py`)
+| Control | Default | Accepted | Effect | Related Command |
+|---|---|---|---|---|
+| `--model` | auto-injected latest artifact by `main.py` (or `artifacts/model.pt` when calling server directly) | artifact path | Single-artifact play mode | `python main.py ...`, `python scripts/play_vs_model_server.py ...` |
+| `--white-model` | empty | artifact path | White-side artifact for dual pair side-routed play mode | same |
+| `--black-model` | empty | artifact path | Black-side artifact for dual pair side-routed play mode | same |
+| `--device` | `auto` | `auto`, `cpu`, `cuda`, `cuda:N` | Inference device for single or dual pair play runtime | same |
+| `--winner-side` | `B` | `W`, `B`, `D`, `?` | Winner token conditioning for single-artifact inference paths | same |
+| `--user-color` | `white` | `white`, `black` | Default player side in UI/API turn validation | same |
+| `--topk` | `10` | integer `>=1` | Candidate width for model inference | same |
+| `--piece-base` | `assets/pieces/cburnett` | URL path | Piece sprite path for browser board rendering | same |
+| `--page-path` | `play-vs-model` | URL path fragment | Route for HTML app page | same |
+| `--dir` | repo root via `main.py` wrapper | directory path | Static HTTP root for board assets/page | same |
+
+Play-vs-model interactions/precedence notes:
+- Model selection requires exactly one mode:
+  - single artifact (`--model`), or
+  - dual pair (`--white-model` + `--black-model`).
+- `main.py` injects latest local `*.pt` as `--model` only when no model-selection flags are provided.
+- UI/API `user_color` enforces side-to-move on user actions.
+- Dual pair routing auto-selects white/black artifact by side-to-move (context parity) for each model reply.
 
 ## Model-vs-Model Arena CLI (`scripts/play_model_vs_model.py`)
 | Control | Default | Accepted | Effect | Related Command |

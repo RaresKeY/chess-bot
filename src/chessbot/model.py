@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from src.chessbot.board_features import BOARD_FEATURE_PLANES
+
 PAD = "<PAD>"
 UNK = "<UNK>"
 
@@ -154,6 +156,114 @@ class NextMoveSeqLSTM(nn.Module):
             dec_inputs = torch.cat([dec_inputs, side_feat], dim=-1)
 
         dec_out, _ = self.decoder(dec_inputs, (h, c))
+        dec_out = self.head_dropout(dec_out)
+        return self.classifier(dec_out)
+
+
+class NextMoveSeqBoardLSTM(nn.Module):
+    """One-shot horizon sequence predictor from move-context + board-state planes."""
+
+    def __init__(
+        self,
+        vocab_size: int,
+        horizon: int = 8,
+        embed_dim: int = 128,
+        hidden_dim: int = 256,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+        side_to_move_embed_dim: int = 4,
+        use_side_to_move: bool = True,
+        board_feature_planes: int = BOARD_FEATURE_PLANES,
+    ) -> None:
+        super().__init__()
+        self.horizon = int(max(1, horizon))
+        self.use_side_to_move = bool(use_side_to_move)
+        self.board_feature_planes = int(max(1, board_feature_planes))
+        dropout = float(max(0.0, dropout))
+        lstm_dropout = dropout if int(num_layers) > 1 else 0.0
+
+        self.token_embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.embed_dropout = nn.Dropout(dropout)
+        self.encoder = nn.LSTM(
+            embed_dim,
+            hidden_dim,
+            num_layers=int(num_layers),
+            dropout=lstm_dropout,
+            batch_first=True,
+        )
+        self.board_encoder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.board_feature_planes * 64, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+        )
+        self.board_cell_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+        )
+
+        self.step_embed = nn.Embedding(self.horizon, embed_dim)
+        self.side_to_move_embed = nn.Embedding(2, side_to_move_embed_dim) if self.use_side_to_move else None
+        decoder_in = embed_dim + (side_to_move_embed_dim if self.use_side_to_move else 0)
+        self.decoder = nn.LSTM(
+            decoder_in,
+            hidden_dim,
+            num_layers=int(num_layers),
+            dropout=lstm_dropout,
+            batch_first=True,
+        )
+        self.head_dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_dim, vocab_size)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        lengths: torch.Tensor,
+        side_to_move_ids: Optional[torch.Tensor] = None,
+        board_state: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if board_state is None:
+            raise ValueError("board_state is required for NextMoveSeqBoardLSTM")
+        if board_state.dim() != 4:
+            raise ValueError(f"Expected board_state shape [B,C,8,8], got {tuple(board_state.shape)}")
+        if int(board_state.shape[1]) != self.board_feature_planes:
+            raise ValueError(
+                f"Expected board_state channels={self.board_feature_planes}, got {int(board_state.shape[1])}"
+            )
+        if int(board_state.shape[2]) != 8 or int(board_state.shape[3]) != 8:
+            raise ValueError(f"Expected board_state board shape 8x8, got {tuple(board_state.shape[2:])}")
+
+        emb = self.embed_dropout(self.token_embed(tokens))
+        packed = nn.utils.rnn.pack_padded_sequence(
+            emb,
+            lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False,
+        )
+        _, (h, c) = self.encoder(packed)
+
+        board_state = board_state.to(tokens.device, dtype=torch.float32)
+        board_hidden = self.board_encoder(board_state)
+        board_cell = self.board_cell_proj(board_hidden)
+
+        h0 = h.clone()
+        c0 = c.clone()
+        h0[-1] = h0[-1] + board_hidden
+        c0[-1] = c0[-1] + board_cell
+
+        batch_size = int(tokens.shape[0])
+        step_ids = torch.arange(self.horizon, device=tokens.device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+        dec_inputs = self.step_embed(step_ids)
+        if self.use_side_to_move:
+            if side_to_move_ids is None:
+                side_to_move_ids = (lengths.to(tokens.device) % 2).long()
+            side_feat = self.side_to_move_embed(side_to_move_ids.clamp(min=0, max=1)).unsqueeze(1)
+            side_feat = side_feat.expand(batch_size, self.horizon, -1)
+            dec_inputs = torch.cat([dec_inputs, side_feat], dim=-1)
+
+        dec_out, _ = self.decoder(dec_inputs, (h0, c0))
         dec_out = self.head_dropout(dec_out)
         return self.classifier(dec_out)
 

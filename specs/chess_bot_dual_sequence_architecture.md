@@ -2,6 +2,11 @@
 
 ## Status
 Implemented (initial version).
+This spec describes the move-only dual-sequence family.
+Board-conditioned variant is tracked separately in `specs/chess_bot_dual_sequence_board_architecture.md`.
+
+## Architecture Name
+- `dual_side_sequence_lstm`
 
 ## Responsibility
 Train and serve side-specific one-shot future-sequence models:
@@ -41,11 +46,11 @@ context moves (UCI) -> encoder -> sequence decoder head -> logits [B, H, V]
 - Optional side-to-move conditioning in the decoder input.
 
 ## Loss and Metrics
-- Train/val loss: masked per-ply cross-entropy over horizon.
+- Train/val loss: masked per-ply target-probability distance over horizon (`1 - P(actual_move)` per ply).
 - Sequence cutoff:
   - targets shorter than `H` are padded with `mask=0`.
 - Step-weight decay:
-  - geometric decay controlled by `step_loss_decay` (default `1.0`).
+  - geometric decay controlled by `step_loss_decay` (default `0.9`) so earlier plies are weighted more than later plies.
 - Mate-bias hook:
   - optional multiplicative boost for endgame rows where ground-truth continuation reaches checkmate within `mate_in_x`.
 
@@ -75,6 +80,8 @@ Combined run metrics:
   - provide both `--white-model` and `--black-model` in `scripts/infer_move.py`
   - selector uses side-to-move derived from context parity
 - Single-artifact dual-sequence inference is also supported when `--model` points to a dual-sequence artifact.
+- Dual-sequence inference exposes per-ply probability outputs for both greedy predicted sequence and legality-filtered chosen sequence (`*_with_probs` fields).
+- Dual-sequence decode applies legal-move masking per ply against the current board state before ranking candidates.
 
 ## Visual Flow
 ```text

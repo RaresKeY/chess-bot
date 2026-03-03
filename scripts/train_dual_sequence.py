@@ -15,6 +15,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.chessbot.io_utils import ensure_parent, write_json
 from src.chessbot.training_dual_sequence import (
+    MODEL_FAMILY_DUAL_SEQUENCE,
+    MODEL_FAMILY_DUAL_SEQUENCE_BOARD,
     MODEL_SIDE_BLACK,
     MODEL_SIDE_WHITE,
     train_dual_sequence_model_from_jsonl_paths,
@@ -53,6 +55,12 @@ def main() -> None:
     parser.add_argument("--train", action="append", required=True, help="Train JSONL path (repeatable)")
     parser.add_argument("--val", action="append", required=True, help="Validation JSONL path (repeatable)")
     parser.add_argument("--side-mode", choices=["white", "black", "both"], default="both")
+    parser.add_argument(
+        "--model-family",
+        choices=[MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD],
+        default=MODEL_FAMILY_DUAL_SEQUENCE,
+        help="Dual-sequence architecture family: move-only or board-conditioned",
+    )
     parser.add_argument("--horizon", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -62,7 +70,7 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=512)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.15)
-    parser.add_argument("--step-loss-decay", type=float, default=1.0)
+    parser.add_argument("--step-loss-decay", type=float, default=0.9)
     parser.add_argument("--side-to-move-feature", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--side-to-move-embed-dim", type=int, default=4)
     parser.add_argument("--runtime-min-context", type=int, default=8)
@@ -91,6 +99,7 @@ def main() -> None:
             "requested_device": args.device,
             "resolved_device": device,
             "side_mode": args.side_mode,
+            "model_family": args.model_family,
             "horizon": int(args.horizon),
         }
     )
@@ -133,6 +142,7 @@ def main() -> None:
             mate_bias_enabled=bool(args.mate_bias),
             mate_in_x=int(args.mate_in_x),
             mate_weight=float(args.mate_weight),
+            model_family=str(args.model_family),
             verbose=bool(args.verbose),
         )
         results_by_side[side] = result
@@ -158,6 +168,7 @@ def main() -> None:
             "step_loss_decay": float(args.step_loss_decay),
             "side_to_move_feature": bool(args.side_to_move_feature),
             "side_to_move_embed_dim": int(args.side_to_move_embed_dim),
+            "model_family": str(args.model_family),
             "runtime_min_context": int(args.runtime_min_context),
             "runtime_min_target": int(args.runtime_min_target),
             "runtime_max_samples_per_game": int(args.runtime_max_samples_per_game),

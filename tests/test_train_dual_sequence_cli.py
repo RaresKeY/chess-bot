@@ -32,6 +32,7 @@ class TrainDualSequenceCliTests(unittest.TestCase):
         self.assertIn("--side-mode", proc.stdout)
         self.assertIn("--horizon", proc.stdout)
         self.assertIn("--mate-in-x", proc.stdout)
+        self.assertIn("--model-family", proc.stdout)
         self.assertIn("--out-model-white", proc.stdout)
         self.assertIn("--out-model-black", proc.stdout)
 
@@ -62,6 +63,8 @@ class TrainDualSequenceCliTests(unittest.TestCase):
                     str(val_path),
                     "--side-mode",
                     "both",
+                    "--model-family",
+                    "dual_side_sequence_board_lstm",
                     "--horizon",
                     "4",
                     "--epochs",
@@ -96,6 +99,7 @@ class TrainDualSequenceCliTests(unittest.TestCase):
             self.assertTrue(out_metrics.is_file())
             payload = json.loads(out_metrics.read_text(encoding="utf-8"))
             self.assertEqual(payload["side_mode"], "both")
+            self.assertEqual(payload["runtime"]["model_family"], "dual_side_sequence_board_lstm")
             self.assertIn("white", payload["sides"])
             self.assertIn("black", payload["sides"])
 

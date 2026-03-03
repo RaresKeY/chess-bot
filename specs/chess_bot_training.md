@@ -8,6 +8,11 @@ This component also coexists with a side-specific one-shot sequence trainer for 
 - Core: `src/chessbot/training_dual_sequence.py`
 - Model: `NextMoveSeqLSTM` in `src/chessbot/model.py`
 
+Architecture-specific specs:
+- Baseline (`next_move_lstm`): `specs/chess_bot_baseline_next_move_architecture.md`
+- Dual side sequence (`dual_side_sequence_lstm`): `specs/chess_bot_dual_sequence_architecture.md`
+- Dual side sequence + board state (`dual_side_sequence_board_lstm`): `specs/chess_bot_dual_sequence_board_architecture.md`
+
 ## Dataset Inputs
 - CLI accepts one or more `--train` JSONL paths and one or more `--val` JSONL paths (repeatable flags)
 - Training auto-detects input schema per path set:
@@ -171,6 +176,7 @@ This component also coexists with a side-specific one-shot sequence trainer for 
 ## Current Limitation
 - Training still stores per-row JSONL line offsets in RAM (much smaller than full row dicts/strings, but not fully streaming/iterable training).
 - Compact game-level runtime splicing still computes phase labels in-loader for fallback/no-cache paths; precomputed cache paths avoid index-build replay work but do not eliminate per-sample row decode/splice cost.
+- Data coverage is biased toward elite games, so the model has limited exposure to bad/blunder move patterns and weaker robustness to those positions.
 - Runtime-splice optimization (current):
   - training now caches per-sample phase IDs during runtime splice-index construction (single replay pass per game at index-build time)
   - runtime splice indexes use packed arrays (`array`-backed path IDs / offsets / splice indices / phase IDs) instead of Python int lists to reduce RAM usage substantially
@@ -218,10 +224,13 @@ Separate from baseline next-move training, dual sequence training provides side-
   - black model keeps only `winner_side == B`
   - draw/unknown rows are dropped
 - Objective:
-  - one-shot sequence logits `[B,H,V]` with masked per-ply CE loss
+  - one-shot sequence logits `[B,H,V]` with masked per-ply distance loss from target probability (`1 - P(actual_move)`)
   - sequence metrics reported each epoch: `ply_match_rate`, `full_seq_exact_hit_rate`
-  - optional step-loss decay (`step_loss_decay`)
+  - step-loss decay (`step_loss_decay`, default `0.9`) front-loads weight toward earlier plies
   - optional endgame mate-in-x positive weighting (`mate_bias`, `mate_in_x`, `mate_weight`)
+- Architecture family selection:
+  - `dual_side_sequence_lstm`: move-context encoder only
+  - `dual_side_sequence_board_lstm`: move-context encoder + board-state plane encoder conditioned into decoder state
 - Artifacts:
   - `artifacts/model_white.pt`
   - `artifacts/model_black.pt`

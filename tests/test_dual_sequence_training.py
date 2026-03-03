@@ -9,8 +9,11 @@ except Exception:  # pragma: no cover - environment-dependent skip path
     torch = None
 
 if torch is not None:
-    from src.chessbot.model import NextMoveSeqLSTM
+    from src.chessbot.board_features import BOARD_FEATURE_PLANES
+    from src.chessbot.model import NextMoveSeqBoardLSTM, NextMoveSeqLSTM
     from src.chessbot.training_dual_sequence import (
+        MODEL_FAMILY_DUAL_SEQUENCE_BOARD,
+        _build_step_weights,
         _compute_mate_bias_weights,
         _masked_sequence_loss,
         compute_sequence_match_metrics,
@@ -45,6 +48,26 @@ class DualSequenceTrainingTests(unittest.TestCase):
         self.assertEqual(out.shape, (2, 8, 32))
 
     @unittest.skipIf(torch is None, "torch not installed")
+    def test_next_move_seq_board_lstm_forward_shape(self) -> None:
+        model = NextMoveSeqBoardLSTM(
+            vocab_size=32,
+            horizon=8,
+            embed_dim=8,
+            hidden_dim=16,
+            num_layers=1,
+            dropout=0.0,
+            use_side_to_move=True,
+            side_to_move_embed_dim=2,
+            board_feature_planes=BOARD_FEATURE_PLANES,
+        )
+        tokens = torch.tensor([[1, 2, 3], [4, 5, 0]], dtype=torch.long)
+        lengths = torch.tensor([3, 2], dtype=torch.long)
+        sides = torch.tensor([0, 1], dtype=torch.long)
+        boards = torch.zeros((2, BOARD_FEATURE_PLANES, 8, 8), dtype=torch.float32)
+        out = model(tokens, lengths, sides, board_state=boards)
+        self.assertEqual(out.shape, (2, 8, 32))
+
+    @unittest.skipIf(torch is None, "torch not installed")
     def test_masked_sequence_loss_respects_mask(self) -> None:
         logits = torch.tensor(
             [
@@ -64,6 +87,38 @@ class DualSequenceTrainingTests(unittest.TestCase):
             mate_weights=None,
         )
         self.assertLess(float(loss.item()), 0.02)
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_masked_sequence_loss_uses_target_probability_distance_and_step_decay(self) -> None:
+        logits = torch.tensor(
+            [
+                [
+                    [0.0, 0.4054651081],  # p(target=0)=0.4 -> distance=0.6
+                    [0.0, -2.1972245773],  # p(target=0)=0.9 -> distance=0.1
+                ]
+            ],
+            dtype=torch.float32,
+        )
+        targets = torch.tensor([[0, 0]], dtype=torch.long)
+        mask = torch.tensor([[1, 1]], dtype=torch.bool)
+        step_weights = torch.tensor([1.0, 0.5], dtype=torch.float32)
+        loss = _masked_sequence_loss(
+            logits=logits,
+            targets=targets,
+            mask=mask,
+            step_weights=step_weights,
+            mate_weights=None,
+        )
+        expected = (0.6 * 1.0 + 0.1 * 0.5) / (1.0 + 0.5)
+        self.assertAlmostEqual(float(loss.item()), expected, places=4)
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_step_weights_default_decay_frontloads_earlier_plies(self) -> None:
+        weights = _build_step_weights(4, 1.0).tolist()
+        self.assertEqual(len(weights), 4)
+        self.assertGreater(weights[0], weights[1])
+        self.assertGreater(weights[1], weights[2])
+        self.assertGreater(weights[2], weights[3])
 
     @unittest.skipIf(torch is None, "torch not installed")
     def test_compute_sequence_match_metrics_counts_exact_matches(self) -> None:
@@ -143,6 +198,54 @@ class DualSequenceTrainingTests(unittest.TestCase):
             self.assertEqual(metrics["val_rows_total"], 1)
             self.assertEqual(metrics["train_dropped_rows_total"], 2)
             self.assertEqual(len(metrics["history"]), 1)
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_train_dual_sequence_board_family_sets_artifact_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            train_path = tmp_path / "train.jsonl"
+            val_path = tmp_path / "val.jsonl"
+            rows = [
+                {"context": ["e2e4"], "target": ["e7e5", "g1f3"], "winner_side": "W", "phase": "opening"},
+                {"context": ["d2d4"], "target": ["d7d5", "c2c4"], "winner_side": "B", "phase": "opening"},
+            ]
+            _write_jsonl(train_path, rows)
+            _write_jsonl(val_path, rows)
+
+            out_model = tmp_path / "model_white_board.pt"
+            out_metrics = tmp_path / "metrics_white_board.json"
+            result = train_dual_sequence_model_from_jsonl_paths(
+                train_paths=[str(train_path)],
+                val_paths=[str(val_path)],
+                model_side="white",
+                out_model_path=str(out_model),
+                out_metrics_path=str(out_metrics),
+                seed=1,
+                horizon=4,
+                epochs=1,
+                batch_size=1,
+                lr=1e-3,
+                embed_dim=8,
+                hidden_dim=16,
+                num_layers=1,
+                dropout=0.0,
+                use_side_to_move_feature=True,
+                side_to_move_embed_dim=2,
+                step_loss_decay=0.9,
+                num_workers=0,
+                device_str="cpu",
+                mate_bias_enabled=False,
+                model_family=MODEL_FAMILY_DUAL_SEQUENCE_BOARD,
+                verbose=False,
+            )
+            self.assertTrue(out_model.is_file())
+            self.assertTrue(out_metrics.is_file())
+            artifact = result["artifact"]
+            metrics = result["metrics"]
+            self.assertEqual(artifact["model_family"], MODEL_FAMILY_DUAL_SEQUENCE_BOARD)
+            self.assertEqual(metrics["model_family"], MODEL_FAMILY_DUAL_SEQUENCE_BOARD)
+            self.assertTrue(bool(metrics["use_board_state_feature"]))
+            self.assertEqual(int(artifact["config"]["board_feature_planes"]), 18)
 
 
 if __name__ == "__main__":

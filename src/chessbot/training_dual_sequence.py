@@ -9,11 +9,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from src.chessbot.model import NextMoveSeqLSTM, encode_tokens, side_to_move_id_from_context_len
+from src.chessbot.board_features import BOARD_FEATURE_PLANES, board_state_planes_from_context
+from src.chessbot.model import NextMoveSeqBoardLSTM, NextMoveSeqLSTM, encode_tokens, side_to_move_id_from_context_len
 from src.chessbot.phase import PHASE_ENDGAME, classify_context_phase, board_from_context
 
 MODEL_SIDE_WHITE = "white"
 MODEL_SIDE_BLACK = "black"
+MODEL_FAMILY_DUAL_SEQUENCE = "dual_side_sequence_lstm"
+MODEL_FAMILY_DUAL_SEQUENCE_BOARD = "dual_side_sequence_board_lstm"
 
 WINNER_SIDE_WHITE = "W"
 WINNER_SIDE_BLACK = "B"
@@ -292,6 +295,7 @@ class IndexedDualSequenceDataset(Dataset):
         mate_bias_enabled: bool,
         mate_in_x: int,
         mate_weight: float,
+        include_board_state: bool = False,
     ) -> None:
         self.paths = paths
         self.path_ids = path_ids
@@ -303,6 +307,7 @@ class IndexedDualSequenceDataset(Dataset):
         self.mate_bias_enabled = bool(mate_bias_enabled)
         self.mate_in_x = int(max(0, mate_in_x))
         self.mate_weight = float(max(1.0, mate_weight))
+        self.include_board_state = bool(include_board_state)
         self._handle_cache: Dict[int, object] = {}
 
     def __len__(self) -> int:
@@ -355,12 +360,16 @@ class IndexedDualSequenceDataset(Dataset):
             mate_in_x=self.mate_in_x,
             mate_weight=self.mate_weight,
         )
+        if self.include_board_state:
+            board_state = board_state_planes_from_context(context)
+            return context_ids, side_to_move, seq_targets, seq_mask, mate_bias_weights, board_state
         return context_ids, side_to_move, seq_targets, seq_mask, mate_bias_weights
 
 
 def collate_dual_sequence_batch(
-    batch: List[Tuple[List[int], int, List[int], List[int], List[float]]]
+    batch: List[Tuple]
 ):
+    include_board_state = bool(batch and len(batch[0]) >= 6)
     lengths = torch.tensor([len(x[0]) for x in batch], dtype=torch.long)
     max_len = int(lengths.max().item())
     horizon = len(batch[0][2]) if batch else 1
@@ -369,20 +378,31 @@ def collate_dual_sequence_batch(
     targets = torch.zeros((len(batch), horizon), dtype=torch.long)
     mask = torch.zeros((len(batch), horizon), dtype=torch.bool)
     mate_weights = torch.ones((len(batch), horizon), dtype=torch.float32)
-    for i, (ctx, side, seq_targets, seq_mask, seq_mate_weights) in enumerate(batch):
+    board_states = (
+        torch.zeros((len(batch), BOARD_FEATURE_PLANES, 8, 8), dtype=torch.float32) if include_board_state else None
+    )
+    for i, sample in enumerate(batch):
+        if include_board_state:
+            ctx, side, seq_targets, seq_mask, seq_mate_weights, seq_board_state = sample
+        else:
+            ctx, side, seq_targets, seq_mask, seq_mate_weights = sample
         tokens[i, : len(ctx)] = torch.tensor(ctx, dtype=torch.long)
         sides[i] = int(side)
         targets[i] = torch.tensor(seq_targets, dtype=torch.long)
         mask[i] = torch.tensor(seq_mask, dtype=torch.bool)
         mate_weights[i] = torch.tensor(seq_mate_weights, dtype=torch.float32)
+        if include_board_state and board_states is not None:
+            board_states[i] = seq_board_state
+    if include_board_state and board_states is not None:
+        return tokens, lengths, sides, targets, mask, mate_weights, board_states
     return tokens, lengths, sides, targets, mask, mate_weights
 
 
 def _build_step_weights(horizon: int, step_loss_decay: float) -> torch.Tensor:
     h = max(1, int(horizon))
     d = float(step_loss_decay)
-    if d <= 0.0:
-        d = 1.0
+    if d <= 0.0 or d >= 1.0:
+        d = 0.9
     out = [1.0]
     for _ in range(1, h):
         out.append(out[-1] * d)
@@ -396,12 +416,12 @@ def _masked_sequence_loss(
     mask: torch.Tensor,
     step_weights: torch.Tensor,
     mate_weights: Optional[torch.Tensor] = None,
-    criterion: Optional[nn.Module] = None,
 ) -> torch.Tensor:
-    if criterion is None:
-        criterion = nn.CrossEntropyLoss(reduction="none")
     bsz, horizon, vocab_size = logits.shape
-    losses = criterion(logits.reshape(bsz * horizon, vocab_size), targets.reshape(bsz * horizon)).reshape(bsz, horizon)
+    probs = torch.softmax(logits, dim=-1)
+    target_probs = probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+    # Distance-style per-ply loss from ideal target probability 1.0.
+    losses = 1.0 - target_probs
     weights = mask.float() * step_weights.view(1, horizon).to(logits.device)
     if mate_weights is not None:
         weights = weights * mate_weights.float()
@@ -437,7 +457,7 @@ def evaluate_dual_sequence_loader(
     loader: DataLoader,
     device: torch.device,
     step_weights: torch.Tensor,
-    criterion: Optional[nn.Module] = None,
+    use_board_state_feature: bool = False,
 ) -> Dict[str, float]:
     model.eval()
     total_weighted_loss = 0.0
@@ -448,21 +468,28 @@ def evaluate_dual_sequence_loader(
     full_seq_exact_hit_count = 0.0
     with torch.no_grad():
         for batch in loader:
-            tokens, lengths, sides, targets, mask, mate_weights = batch
+            if use_board_state_feature:
+                tokens, lengths, sides, targets, mask, mate_weights, board_states = batch
+                board_states = board_states.to(device)
+            else:
+                tokens, lengths, sides, targets, mask, mate_weights = batch
+                board_states = None
             tokens = tokens.to(device)
             lengths = lengths.to(device)
             sides = sides.to(device)
             targets = targets.to(device)
             mask = mask.to(device)
             mate_weights = mate_weights.to(device)
-            logits = model(tokens, lengths, sides)
+            if use_board_state_feature:
+                logits = model(tokens, lengths, sides, board_state=board_states)
+            else:
+                logits = model(tokens, lengths, sides)
             loss = _masked_sequence_loss(
                 logits=logits,
                 targets=targets,
                 mask=mask,
                 step_weights=step_weights.to(device),
                 mate_weights=mate_weights,
-                criterion=criterion,
             )
             batch_rows = int(tokens.shape[0])
             total_rows += batch_rows
@@ -504,7 +531,7 @@ def train_dual_sequence_model_from_jsonl_paths(
     dropout: float = 0.15,
     use_side_to_move_feature: bool = True,
     side_to_move_embed_dim: int = 4,
-    step_loss_decay: float = 1.0,
+    step_loss_decay: float = 0.9,
     runtime_min_context: int = 8,
     runtime_min_target: int = 1,
     runtime_max_samples_per_game: int = 0,
@@ -513,11 +540,16 @@ def train_dual_sequence_model_from_jsonl_paths(
     mate_bias_enabled: bool = True,
     mate_in_x: int = 3,
     mate_weight: float = 1.25,
+    model_family: str = MODEL_FAMILY_DUAL_SEQUENCE,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     random.seed(int(seed))
     torch.manual_seed(int(seed))
     schema = _sniff_paths_schema(list(train_paths) + list(val_paths))
+    model_family_norm = str(model_family or MODEL_FAMILY_DUAL_SEQUENCE).strip().lower()
+    if model_family_norm not in {MODEL_FAMILY_DUAL_SEQUENCE, MODEL_FAMILY_DUAL_SEQUENCE_BOARD}:
+        raise ValueError(f"Unsupported model_family: {model_family}")
+    use_board_state_feature = bool(model_family_norm == MODEL_FAMILY_DUAL_SEQUENCE_BOARD)
     device = torch.device(device_str)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False")
@@ -578,6 +610,7 @@ def train_dual_sequence_model_from_jsonl_paths(
         mate_bias_enabled=mate_bias_enabled,
         mate_in_x=mate_in_x,
         mate_weight=mate_weight,
+        include_board_state=use_board_state_feature,
     )
     val_ds = IndexedDualSequenceDataset(
         paths=val_path_strs,
@@ -590,6 +623,7 @@ def train_dual_sequence_model_from_jsonl_paths(
         mate_bias_enabled=mate_bias_enabled,
         mate_in_x=mate_in_x,
         mate_weight=mate_weight,
+        include_board_state=use_board_state_feature,
     )
     train_loader = DataLoader(
         train_ds,
@@ -606,18 +640,30 @@ def train_dual_sequence_model_from_jsonl_paths(
         collate_fn=collate_dual_sequence_batch,
     )
 
-    model = NextMoveSeqLSTM(
-        vocab_size=len(vocab),
-        horizon=int(horizon),
-        embed_dim=int(embed_dim),
-        hidden_dim=int(hidden_dim),
-        num_layers=int(num_layers),
-        dropout=float(dropout),
-        side_to_move_embed_dim=int(side_to_move_embed_dim),
-        use_side_to_move=bool(use_side_to_move_feature),
-    ).to(device)
+    if use_board_state_feature:
+        model = NextMoveSeqBoardLSTM(
+            vocab_size=len(vocab),
+            horizon=int(horizon),
+            embed_dim=int(embed_dim),
+            hidden_dim=int(hidden_dim),
+            num_layers=int(num_layers),
+            dropout=float(dropout),
+            side_to_move_embed_dim=int(side_to_move_embed_dim),
+            use_side_to_move=bool(use_side_to_move_feature),
+            board_feature_planes=BOARD_FEATURE_PLANES,
+        ).to(device)
+    else:
+        model = NextMoveSeqLSTM(
+            vocab_size=len(vocab),
+            horizon=int(horizon),
+            embed_dim=int(embed_dim),
+            hidden_dim=int(hidden_dim),
+            num_layers=int(num_layers),
+            dropout=float(dropout),
+            side_to_move_embed_dim=int(side_to_move_embed_dim),
+            use_side_to_move=bool(use_side_to_move_feature),
+        ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
-    criterion = nn.CrossEntropyLoss(reduction="none")
     step_weights = _build_step_weights(int(horizon), float(step_loss_decay)).to(device)
 
     history: List[Dict[str, Any]] = []
@@ -629,7 +675,12 @@ def train_dual_sequence_model_from_jsonl_paths(
         running = 0.0
         seen_rows = 0
         for batch in train_loader:
-            tokens, lengths, sides, targets, mask, mate_weights = batch
+            if use_board_state_feature:
+                tokens, lengths, sides, targets, mask, mate_weights, board_states = batch
+                board_states = board_states.to(device)
+            else:
+                tokens, lengths, sides, targets, mask, mate_weights = batch
+                board_states = None
             tokens = tokens.to(device)
             lengths = lengths.to(device)
             sides = sides.to(device)
@@ -637,14 +688,16 @@ def train_dual_sequence_model_from_jsonl_paths(
             mask = mask.to(device)
             mate_weights = mate_weights.to(device)
             optimizer.zero_grad(set_to_none=True)
-            logits = model(tokens, lengths, sides)
+            if use_board_state_feature:
+                logits = model(tokens, lengths, sides, board_state=board_states)
+            else:
+                logits = model(tokens, lengths, sides)
             loss = _masked_sequence_loss(
                 logits=logits,
                 targets=targets,
                 mask=mask,
                 step_weights=step_weights,
                 mate_weights=mate_weights,
-                criterion=criterion,
             )
             loss.backward()
             optimizer.step()
@@ -657,7 +710,7 @@ def train_dual_sequence_model_from_jsonl_paths(
             loader=val_loader,
             device=device,
             step_weights=step_weights,
-            criterion=criterion,
+            use_board_state_feature=use_board_state_feature,
         )
         row = {
             "epoch": int(epoch),
@@ -682,26 +735,32 @@ def train_dual_sequence_model_from_jsonl_paths(
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    model_config = {
+        "horizon": int(horizon),
+        "embed_dim": int(embed_dim),
+        "hidden_dim": int(hidden_dim),
+        "num_layers": int(num_layers),
+        "dropout": float(dropout),
+        "use_side_to_move": bool(use_side_to_move_feature),
+        "side_to_move_embed_dim": int(side_to_move_embed_dim),
+    }
+    if use_board_state_feature:
+        model_config["board_feature_planes"] = int(BOARD_FEATURE_PLANES)
+
     artifact = {
         "artifact_format_version": 1,
-        "model_family": "dual_side_sequence_lstm",
+        "model_family": str(model_family_norm),
         "training_objective": "one_shot_sequence_match",
         "model_side": str(model_side).strip().lower(),
         "state_dict": model.state_dict(),
         "vocab": vocab,
-        "config": {
-            "horizon": int(horizon),
-            "embed_dim": int(embed_dim),
-            "hidden_dim": int(hidden_dim),
-            "num_layers": int(num_layers),
-            "dropout": float(dropout),
-            "use_side_to_move": bool(use_side_to_move_feature),
-            "side_to_move_embed_dim": int(side_to_move_embed_dim),
-        },
+        "config": model_config,
         "runtime": {
             "device": str(device),
             "schema": str(schema),
             "step_loss_decay": float(step_loss_decay),
+            "sequence_loss_mode": "target_probability_distance",
+            "use_board_state_feature": bool(use_board_state_feature),
             "mate_bias_enabled": bool(mate_bias_enabled),
             "mate_in_x": int(mate_in_x),
             "mate_weight": float(mate_weight),
@@ -713,7 +772,7 @@ def train_dual_sequence_model_from_jsonl_paths(
 
     final_metrics: Dict[str, Any] = {
         "model_side": str(model_side).strip().lower(),
-        "model_family": "dual_side_sequence_lstm",
+        "model_family": str(model_family_norm),
         "training_objective": "one_shot_sequence_match",
         "schema": str(schema),
         "seed": int(seed),
@@ -735,6 +794,8 @@ def train_dual_sequence_model_from_jsonl_paths(
             "max_samples_per_game": int(runtime_max_samples_per_game),
         },
         "step_loss_decay": float(step_loss_decay),
+        "sequence_loss_mode": "target_probability_distance",
+        "use_board_state_feature": bool(use_board_state_feature),
         "mate_bias_enabled": bool(mate_bias_enabled),
         "mate_in_x": int(mate_in_x),
         "mate_weight": float(mate_weight),
